@@ -18,6 +18,8 @@ def sanitize_text(value):
     """Sanitize free-text input to prevent stored XSS."""
     if not value or not isinstance(value, str):
         return value
+    import re as _re
+    value = _re.sub(r'<[^>]+>', '', value)  # Strip HTML tags
     return html_module.escape(value, quote=True)
 import sys
 from pathlib import Path
