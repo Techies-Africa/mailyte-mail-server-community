@@ -1,0 +1,261 @@
+
+#
+# Postfix Main Configuration File
+# This file contains the primary configuration for the Postfix SMTP server
+# including virtual domains, TLS security, authentication, and performance settings
+#
+
+# =============================================================================
+# BASIC SERVER IDENTIFICATION
+# =============================================================================
+
+# Primary hostname for this mail server - should match DNS A record
+# This appears in SMTP banners and is used for HELO/EHLO
+myhostname = $HOSTNAME
+
+# Default domain for unqualified addresses
+# Mail from users without @domain will get this domain appended
+mydomain = $mydomain
+
+# Domain used for mail originating from this server
+myorigin = $mydomain
+
+# Domains for which this server accepts mail for local delivery
+# For virtual hosting, we only accept localhost for system mail
+mydestination = localhost
+
+# =============================================================================
+# NETWORK CONFIGURATION
+# =============================================================================
+
+# Listen on all network interfaces (0.0.0.0 for Docker compatibility)
+inet_interfaces = all
+
+# Support both IPv4 and IPv6 protocols
+inet_protocols = all
+
+# =============================================================================
+# VIRTUAL DOMAINS CONFIGURATION
+# Virtual domains allow hosting multiple email domains on one server
+# All domain/user data is stored in MySQL database
+# =============================================================================
+
+# MySQL query to determine which domains we accept mail for
+# Returns domain names that are active in the database
+virtual_mailbox_domains = mysql:/etc/postfix/mysql-virtual-mailbox-domains.cf
+
+# MySQL query to map email addresses to mailbox paths
+# Returns the mailbox path for valid user email addresses
+virtual_mailbox_maps = mysql:/etc/postfix/mysql-virtual-mailbox-maps.cf
+
+# MySQL query for email aliases and forwarding
+# Returns destination addresses for aliases (forwarding rules)
+virtual_alias_maps = mysql:/etc/postfix/mysql-virtual-alias-maps.cf
+
+# Base directory where all virtual mailboxes are stored
+# Structure: /var/mail/vhosts/domain.com/username/
+virtual_mailbox_base = /var/mail/vhosts
+
+# Minimum user ID for virtual mailbox delivery (security)
+virtual_minimum_uid = 100
+
+# Static user ID for all virtual mailboxes (vmail user)
+virtual_uid_maps = static:5000
+
+# Static group ID for all virtual mailboxes (vmail group)
+virtual_gid_maps = static:5000
+
+# =============================================================================
+# SMTP PROTOCOL CONFIGURATION
+# =============================================================================
+
+# Custom SMTP banner (remove version info for security)
+smtpd_banner = $myhostname ESMTP
+
+# Disable new mail notifications (not needed for server)
+biff = no
+
+# Don't automatically append domain to unqualified addresses
+append_dot_mydomain = no
+
+# Disable README directory (security)
+readme_directory = no
+
+# Postfix compatibility level (3.6 for modern features)
+compatibility_level = 3.6
+
+# =============================================================================
+# TLS/SSL ENCRYPTION CONFIGURATION
+# Strong encryption settings to protect email in transit
+# =============================================================================
+
+# INBOUND TLS (when receiving mail from other servers)
+# Path to SSL certificate file
+smtpd_tls_cert_file = /etc/ssl/certs/server.crt
+
+# Path to SSL private key file
+smtpd_tls_key_file = /etc/ssl/certs/server.key
+
+# TLS security level: 'may' = opportunistic (use TLS if available)
+smtpd_tls_security_level = may
+
+# Require authentication only over encrypted connections
+smtpd_tls_auth_only = yes
+
+# Disable weak/insecure SSL/TLS protocol versions
+smtpd_tls_protocols = !SSLv2,!SSLv3,!TLSv1,!TLSv1.1
+
+# Use only high-grade cipher suites
+smtpd_tls_ciphers = high
+
+# Explicitly exclude weak/broken ciphers
+smtpd_tls_exclude_ciphers = aNULL, MD5, DES, RC4, 3DES
+
+# OUTBOUND TLS (when sending mail to other servers)
+# Use TLS when available for outgoing mail
+smtp_tls_security_level = may
+
+# Same protocol restrictions for outbound connections
+smtp_tls_protocols = !SSLv2,!SSLv3,!TLSv1,!TLSv1.1
+
+# Same cipher restrictions for outbound connections
+smtp_tls_ciphers = high
+
+# =============================================================================
+# SASL AUTHENTICATION CONFIGURATION
+# Integration with Dovecot for user authentication
+# =============================================================================
+
+# Use Dovecot as the SASL authentication provider
+smtpd_sasl_type = dovecot
+
+# Path to Dovecot authentication socket
+smtpd_sasl_path = private/auth
+
+# Enable SASL authentication for SMTP submission
+smtpd_sasl_auth_enable = yes
+
+# Require proper authentication (no anonymous access)
+smtpd_sasl_security_options = noanonymous
+
+# Use server hostname for SASL realm
+smtpd_sasl_local_domain = $myhostname
+
+# =============================================================================
+# ACCESS CONTROL AND ANTI-SPAM RESTRICTIONS
+# Multilayered security to prevent spam and unauthorized relay
+# =============================================================================
+
+# CLIENT CONNECTION RESTRICTIONS
+# Controls who can connect to the SMTP server
+smtpd_client_restrictions = 
+    permit_mynetworks,           # Allow connections from trusted networks
+    permit_sasl_authenticated,   # Allow authenticated users
+    reject_rbl_client zen.spamhaus.org  # Block known spam sources
+
+# RECIPIENT RESTRICTIONS  
+# Controls who can receive mail through this server
+smtpd_recipient_restrictions = 
+    permit_mynetworks,           # Allow local network
+    permit_sasl_authenticated,   # Allow authenticated users
+    reject_unauth_destination,   # Reject unauthorized relay attempts
+    reject_rbl_client zen.spamhaus.org  # Block spam sources
+
+# SENDER RESTRICTIONS
+# Apply rate limiting policy to prevent abuse
+smtpd_sender_restrictions = check_policy_service unix:private/policy-rate-limit
+
+# =============================================================================
+# RATE LIMITING AND PERFORMANCE CONTROLS
+# Prevent server abuse and ensure fair resource usage
+# =============================================================================
+
+# Maximum message size: 50MB (52,428,800 bytes)
+message_size_limit = 52428800
+
+# Maximum mailbox size: 5GB (5,368,709,120 bytes)
+mailbox_size_limit = 5368709120
+
+# Maximum number of Postfix daemon processes
+default_process_limit = 100
+
+# RATE LIMITING SETTINGS
+# Connection rate: max 30 connections per minute per client IP
+smtpd_client_connection_rate_limit = 30
+
+# Concurrent connections: max 50 simultaneous connections per client IP
+smtpd_client_connection_count_limit = 50
+
+# Message rate: max 100 messages per minute per client IP
+smtpd_client_message_rate_limit = 100
+
+# Recipient rate: max 200 recipients per minute per client IP
+smtpd_client_recipient_rate_limit = 200
+
+# Time window for rate limiting (60 seconds)
+anvil_rate_time_unit = 60s
+
+# =============================================================================
+# EMAIL TRACKING CONFIGURATION
+# Content filtering for automatic tracking pixel and link injection
+# Only applied to authenticated submissions (port 587)
+# =============================================================================
+
+# Content filter is disabled by default here
+# It's enabled per-service in master.cf for submission port only
+content_filter = 
+
+# Environment variables passed to tracking scripts
+# These control the behavior of automatic tracking injection
+tracking_service_enabled = yes
+tracking_service_url = http://tracking:8086
+tracking_default_tenant = default
+tracking_default_domain = default
+
+# =============================================================================
+# MILTER INTEGRATION (RSPAMD ANTI-SPAM)
+# Integration with Rspamd for spam filtering and DKIM signing
+# =============================================================================
+
+# Rspamd milter for incoming mail (spam filtering)
+smtpd_milters = inet:rspamd:11332
+
+# Rspamd milter for outgoing mail (DKIM signing)
+non_smtpd_milters = inet:rspamd:11332
+
+# Milter protocol version 6 (latest)
+milter_protocol = 6
+
+# Macros passed to milter (client info, authentication status)
+milter_mail_macros = i {mail_addr} {client_addr} {client_name} {auth_authen}
+
+# Default action if milter fails: accept mail (fail-open for reliability)
+milter_default_action = accept
+
+# =============================================================================
+# WEBHOOK NOTIFICATION SYSTEM
+# Content filter for sending webhook notifications about email events
+# =============================================================================
+
+# Webhook filter is applied after primary processing
+# This sends notifications about incoming/outgoing mail to external systems
+# Filter only processes one recipient at a time for accurate tracking
+webhook-filter_destination_recipient_limit = 1
+
+# =============================================================================
+# SECURITY NOTES
+# =============================================================================
+# 1. All passwords should be stored in separate files with proper permissions
+# 2. SSL certificates should be regularly renewed
+# 3. Rate limits should be adjusted based on legitimate usage patterns
+# 4. RBL lists should be monitored for false positives
+# 5. Log files should be regularly rotated and monitored
+# 6. Backup configurations should be tested regularly
+#
+# MAINTENANCE COMMANDS:
+# - postfix check          # Validate configuration
+# - postfix reload         # Apply configuration changes
+# - postconf -n           # Show non-default settings
+# - postqueue -p          # Show mail queue
+# - mailq                 # Show mail queue (alternative)
+# =============================================================================

@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div style="text-align: center; padding: 4rem 2rem;">
+  <div style="font-size: 6rem; margin-bottom: 1rem;">
+    :material-email-off:
+  </div>
+  <h1 style="font-size: 2rem; margin-bottom: 0.5rem;">Page not found</h1>
+  <p style="font-size: 1.1rem; color: var(--md-default-fg-color--light); max-width: 28rem; margin: 0 auto 2rem;">
+    This page doesn't exist — it may have moved or you might have a typo in the URL.
+  </p>
+  <div style="display: flex; gap: 1rem; justify-content: center; flex-wrap: wrap;">
+    <a href="{{ config.site_url }}" class="md-button md-button--primary">
+      Go to homepage
+    </a>
+    <a href="{{ config.site_url }}getting-started/" class="md-button">
+      Getting started
+    </a>
+    <a href="{{ config.site_url }}api/" class="md-button">
+      API Reference
+    </a>
+  </div>
+</div>
+{% endblock %}

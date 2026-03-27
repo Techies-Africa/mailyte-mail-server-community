@@ -1,0 +1,435 @@
+/* ============================================================================
+   Mailyte Email Server Handbook — Custom Theme
+   Brand colors: Gold #EBAE13, Dark #09090B, Blue #193FFF
+   ============================================================================ */
+
+/* --------------------------------------------------------------------------
+   Color Palette
+   -------------------------------------------------------------------------- */
+:root {
+  /* Mailyte brand */
+  --ml-brand: #EBAE13;
+  --ml-brand-light: #F5C842;
+  --ml-brand-dark: #DBA500;
+  --ml-accent: #FF9900;
+  --ml-blue: #193FFF;
+  --ml-success: #10b981;
+  --ml-warning: #f59e0b;
+  --ml-danger: #ef4444;
+
+  /* Material overrides */
+  --md-primary-fg-color: #09090B !important;
+  --md-primary-fg-color--light: #111114 !important;
+  --md-primary-fg-color--dark: #000 !important;
+  --md-accent-fg-color: #EBAE13 !important;
+  --md-typeset-a-color: #DBA500 !important;
+}
+
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color: #09090B !important;
+  --md-primary-fg-color--light: #111114 !important;
+  --md-primary-fg-color--dark: #000 !important;
+  --md-accent-fg-color: #EBAE13 !important;
+  --md-default-bg-color: #0d0d10 !important;
+  --md-typeset-a-color: #EBAE13 !important;
+}
+
+[data-md-color-scheme="default"] {
+  --md-primary-fg-color: #09090B !important;
+  --md-primary-fg-color--light: #1a1a2e !important;
+  --md-primary-fg-color--dark: #000 !important;
+  --md-accent-fg-color: #EBAE13 !important;
+  --md-typeset-a-color: #DBA500 !important;
+}
+
+/* --------------------------------------------------------------------------
+   Typography — smaller, system font
+   -------------------------------------------------------------------------- */
+:root {
+  --md-text-font: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --md-code-font: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.md-typeset {
+  font-size: 0.76rem;
+  line-height: 1.65;
+}
+
+.md-typeset h1 {
+  font-size: 1.6rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  margin-bottom: 0.6em;
+}
+
+.md-typeset h2 {
+  font-size: 1.2rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin-top: 1.8em;
+  padding-bottom: 0.3em;
+  border-bottom: 1px solid var(--md-default-fg-color--lightest);
+}
+
+.md-typeset h3 {
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.md-typeset h4 {
+  font-size: 0.88rem;
+  font-weight: 600;
+}
+
+/* --------------------------------------------------------------------------
+   Header — dark with gold accent
+   -------------------------------------------------------------------------- */
+.md-header {
+  background: #09090B;
+  box-shadow: 0 1px 0 rgba(235, 174, 19, 0.1);
+}
+
+.md-header__title {
+  font-weight: 700;
+  font-size: 0.82rem;
+}
+
+/* Tab bar */
+.md-tabs {
+  background: #111114;
+}
+
+.md-tabs__link {
+  font-size: 0.72rem;
+  opacity: 0.7;
+}
+
+.md-tabs__link--active,
+.md-tabs__link:hover {
+  opacity: 1;
+  color: var(--ml-brand);
+}
+
+/* --------------------------------------------------------------------------
+   Navigation
+   -------------------------------------------------------------------------- */
+.md-nav__title {
+  font-weight: 700;
+  text-transform: uppercase;
+  font-size: 0.6rem;
+  letter-spacing: 0.08em;
+  opacity: 0.6;
+}
+
+.md-nav__item--active > .md-nav__link {
+  font-weight: 600;
+  color: var(--ml-brand);
+}
+
+.md-sidebar__scrollwrap {
+  scrollbar-width: thin;
+  scrollbar-color: var(--md-default-fg-color--lightest) transparent;
+}
+
+/* --------------------------------------------------------------------------
+   Cards
+   -------------------------------------------------------------------------- */
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 1rem;
+  margin: 1.5rem 0;
+}
+
+.grid.cards > * {
+  border: 1px solid var(--md-default-fg-color--lightest);
+  border-radius: 0.6rem;
+  padding: 1.1rem 1.3rem;
+  transition: all 0.25s;
+  background: var(--md-default-bg-color);
+}
+
+.grid.cards > *:hover {
+  border-color: var(--ml-brand);
+  box-shadow: 0 4px 12px rgba(235, 174, 19, 0.08);
+  transform: translateY(-2px);
+}
+
+.grid.cards .lg {
+  font-size: 1.8rem;
+}
+
+/* --------------------------------------------------------------------------
+   Code blocks
+   -------------------------------------------------------------------------- */
+.md-typeset code {
+  border-radius: 0.2rem;
+  padding: 0.1em 0.3em;
+  font-size: 0.78em;
+}
+
+.md-typeset pre {
+  border-radius: 0.4rem;
+  overflow: hidden;
+}
+
+.md-typeset pre > code {
+  font-size: 0.72rem;
+  line-height: 1.6;
+}
+
+/* --------------------------------------------------------------------------
+   Admonitions
+   -------------------------------------------------------------------------- */
+.md-typeset .admonition,
+.md-typeset details {
+  border-radius: 0.4rem;
+  border-width: 0;
+  border-left: 3px solid;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+  font-size: 0.76rem;
+}
+
+.md-typeset .admonition-title,
+.md-typeset summary {
+  border-radius: 0.4rem 0.4rem 0 0;
+  font-weight: 600;
+  font-size: 0.76rem;
+}
+
+/* --------------------------------------------------------------------------
+   Tables
+   -------------------------------------------------------------------------- */
+.md-typeset table:not([class]) {
+  font-size: 0.73rem;
+  border-collapse: separate;
+  border-spacing: 0;
+  border-radius: 0.4rem;
+  overflow: hidden;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+
+.md-typeset table:not([class]) th {
+  background-color: #1a1a2e;
+  color: #F9F9F9;
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 0.65rem;
+  letter-spacing: 0.05em;
+  padding: 0.65rem 0.85rem;
+}
+
+[data-md-color-scheme="slate"] .md-typeset table:not([class]) th {
+  background-color: #111114;
+  color: var(--ml-brand);
+}
+
+.md-typeset table:not([class]) td {
+  padding: 0.55rem 0.85rem;
+  border-bottom: 1px solid var(--md-default-fg-color--lightest);
+}
+
+.md-typeset table:not([class]) tr:last-child td {
+  border-bottom: none;
+}
+
+.md-typeset table:not([class]) tbody tr:hover {
+  background-color: rgba(235, 174, 19, 0.03);
+}
+
+/* --------------------------------------------------------------------------
+   Status badges
+   -------------------------------------------------------------------------- */
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.65rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  line-height: 1.6;
+}
+
+.status-badge.stable {
+  background: linear-gradient(135deg, #d1fae5, #a7f3d0);
+  color: #065f46;
+}
+
+.status-badge.beta {
+  background: linear-gradient(135deg, #fef3c7, #fde68a);
+  color: #92400e;
+}
+
+.status-badge.dev {
+  background: linear-gradient(135deg, #FFF3D1, #FFE3A3);
+  color: #92400e;
+}
+
+.status-badge.deprecated {
+  background: linear-gradient(135deg, #fee2e2, #fecaca);
+  color: #991b1b;
+}
+
+/* --------------------------------------------------------------------------
+   API endpoint blocks
+   -------------------------------------------------------------------------- */
+.api-endpoint {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  background: var(--md-code-bg-color);
+  border-left: 3px solid var(--ml-brand);
+  padding: 0.5rem 0.85rem;
+  margin: 0.8rem 0;
+  border-radius: 0 0.35rem 0.35rem 0;
+  font-family: var(--md-code-font);
+  font-size: 0.78rem;
+}
+
+.api-method {
+  display: inline-block;
+  padding: 0.12rem 0.45rem;
+  border-radius: 0.2rem;
+  font-weight: 700;
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  min-width: 3.2rem;
+  text-align: center;
+}
+
+.api-method.get    { background: #dbeafe; color: #1e40af; }
+.api-method.post   { background: #d1fae5; color: #065f46; }
+.api-method.put    { background: #fef3c7; color: #92400e; }
+.api-method.patch  { background: #fef3c7; color: #92400e; }
+.api-method.delete { background: #fee2e2; color: #991b1b; }
+
+/* --------------------------------------------------------------------------
+   Mermaid diagrams
+   -------------------------------------------------------------------------- */
+.mermaid {
+  margin: 1.2rem 0;
+}
+
+.mermaid svg {
+  max-width: 100%;
+  border-radius: 0.4rem;
+}
+
+/* --------------------------------------------------------------------------
+   Search
+   -------------------------------------------------------------------------- */
+.md-search__input {
+  border-radius: 0.4rem;
+  font-size: 0.78rem;
+}
+
+/* --------------------------------------------------------------------------
+   Footer
+   -------------------------------------------------------------------------- */
+.md-footer {
+  border-top: 1px solid rgba(235, 174, 19, 0.1);
+}
+
+/* --------------------------------------------------------------------------
+   Content
+   -------------------------------------------------------------------------- */
+.md-content__inner {
+  padding-top: 1.2rem;
+}
+
+.md-typeset p {
+  margin-bottom: 0.75em;
+}
+
+.md-typeset li {
+  margin-bottom: 0.25em;
+}
+
+/* --------------------------------------------------------------------------
+   Tabs
+   -------------------------------------------------------------------------- */
+.md-typeset .tabbed-labels > label {
+  border-radius: 0.35rem 0.35rem 0 0;
+  font-weight: 600;
+  font-size: 0.72rem;
+}
+
+/* --------------------------------------------------------------------------
+   Links — gold accent
+   -------------------------------------------------------------------------- */
+.md-typeset a {
+  color: var(--ml-brand-dark);
+}
+
+.md-typeset a:hover {
+  color: var(--ml-brand);
+}
+
+[data-md-color-scheme="slate"] .md-typeset a {
+  color: var(--ml-brand);
+}
+
+[data-md-color-scheme="slate"] .md-typeset a:hover {
+  color: var(--ml-brand-light);
+}
+
+/* --------------------------------------------------------------------------
+   Selection
+   -------------------------------------------------------------------------- */
+::selection {
+  background: rgba(235, 174, 19, 0.2);
+}
+
+/* --------------------------------------------------------------------------
+   Announcement bar
+   -------------------------------------------------------------------------- */
+.md-banner {
+  background: linear-gradient(135deg, #09090B, #1a1a2e);
+  color: var(--ml-brand);
+  font-size: 0.72rem;
+  font-weight: 500;
+}
+
+/* --------------------------------------------------------------------------
+   Responsive
+   -------------------------------------------------------------------------- */
+@media screen and (max-width: 768px) {
+  .grid {
+    grid-template-columns: 1fr;
+  }
+
+  .md-typeset {
+    font-size: 0.74rem;
+  }
+
+  .md-typeset table:not([class]) {
+    font-size: 0.68rem;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   Print
+   -------------------------------------------------------------------------- */
+@media print {
+  .md-header, .md-sidebar, .md-footer, .md-tabs {
+    display: none !important;
+  }
+  .md-content {
+    margin: 0;
+    max-width: 100%;
+  }
+  .md-typeset .admonition {
+    break-inside: avoid;
+  }
+}
+
+/* --------------------------------------------------------------------------
+   Smooth scroll
+   -------------------------------------------------------------------------- */
+html {
+  scroll-behavior: smooth;
+}

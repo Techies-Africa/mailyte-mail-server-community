@@ -1,0 +1,26 @@
+
+driver = mysql
+connect = host=${DB_HOST} port=${DB_PORT} dbname=${DB_NAME} user=${DB_USER} password=${DB_PASSWORD}
+
+default_pass_scheme = BLF-CRYPT
+
+# Authenticate user: look up password from email_accounts table
+password_query = SELECT email as user, password FROM email_accounts WHERE email='%u' AND status = 'active'
+
+# Get user mailbox location, UID/GID, and per-user quota
+# If storage_quota is NULL or 0, returns NULL so Dovecot uses the default (5GB)
+user_query = SELECT \
+  CONCAT('/var/mail/vhosts/', d.domain, '/', ea.local_part) as home, \
+  CONCAT('maildir:/var/mail/vhosts/', d.domain, '/', ea.local_part) as mail, \
+  5000 AS uid, \
+  5000 AS gid, \
+  CASE WHEN ea.storage_quota > 0 \
+    THEN CONCAT('*:storage=', ea.storage_quota, 'B') \
+    ELSE NULL \
+  END as quota_rule \
+FROM email_accounts ea \
+JOIN domains d ON ea.domain_id = d.id \
+WHERE ea.email='%u' AND ea.status = 'active'
+
+# Iterate all active users (for FTS indexing, quota recalc)
+iterate_query = SELECT email AS user FROM email_accounts WHERE status = 'active'

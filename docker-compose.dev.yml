@@ -1,0 +1,21 @@
+services:
+  # ==========================================================================
+  # Development overrides — all services use uvicorn with hot-reload
+  # ==========================================================================
+
+  # Postfix: disable postscreen DNSBL and DNS lookups for dev
+  postfix:
+    environment:
+      - POSTFIX_DEV_MODE=true
+
+  api:
+    command: ["python", "-m", "uvicorn", "app:app", "--host=0.0.0.0", "--port=8080", "--reload"]
+
+  tracking:
+    command: ["python", "-m", "uvicorn", "app:app", "--host=0.0.0.0", "--port=8086", "--reload"]
+
+  webhooks:
+    command: ["python", "-m", "uvicorn", "app:app", "--host=0.0.0.0", "--port=8081", "--reload"]
+
+  rate_limiter:
+    command: ["python", "-m", "uvicorn", "app:app", "--host=0.0.0.0", "--port=8082", "--reload"]

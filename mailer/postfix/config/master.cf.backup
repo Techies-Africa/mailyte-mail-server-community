@@ -1,0 +1,250 @@
+
+#
+# Postfix Master Process Configuration File
+# This file defines all Postfix services, their properties, and how they interact
+# Each line defines a service with its type, privileges, and command parameters
+#
+# Format: service type private unpriv chroot wakeup maxproc command + args
+#         service: service name or inet port
+#         type:    inet (network) or unix (local socket)
+#         private: y=private socket, n=public socket
+#         unpriv:  y=run as unprivileged user, n=run as root
+#         chroot:  y=run in chroot jail, n=normal filesystem
+#         wakeup:  automatic wakeup timer (never=disabled)
+#         maxproc: maximum number of processes (default=100)
+# ==========================================================================
+
+# =============================================================================
+# STANDARD SMTP SERVICE (Port 25)
+# Primary service for receiving mail from other mail servers
+# No authentication required, relies on IP-based trust and anti-spam filters
+# =============================================================================
+smtp      inet  n       -       y       -       -       smtpd
+# n: public socket (accessible from network)
+# -: default privilege settings
+# y: run in chroot jail for security
+# -: no automatic wakeup
+# -: default max processes (100)
+# smtpd: the SMTP daemon process
+
+# =============================================================================
+# ENHANCED SMTP SERVICES (Commented out - can be enabled for advanced setups)
+# =============================================================================
+# Postscreen service for enhanced spam protection
+#smtp      inet  n       -       y       -       1       postscreen
+#smtpd     pass  -       -       y       -       -       smtpd
+#dnsblog   unix  -       -       y       -       0       dnsblog
+#tlsproxy  unix  -       -       y       -       0       tlsproxy
+
+# =============================================================================
+# SUBMISSION SERVICE (Port 587)
+# Used by email clients to send mail - requires authentication and TLS
+# This service includes automatic email tracking for authenticated users
+# =============================================================================
+submission inet n       -       y       -       -       smtpd
+  # Service-specific overrides for submission port:
+  -o syslog_name=postfix/submission          # Separate log identification
+  -o smtpd_tls_security_level=encrypt        # REQUIRE TLS encryption
+  -o smtpd_sasl_auth_enable=yes              # REQUIRE authentication
+  -o smtpd_tls_auth_only=yes                 # Auth only over TLS
+  -o smtpd_reject_unlisted_recipient=no      # Allow external recipients
+  -o smtpd_client_restrictions=$mua_client_restrictions    # MUA-specific rules
+  -o smtpd_helo_restrictions=$mua_helo_restrictions        # MUA-specific HELO rules
+  -o smtpd_sender_restrictions=$mua_sender_restrictions    # MUA-specific sender rules
+  -o smtpd_recipient_restrictions=           # No recipient restrictions for authenticated users
+  -o smtpd_relay_restrictions=permit_sasl_authenticated,reject  # Only allow auth'd relay
+  -o milter_macro_daemon_name=ORIGINATING    # Mark as originating mail for milters
+  -o content_filter=tracking-filter:         # Apply tracking filter to outgoing mail
+
+# =============================================================================
+# EMAIL TRACKING CONTENT FILTER
+# Processes outgoing emails to inject tracking pixels and rewrite links
+# Scaled for high throughput with 25 concurrent processes
+# =============================================================================
+tracking-filter unix -  n       n       -       25      pipe
+  # Service configuration:
+  # unix: local socket communication
+  # -: don't create public socket  
+  # n: don't drop privileges (needs DB access)
+  # n: don't chroot (needs network access to tracking service)
+  # -: no wakeup timer
+  # 25: allow up to 25 concurrent tracking processes (scaled for performance)
+  # pipe: pipe transport (stdin/stdout communication)
+  
+  # Pipe transport flags and command:
+  flags=Rq                                    # R=restrict sender, q=quote local parts
+  user=postfix                                # Run as postfix user for security
+  argv=/usr/local/bin/tracking_injector.py   # Python script that handles tracking injection
+
+# =============================================================================
+# POST-TRACKING DELIVERY SERVICE
+# Receives mail after tracking injection and delivers it normally
+# This creates a two-stage delivery process: original -> tracking -> final delivery
+# =============================================================================
+127.0.0.1:10026 inet n  -       y       -       -       smtpd
+  # Service-specific overrides for post-tracking delivery:
+  -o syslog_name=postfix/tracking-after      # Separate log identification
+  -o content_filter=                         # NO content filtering (already processed)
+  -o local_recipient_maps=                   # No local recipient restrictions
+  -o relay_recipient_maps=                   # No relay recipient restrictions
+  -o smtpd_restriction_classes=              # No restriction classes
+  -o smtpd_delay_reject=no                   # Don't delay rejection decisions
+  -o smtpd_client_restrictions=permit_mynetworks,reject  # Only allow local connections
+  -o smtpd_helo_restrictions=                # No HELO restrictions
+  -o smtpd_sender_restrictions=              # No sender restrictions  
+  -o smtpd_recipient_restrictions=permit_mynetworks,reject  # Only local recipients
+  -o smtpd_end_of_data_restrictions=         # No end-of-data restrictions
+  -o smtpd_error_sleep_time=0                # No delay on errors (internal service)
+  -o smtpd_soft_error_limit=1001             # High soft error limit
+  -o smtpd_hard_error_limit=1000             # High hard error limit
+  -o smtpd_client_connection_count_limit=0   # No connection count limit
+  -o smtpd_client_connection_rate_limit=0    # No connection rate limit
+  -o receive_override_options=no_header_body_checks,no_unknown_recipient_checks  # Skip checks
+
+# =============================================================================
+# SECURE SUBMISSION SERVICE (Port 465) - Currently Disabled
+# SMTPS with implicit TLS - can be enabled if needed
+# =============================================================================
+#smtps     inet  n       -       y       -       -       smtpd
+#  -o syslog_name=postfix/smtps               # Separate logging
+#  -o smtpd_tls_wrappermode=yes               # Implicit TLS mode
+#  -o smtpd_sasl_auth_enable=yes              # Require authentication
+#  -o smtpd_reject_unlisted_recipient=no      # Allow external recipients
+#  -o smtpd_client_restrictions=$mua_client_restrictions
+#  -o smtpd_helo_restrictions=$mua_helo_restrictions
+#  -o smtpd_sender_restrictions=$mua_sender_restrictions
+#  -o smtpd_recipient_restrictions=
+#  -o smtpd_relay_restrictions=permit_sasl_authenticated,reject
+#  -o milter_macro_daemon_name=ORIGINATING
+
+# =============================================================================
+# CORE POSTFIX SERVICES
+# Essential services that handle mail processing, delivery, and management
+# =============================================================================
+
+# Mail pickup service - processes mail submitted via sendmail command
+pickup    unix  n       -       y       60      1       pickup
+# Wakes up every 60 seconds to check for new mail, max 1 process
+
+# Cleanup service - processes and standardizes mail headers and format
+cleanup   unix  n       -       y       -       0       cleanup
+# No process limit (0 = unlimited), critical for mail processing
+
+# Queue manager - manages mail delivery queues and retry logic
+qmgr      unix  n       -       n       300     1       qmgr
+# Wakes up every 300 seconds, exactly 1 process (queue manager is singleton)
+
+# TLS session cache manager - manages TLS session resumption cache
+tlsmgr    unix  -       -       y       1000?   1       tlsmgr
+# Wakes up every 1000 seconds if needed (?), max 1 process
+
+# Address rewriting service - canonicalizes addresses
+rewrite   unix  -       -       y       -       -       trivial-rewrite
+
+# Bounce message handling services
+bounce    unix  -       -       y       -       0       bounce    # Hard bounces
+defer     unix  -       -       y       -       0       bounce    # Soft bounces (temporary failures)
+trace     unix  -       -       y       -       0       bounce    # Delivery status traces
+
+# Address verification service - validates recipient addresses
+verify    unix  -       -       y       -       1       verify
+
+# Queue flushing service - forces immediate delivery attempts
+flush     unix  n       -       y       1000?   0       flush
+
+# Database lookup services
+proxymap  unix  -       -       n       -       -       proxymap     # Database proxy
+proxywrite unix -       -       n       -       1       proxymap     # Database write proxy
+
+# =============================================================================
+# MAIL TRANSPORT SERVICES
+# Handle actual delivery of mail to various destinations
+# =============================================================================
+
+# SMTP transport - delivers mail to remote SMTP servers
+smtp      unix  -       -       y       -       -       smtp
+
+# Relay service - handles mail relaying through smart hosts
+relay     unix  -       -       y       -       -       smtp
+
+# Administrative services
+showq     unix  n       -       y       -       -       showq      # Show mail queue
+error     unix  -       -       y       -       -       error      # Error handling
+retry     unix  -       -       y       -       -       error      # Retry handling
+discard   unix  -       -       y       -       -       discard    # Discard mail
+
+# Local delivery services
+local     unix  -       n       n       -       -       local      # Local system users
+virtual   unix  -       n       n       -       -       virtual    # Virtual mailbox users
+lmtp      unix  -       -       y       -       -       lmtp       # LMTP delivery
+
+# Infrastructure services
+anvil     unix  -       -       y       -       1       anvil      # Connection/rate limiting
+scache    unix  -       -       y       -       1       scache     # Connection caching
+
+# =============================================================================
+# WEBHOOK NOTIFICATION SYSTEM
+# Sends HTTP notifications about mail events to external systems
+# =============================================================================
+webhook-filter unix -    n       n       -       -       pipe
+  flags=Rq                                    # Restrict sender, quote local parts
+  user=vmail                                  # Run as vmail user
+  null_sender=                                # Handle null senders appropriately
+  argv=/usr/local/bin/webhook_sender.py inbound  # Script to send webhooks
+
+# =============================================================================
+# RATE LIMITING POLICY SERVICE
+# Enforces sending limits to prevent abuse and maintain reputation
+# =============================================================================
+policy-rate-limit unix -       n       n       -       -       spawn
+  user=vmail                                  # Run as vmail user for database access
+  argv=/usr/local/bin/rate_limit_policy.py   # Python script for rate limiting
+
+# =============================================================================
+# MAIL RE-INJECTION SERVICE (Alternative Configuration)
+# Secondary service for re-injecting processed mail
+# This duplicates the tracking-after service but on a different port
+# =============================================================================
+localhost:10026 inet n  -       y       -       -       smtpd
+  # Identical configuration to 127.0.0.1:10026 above
+  -o content_filter=                          # No content filtering
+  -o receive_override_options=no_unknown_recipient_checks,no_header_body_checks,no_milters
+  -o smtpd_helo_restrictions=                 # No restrictions for internal use
+  -o smtpd_client_restrictions=               # No client restrictions
+  -o smtpd_sender_restrictions=               # No sender restrictions
+  -o smtpd_recipient_restrictions=permit_mynetworks,reject  # Allow only local network
+  -o mynetworks=127.0.0.0/8                  # Define local network
+  -o smtpd_authorized_xforward_hosts=127.0.0.0/8  # Allow XFORWARD from localhost
+
+# =============================================================================
+# CONFIGURATION NOTES AND BEST PRACTICES
+# =============================================================================
+# 
+# SERVICE SCALING:
+# - tracking-filter: Increased to 25 processes for high-volume tracking
+# - Most services use default process limits appropriate for typical loads
+# - Adjust maxproc values based on actual traffic patterns
+#
+# SECURITY CONSIDERATIONS:
+# - All public services run in chroot jails where possible
+# - Internal services drop privileges when appropriate
+# - Rate limiting and connection controls prevent abuse
+#
+# MONITORING AND MAINTENANCE:
+# - Each service writes to separate log files when configured
+# - Use 'postfix status' to check service health
+# - Use 'postconf -M' to verify master.cf syntax
+# - Monitor process counts with 'ps aux | grep postfix'
+#
+# PERFORMANCE TUNING:
+# - Increase maxproc for high-traffic services
+# - Adjust wakeup timers based on mail volume
+# - Monitor queue sizes and delivery times
+# - Consider dedicated servers for high-volume installations
+#
+# TROUBLESHOOTING:
+# - Check /var/log/maillog for service-specific errors
+# - Use 'postfix reload' after configuration changes
+# - Use 'postfix stop && postfix start' for major changes
+# - Verify service startup with 'netstat -tlnp | grep :25'
+# =============================================================================

@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Features — Mailyte Email Server</title>
+    <link rel="icon" href="/static/favicon.ico" type="image/x-icon">
+    <style>
+        *{margin:0;padding:0;box-sizing:border-box}
+        body{font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#09090B;color:#F9F9F9;min-height:100vh;-webkit-font-smoothing:antialiased}
+        a{color:inherit;text-decoration:none}
+
+        .topbar{border-bottom:1px solid rgba(235,174,19,.12);padding:0 32px;height:56px;display:flex;align-items:center;justify-content:space-between;max-width:1200px;margin:0 auto}
+        .topbar .logo{display:flex;align-items:center;gap:10px;font-size:20px;font-weight:700}
+        .topbar .logo img{height:32px;width:auto}
+        .topbar .logo span{background:linear-gradient(135deg,#EBAE13,#FF9900);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+        .topbar nav{display:flex;align-items:center;gap:8px}
+        .topbar nav a{color:#A1A1A9;font-size:13px;padding:6px 12px;border-radius:6px;transition:all .2s}
+        .topbar nav a:hover{color:#EBAE13;background:rgba(235,174,19,.06)}
+        .topbar nav a.cta{background:#EBAE13;color:#09090B;font-weight:600;padding:7px 16px;border-radius:50px}
+        .topbar nav a.cta:hover{background:#DBA500}
+
+        .hero{max-width:1200px;margin:0 auto;padding:60px 32px 40px;text-align:center}
+        .hero h1{font-size:40px;font-weight:800;margin-bottom:12px;background:linear-gradient(135deg,#FFF 20%,#EBAE13 80%);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+        .hero p{font-size:16px;color:#A1A1A9;max-width:500px;margin:0 auto 40px}
+
+        .content{max-width:1200px;margin:0 auto;padding:0 32px 60px}
+
+        /* Comparison table */
+        .table-wrap{overflow-x:auto;margin-bottom:60px}
+        table{width:100%;border-collapse:collapse;font-size:14px}
+        thead th{padding:14px 16px;text-align:left;font-weight:600;font-size:12px;letter-spacing:.5px;text-transform:uppercase;color:#71717A;border-bottom:1px solid rgba(255,255,255,.08)}
+        thead th:nth-child(2){color:#EBAE13}
+        thead th:nth-child(3){color:#193FFF}
+        tbody td{padding:12px 16px;border-bottom:1px solid rgba(255,255,255,.04);color:#A1A1A9}
+        tbody td:first-child{color:#F9F9F9;font-weight:500}
+        tbody tr:hover{background:rgba(255,255,255,.02)}
+        .yes{color:#EBAE13;font-weight:600}
+        .ee{color:#193FFF;font-weight:600}
+        .no{color:#3F3F46}
+
+        /* Category headers */
+        .cat-row td{padding:18px 16px 10px;color:#EBAE13;font-weight:700;font-size:12px;letter-spacing:1px;text-transform:uppercase;border-bottom:1px solid rgba(235,174,19,.1);background:rgba(235,174,19,.02)}
+
+        .btn{display:inline-flex;align-items:center;gap:6px;padding:10px 22px;border-radius:50px;font-size:13px;font-weight:600;transition:all .25s}
+        .btn-gold{background:#EBAE13;color:#09090B}
+        .btn-gold:hover{background:#DBA500;box-shadow:0 4px 20px rgba(235,174,19,.3)}
+        .btn-ghost{background:rgba(255,255,255,.05);color:#d1d5db;border:1px solid rgba(255,255,255,.08)}
+        .btn-ghost:hover{background:rgba(235,174,19,.07);border-color:rgba(235,174,19,.2);color:#EBAE13}
+
+        .cta-section{text-align:center;padding:48px 0 24px}
+        .cta-section h2{font-size:24px;font-weight:700;margin-bottom:8px}
+        .cta-section p{color:#71717A;font-size:14px;margin-bottom:24px}
+        .cta-section .btns{display:flex;gap:10px;justify-content:center}
+
+        footer{max-width:1200px;margin:0 auto;padding:24px 32px 40px;border-top:1px solid rgba(255,255,255,.05);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px}
+        footer p{color:#3F3F46;font-size:12px}
+        footer .links{display:flex;gap:20px}
+        footer .links a{color:#52525B;font-size:12px}
+        footer .links a:hover{color:#EBAE13}
+    </style>
+</head>
+<body>
+    <div class="topbar">
+        <a href="/" class="logo">
+            <img src="/static/logo-transparent.png" alt="Mailyte">
+            <span>Mailyte</span>
+        </a>
+        <nav>
+            <a href="/">Home</a>
+            <a href="http://localhost:8000" target="_blank">Handbook</a>
+            <a href="/api-docs">Swagger</a>
+            <a href="/api-reference">API Docs</a>
+            <a href="https://github.com/Techies-Africa/mailyte-mail-server-community" class="cta">GitHub</a>
+        </nav>
+    </div>
+
+    <div class="hero">
+        <h1>Community vs Enterprise</h1>
+        <p>See what's included in each edition and choose the right fit for your needs.</p>
+    </div>
+
+    <div class="content">
+        <div class="table-wrap">
+            <table>
+                <thead>
+                    <tr>
+                        <th style="width:45%">Feature</th>
+                        <th style="width:27.5%">Community (Free)</th>
+                        <th style="width:27.5%">Enterprise</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <!-- MAIL INFRASTRUCTURE -->
+                    <tr class="cat-row"><td colspan="3">Mail Infrastructure</td></tr>
+                    <tr><td>Postfix SMTP (ports 25, 587, 465)</td><td class="yes">&#10003; Included</td><td class="ee">&#10003; Included</td></tr>
+                    <tr><td>Dovecot IMAP/POP3 (ports 993, 995, 143, 110)</td><td class="yes">&#10003; Included</td><td class="ee">&#10003; Included</td></tr>
+                    <tr><td>Rspamd Anti-Spam (ML, greylisting, DNSBL)</td><td class="yes">&#10003; Included</td><td class="ee">&#10003; Included</td></tr>
+                    <tr><td>SPF / DKIM / DMARC Authentication</td><td class="yes">&#10003; Included</td><td class="ee">&#10003; Included</td></tr>
+                    <tr><td>TLS/STARTTLS Everywhere</td><td class="yes">&#10003; Included</td><td class="ee">&#10003; Included</td></tr>
+                    <tr><td>Let's Encrypt Auto-SSL with SNI</td><td class="yes">&#10003; Included</td><td class="ee">&#10003; Included</td></tr>
+                    <tr><td>ManageSieve (port 4190)</td><td class="yes">&#10003; Included</td><td class="ee">&#10003; Included</td></tr>
+
+                    <!-- TRACKING & WEBHOOKS -->
+                    <tr class="cat-row"><td colspan="3">Tracking &amp; Webhooks</td></tr>
+                    <tr><td>Email Open Tracking (pixel)</td><td class="yes">&#10003; Included</td><td class="ee">&#10003; Included</td></tr>
+                    <tr><td>Email Click Tracking (URL rewrite)</td><td class="yes">&#10003; Included</td><td class="ee">&#10003; Included</td></tr>
+                    <tr><td>Webhook Notifications (50+ events)</td><td class="yes">&#10003; Included</td><td class="ee">&#10003; Included</td></tr>
+                    <tr><td>HMAC-SHA256 Webhook Signatures</td><td class="yes">&#10003; Included</td><td class="ee">&#10003; Included</td></tr>
+                    <tr><td>Webhook Retry with Backoff</td><td class="yes">&#10003; Included</td><td class="ee">&#10003; Included</td></tr>
+
+                    <!-- API & MANAGEMENT -->
+                    <tr class="cat-row"><td colspan="3">API &amp; Management</td></tr>
+                    <tr><td>REST API (Organizations, Domains, Mailboxes)</td><td class="yes">&#10003; Included</td><td class="ee">&#10003; Included</td></tr>
+                    <tr><td>Alias Management API</td><td class="yes">&#10003; Included</td><td class="ee">&#10003; Included</td></tr>
+                    <tr><td>Sieve Mail Filter API</td><td class="yes">&#10003; Included</td><td class="ee">&#10003; Included</td></tr>
+                    <tr><td>Rate Limiting API (org/domain/mailbox)</td><td class="yes">&#10003; Included</td><td class="ee">&#10003; Included</td></tr>
+                    <tr><td>SSL Certificate Management API</td><td class="yes">&#10003; Included</td><td class="ee">&#10003; Included</td></tr>
+                    <tr><td>OpenAPI 3.0 + Swagger UI + Redoc</td><td class="yes">&#10003; Included</td><td class="ee">&#10003; Included</td></tr>
+
+                    <!-- WEBMAIL & CLIENTS -->
+                    <tr class="cat-row"><td colspan="3">Webmail &amp; Clients</td></tr>
+                    <tr><td>Roundcube Webmail</td><td class="yes">&#10003; Included</td><td class="ee">&#10003; Included</td></tr>
+                    <tr><td>Email Client Auto-Configuration</td><td class="yes">&#10003; Included</td><td class="ee">&#10003; Included</td></tr>
+                    <tr><td>ActiveSync (Mobile Devices)</td><td class="no">&mdash;</td><td class="ee">&#10003; Included</td></tr>
+                    <tr><td>JMAP Protocol Support</td><td class="no">&mdash;</td><td class="ee">&#10003; Included</td></tr>
+                    <tr><td>CalDAV / CardDAV (Calendar &amp; Contacts)</td><td class="no">&mdash;</td><td class="ee">&#10003; Included</td></tr>
+
+                    <!-- DEPLOYMENT -->
+                    <tr class="cat-row"><td colspan="3">Deployment &amp; Operations</td></tr>
+                    <tr><td>Docker Compose (dev + prod)</td><td class="yes">&#10003; Included</td><td class="ee">&#10003; Included</td></tr>
+                    <tr><td>Interactive CLI (start.sh)</td><td class="yes">&#10003; Included</td><td class="ee">&#10003; Included</td></tr>
+                    <tr><td>Database Migrations (Alembic)</td><td class="yes">&#10003; Included</td><td class="ee">&#10003; Included</td></tr>
+                    <tr><td>Backup &amp; Restore Scripts</td><td class="yes">&#10003; Included</td><td class="ee">&#10003; Included</td></tr>
+                    <tr><td>Cloud Database Support (RDS, ElastiCache)</td><td class="no">&mdash;</td><td class="ee">&#10003; Included</td></tr>
+                    <tr><td>Traefik Reverse Proxy + Auto-HTTPS</td><td class="no">&mdash;</td><td class="ee">&#10003; Included</td></tr>
+
+                    <!-- ANALYTICS & AI -->
+                    <tr class="cat-row"><td colspan="3">Analytics &amp; AI</td></tr>
+                    <tr><td>Analytics &amp; Reporting Dashboards</td><td class="no">&mdash;</td><td class="ee">&#10003; Included</td></tr>
+                    <tr><td>AI-Powered Semantic Email Search (RAG)</td><td class="no">&mdash;</td><td class="ee">&#10003; Included</td></tr>
+                    <tr><td>Delivery Optimization (ML send-time)</td><td class="no">&mdash;</td><td class="ee">&#10003; Included</td></tr>
+                    <tr><td>Domain Reputation Tracking</td><td class="no">&mdash;</td><td class="ee">&#10003; Included</td></tr>
+
+                    <!-- SECURITY & COMPLIANCE -->
+                    <tr class="cat-row"><td colspan="3">Security &amp; Compliance</td></tr>
+                    <tr><td>Fail2ban Intrusion Detection</td><td class="no">&mdash;</td><td class="ee">&#10003; Included</td></tr>
+                    <tr><td>Audit Logging (SOC2/HIPAA-ready)</td><td class="no">&mdash;</td><td class="ee">&#10003; Included</td></tr>
+                    <tr><td>GDPR Compliance (export, erasure, consent)</td><td class="no">&mdash;</td><td class="ee">&#10003; Included</td></tr>
+                    <tr><td>Data Loss Prevention (DLP)</td><td class="no">&mdash;</td><td class="ee">&#10003; Included</td></tr>
+                    <tr><td>TOTP / 2FA for Mailboxes</td><td class="no">&mdash;</td><td class="ee">&#10003; Included</td></tr>
+                    <tr><td>Geo-Blocking</td><td class="no">&mdash;</td><td class="ee">&#10003; Included</td></tr>
+                    <tr><td>URL Protection (Safe Links)</td><td class="no">&mdash;</td><td class="ee">&#10003; Included</td></tr>
+                    <tr><td>PGP / S/MIME Encryption</td><td class="no">&mdash;</td><td class="ee">&#10003; Included</td></tr>
+                    <tr><td>OAuth 2.0 / XOAUTH2</td><td class="no">&mdash;</td><td class="ee">&#10003; Included</td></tr>
+
+                    <!-- ENTERPRISE FEATURES -->
+                    <tr class="cat-row"><td colspan="3">Scale &amp; Business</td></tr>
+                    <tr><td>Multi-Tenancy with Isolation</td><td class="no">&mdash;</td><td class="ee">&#10003; Included</td></tr>
+                    <tr><td>Shared Mailboxes &amp; Distribution Groups</td><td class="no">&mdash;</td><td class="ee">&#10003; Included</td></tr>
+                    <tr><td>Transport Rules (org-level routing)</td><td class="no">&mdash;</td><td class="ee">&#10003; Included</td></tr>
+                    <tr><td>Queue Management API</td><td class="no">&mdash;</td><td class="ee">&#10003; Included</td></tr>
+                    <tr><td>Storage Quota Management</td><td class="no">&mdash;</td><td class="ee">&#10003; Included</td></tr>
+                    <tr><td>Message Trace &amp; Quarantine</td><td class="no">&mdash;</td><td class="ee">&#10003; Included</td></tr>
+                    <tr><td>IMAP-to-IMAP Migration</td><td class="no">&mdash;</td><td class="ee">&#10003; Included</td></tr>
+                    <tr><td>Cloud Sync (S3, Azure, GCS)</td><td class="no">&mdash;</td><td class="ee">&#10003; Included</td></tr>
+                    <tr><td>Email Archiving</td><td class="no">&mdash;</td><td class="ee">&#10003; Included</td></tr>
+                    <tr><td>Reseller / White-Label Support</td><td class="no">&mdash;</td><td class="ee">&#10003; Included</td></tr>
+
+                    <!-- MONITORING -->
+                    <tr class="cat-row"><td colspan="3">Monitoring</td></tr>
+                    <tr><td>Health Check Endpoint</td><td class="yes">&#10003; Included</td><td class="ee">&#10003; Included</td></tr>
+                    <tr><td>Prometheus Metrics Export</td><td class="no">&mdash;</td><td class="ee">&#10003; Included</td></tr>
+                    <tr><td>Grafana Dashboards</td><td class="no">&mdash;</td><td class="ee">&#10003; Included</td></tr>
+                    <tr><td>AlertManager Integration</td><td class="no">&mdash;</td><td class="ee">&#10003; Included</td></tr>
+                    <tr><td>Kafka Message Broker</td><td class="no">&mdash;</td><td class="ee">&#10003; Included</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="cta-section">
+            <h2>Ready to get started?</h2>
+            <p>Deploy the Community Edition in minutes, or contact us for Enterprise.</p>
+            <div class="btns">
+                <a href="https://github.com/Techies-Africa/mailyte-mail-server-community" class="btn btn-gold">Get Community Edition &rarr;</a>
+                <a href="https://mailyte.com" class="btn btn-ghost">Contact for Enterprise</a>
+            </div>
+        </div>
+    </div>
+
+    <footer>
+        <p>Mailyte Email Server &mdash; Built by <a href="https://techies.africa" style="color:#71717A">Techies Africa</a></p>
+        <div class="links">
+            <a href="/">Home</a>
+            <a href="https://github.com/Techies-Africa/mailyte-mail-server-community">GitHub</a>
+            <a href="https://mailyte.com">mailyte.com</a>
+        </div>
+    </footer>
+</body>
+</html>

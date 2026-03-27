@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mailyte Email Server — Community Edition</title>
+    <link rel="icon" href="/static/favicon.ico" type="image/x-icon">
+    <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
+    <meta name="description" content="Self-hosted email infrastructure with SMTP, IMAP, POP3, email tracking, webhooks, and a full REST API. Free and open source.">
+    <style>
+        *{margin:0;padding:0;box-sizing:border-box}
+        body{font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#09090B;color:#F9F9F9;min-height:100vh;-webkit-font-smoothing:antialiased}
+        a{color:inherit;text-decoration:none}
+
+        /* Topbar */
+        .topbar{border-bottom:1px solid rgba(235,174,19,.12);padding:0 32px;height:56px;display:flex;align-items:center;justify-content:space-between;max-width:1200px;margin:0 auto}
+        .topbar .logo{display:flex;align-items:center;gap:10px;font-size:20px;font-weight:700}
+        .topbar .logo img{height:32px;width:auto}
+        .topbar .logo span{background:linear-gradient(135deg,#EBAE13,#FF9900);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+        .topbar nav{display:flex;align-items:center;gap:8px}
+        .topbar nav a{color:#A1A1A9;font-size:13px;padding:6px 12px;border-radius:6px;transition:all .2s}
+        .topbar nav a:hover{color:#EBAE13;background:rgba(235,174,19,.06)}
+        .topbar nav a.cta{background:#EBAE13;color:#09090B;font-weight:600;padding:7px 16px;border-radius:50px}
+        .topbar nav a.cta:hover{background:#DBA500}
+
+        /* Hero */
+        .hero{max-width:1200px;margin:0 auto;padding:72px 32px 48px;text-align:center}
+        .hero-logo{width:88px;height:88px;margin:0 auto 24px;filter:drop-shadow(0 0 30px rgba(235,174,19,.35))}
+        .badge{display:inline-block;background:rgba(235,174,19,.1);color:#EBAE13;font-size:11px;font-weight:700;letter-spacing:1.5px;padding:5px 14px;border-radius:50px;border:1px solid rgba(235,174,19,.2);margin-bottom:20px}
+        h1{font-size:48px;font-weight:800;line-height:1.1;margin-bottom:16px;background:linear-gradient(135deg,#FFF 20%,#EBAE13 80%);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+        .subtitle{font-size:17px;color:#A1A1A9;line-height:1.7;max-width:560px;margin:0 auto 36px}
+        .hero-btns{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin-bottom:64px}
+        .btn{display:inline-flex;align-items:center;gap:6px;padding:10px 22px;border-radius:50px;font-size:13px;font-weight:600;transition:all .25s}
+        .btn-gold{background:#EBAE13;color:#09090B}
+        .btn-gold:hover{background:#DBA500;transform:translateY(-1px);box-shadow:0 4px 20px rgba(235,174,19,.3)}
+        .btn-ghost{background:rgba(255,255,255,.05);color:#d1d5db;border:1px solid rgba(255,255,255,.08)}
+        .btn-ghost:hover{background:rgba(235,174,19,.07);border-color:rgba(235,174,19,.2);color:#EBAE13}
+
+        /* Sections */
+        .content{max-width:1200px;margin:0 auto;padding:0 32px}
+        .section{margin-bottom:80px}
+        .section-label{text-align:center;font-size:11px;font-weight:700;letter-spacing:2px;color:#EBAE13;margin-bottom:8px;text-transform:uppercase}
+        .section-title{text-align:center;font-size:30px;font-weight:700;color:#F9F9F9;margin-bottom:12px}
+        .section-desc{text-align:center;font-size:14px;color:#71717A;margin-bottom:40px;max-width:500px;margin-left:auto;margin-right:auto}
+
+        /* Feature grid */
+        .grid-3{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+        @media(max-width:900px){.grid-3{grid-template-columns:1fr}}
+        .card{background:#111114;border:1px solid rgba(255,255,255,.06);border-radius:12px;padding:24px;position:relative;overflow:hidden;transition:border-color .3s,transform .3s}
+        .card::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,#EBAE13,#FF9900);opacity:0;transition:opacity .3s}
+        .card:hover{border-color:rgba(235,174,19,.2);transform:translateY(-2px)}
+        .card:hover::before{opacity:1}
+        .card-icon{width:38px;height:38px;border-radius:10px;background:rgba(235,174,19,.1);display:flex;align-items:center;justify-content:center;font-size:17px;margin-bottom:14px}
+        .card h3{font-size:15px;font-weight:600;color:#F9F9F9;margin-bottom:6px}
+        .card p{font-size:13px;color:#71717A;line-height:1.6}
+
+        /* Feature list (detailed) */
+        .feature-list{display:grid;grid-template-columns:repeat(2,1fr);gap:12px}
+        @media(max-width:700px){.feature-list{grid-template-columns:1fr}}
+        .feature-item{display:flex;align-items:flex-start;gap:10px;padding:14px 16px;background:#111114;border:1px solid rgba(255,255,255,.04);border-radius:10px}
+        .feature-item .check{color:#EBAE13;font-size:16px;margin-top:1px;flex-shrink:0}
+        .feature-item strong{display:block;font-size:13px;color:#F9F9F9;margin-bottom:2px}
+        .feature-item span{font-size:12px;color:#52525B;line-height:1.5}
+
+        /* API quick links */
+        .api-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+        @media(max-width:700px){.api-grid{grid-template-columns:1fr}}
+        .api-grid a{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;background:#111114;border:1px solid rgba(255,255,255,.05);border-radius:8px;font-size:13px;font-weight:500;color:#d1d5db;transition:all .2s}
+        .api-grid a:hover{background:rgba(235,174,19,.06);border-color:rgba(235,174,19,.2);color:#EBAE13}
+        .api-grid a .arrow{color:#52525B;font-size:14px}
+
+        /* CTA banner */
+        .cta-banner{background:linear-gradient(135deg,rgba(235,174,19,.06) 0%,rgba(25,63,255,.04) 100%);border:1px solid rgba(235,174,19,.12);border-radius:14px;padding:36px 32px;display:flex;align-items:center;justify-content:space-between;gap:24px;margin-bottom:80px}
+        @media(max-width:600px){.cta-banner{flex-direction:column;text-align:center}}
+        .cta-banner h3{font-size:20px;font-weight:700;color:#F9F9F9;margin-bottom:6px}
+        .cta-banner p{font-size:13px;color:#71717A;line-height:1.5}
+
+        /* Footer */
+        footer{max-width:1200px;margin:0 auto;padding:24px 32px 40px;border-top:1px solid rgba(255,255,255,.05);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:12px}
+        footer p{color:#3F3F46;font-size:12px}
+        footer .links{display:flex;gap:20px}
+        footer .links a{color:#52525B;font-size:12px}
+        footer .links a:hover{color:#EBAE13}
+    </style>
+</head>
+<body>
+    <div class="topbar">
+        <a href="/" class="logo">
+            <img src="/static/logo-transparent.png" alt="Mailyte">
+            <span>Mailyte</span>
+        </a>
+        <nav>
+            <a href="/features">Features</a>
+            <a href="http://localhost:8000" target="_blank">Handbook</a>
+            <a href="/api-docs">Swagger</a>
+            <a href="/api-reference">API Docs</a>
+            <a href="https://github.com/Techies-Africa/mailyte-mail-server-community" class="cta">GitHub</a>
+        </nav>
+    </div>
+
+    <div class="hero">
+        <div class="badge">COMMUNITY EDITION &mdash; FREE &amp; OPEN SOURCE</div>
+        <h1>Mailyte Email Server</h1>
+        <p class="subtitle">
+            Self-hosted email infrastructure built on Postfix, Dovecot, and Rspamd.
+            Full SMTP, IMAP, POP3 with tracking, webhooks, and a REST API.
+        </p>
+        <div class="hero-btns">
+            <a href="/api-reference" class="btn btn-gold">API Reference &rarr;</a>
+            <a href="/api-docs" class="btn btn-ghost">Swagger UI</a>
+            <a href="/features" class="btn btn-ghost">Compare Editions</a>
+        </div>
+    </div>
+
+    <div class="content">
+
+        <!-- Feature cards -->
+        <div class="section">
+            <div class="section-label">Core</div>
+            <div class="section-title">Everything you need to run email</div>
+            <div class="section-desc">Production-grade mail server with developer-first APIs</div>
+            <div class="grid-3">
+                <div class="card">
+                    <div class="card-icon">&#9993;</div>
+                    <h3>SMTP Server (Postfix)</h3>
+                    <p>Send and receive email. TLS/STARTTLS on ports 25, 587, 465. SASL authentication, virtual domains, relay controls.</p>
+                </div>
+                <div class="card">
+                    <div class="card-icon">&#128229;</div>
+                    <h3>IMAP &amp; POP3 (Dovecot)</h3>
+                    <p>Full mailbox access on ports 993/995. Maildir storage, quota enforcement, SSL/TLS, ManageSieve support.</p>
+                </div>
+                <div class="card">
+                    <div class="card-icon">&#128737;</div>
+                    <h3>Spam Filtering (Rspamd)</h3>
+                    <p>Machine-learning spam detection, greylisting, DNSBL checks, content filtering, virus scanning.</p>
+                </div>
+                <div class="card">
+                    <div class="card-icon">&#128200;</div>
+                    <h3>Email Tracking</h3>
+                    <p>Open tracking via invisible pixel. Click tracking via URL rewriting. Real-time engagement data.</p>
+                </div>
+                <div class="card">
+                    <div class="card-icon">&#128268;</div>
+                    <h3>Webhooks</h3>
+                    <p>50+ event types: delivered, bounced, opened, clicked, auth failures. HMAC-SHA256 signed payloads with retry.</p>
+                </div>
+                <div class="card">
+                    <div class="card-icon">&#9881;</div>
+                    <h3>REST API</h3>
+                    <p>Full CRUD for domains, mailboxes, aliases, filters, SSL certificates. OpenAPI 3.0 spec with Swagger UI.</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Detailed feature list -->
+        <div class="section">
+            <div class="section-label">Included</div>
+            <div class="section-title">What&rsquo;s in the Community Edition</div>
+            <div class="section-desc">Everything listed below is free, open source, and production-ready</div>
+            <div class="feature-list">
+                <div class="feature-item">
+                    <div class="check">&#10003;</div>
+                    <div><strong>Postfix SMTP</strong><span>Send/receive on ports 25, 587, 465. TLS/STARTTLS, SASL auth, virtual domains</span></div>
+                </div>
+                <div class="feature-item">
+                    <div class="check">&#10003;</div>
+                    <div><strong>Dovecot IMAP/POP3</strong><span>Mailbox access on 993/995/143/110. Maildir, quotas, ManageSieve (4190)</span></div>
+                </div>
+                <div class="feature-item">
+                    <div class="check">&#10003;</div>
+                    <div><strong>Rspamd Anti-Spam</strong><span>ML spam detection, greylisting, DNSBL, content filtering, virus scanning</span></div>
+                </div>
+                <div class="feature-item">
+                    <div class="check">&#10003;</div>
+                    <div><strong>SPF / DKIM / DMARC</strong><span>Full email authentication. Auto DKIM signing, SPF validation, DMARC policy</span></div>
+                </div>
+                <div class="feature-item">
+                    <div class="check">&#10003;</div>
+                    <div><strong>SSL/TLS with Let&rsquo;s Encrypt</strong><span>Auto-provisioning, SNI per-domain, certificate monitoring, auto-renewal</span></div>
+                </div>
+                <div class="feature-item">
+                    <div class="check">&#10003;</div>
+                    <div><strong>Email Open &amp; Click Tracking</strong><span>Invisible pixel for opens, URL rewriting for clicks, real-time events</span></div>
+                </div>
+                <div class="feature-item">
+                    <div class="check">&#10003;</div>
+                    <div><strong>Webhook Notifications</strong><span>50+ events (delivered, bounced, opened, clicked). HMAC signatures, retry logic</span></div>
+                </div>
+                <div class="feature-item">
+                    <div class="check">&#10003;</div>
+                    <div><strong>REST API</strong><span>Full CRUD for organizations, domains, mailboxes, aliases, filters, SSL certs</span></div>
+                </div>
+                <div class="feature-item">
+                    <div class="check">&#10003;</div>
+                    <div><strong>Rate Limiting</strong><span>Per-organization, per-domain, per-mailbox sending limits with alerts</span></div>
+                </div>
+                <div class="feature-item">
+                    <div class="check">&#10003;</div>
+                    <div><strong>Sieve Mail Filters</strong><span>Per-mailbox rules: move to folder, forward, auto-reply, discard. Templates included</span></div>
+                </div>
+                <div class="feature-item">
+                    <div class="check">&#10003;</div>
+                    <div><strong>Roundcube Webmail</strong><span>Full webmail interface with elastic skin, ManageSieve plugin, archive support</span></div>
+                </div>
+                <div class="feature-item">
+                    <div class="check">&#10003;</div>
+                    <div><strong>Email Client Autoconfig</strong><span>Thunderbird, Outlook, Apple Mail auto-discovery. MTA-STS support</span></div>
+                </div>
+                <div class="feature-item">
+                    <div class="check">&#10003;</div>
+                    <div><strong>Docker Deployment</strong><span>Single docker compose up. Dev and production configs included</span></div>
+                </div>
+                <div class="feature-item">
+                    <div class="check">&#10003;</div>
+                    <div><strong>Database Migrations</strong><span>Alembic-managed schema. Backup/restore scripts with S3 support</span></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- API Quick Links -->
+        <div class="section">
+            <div class="section-label">API</div>
+            <div class="section-title">Quick Links</div>
+            <div class="section-desc">Interactive documentation for every endpoint</div>
+            <div class="api-grid">
+                <a href="/api-reference#tag/Organizations">Organizations <span class="arrow">&rarr;</span></a>
+                <a href="/api-reference#tag/Domains">Domains <span class="arrow">&rarr;</span></a>
+                <a href="/api-reference#tag/Mailboxes">Mailboxes <span class="arrow">&rarr;</span></a>
+                <a href="/api-reference#tag/Aliases">Aliases <span class="arrow">&rarr;</span></a>
+                <a href="/api-reference#tag/Filters">Mail Filters <span class="arrow">&rarr;</span></a>
+                <a href="/api-reference#tag/Rate-Limiting">Rate Limiting <span class="arrow">&rarr;</span></a>
+                <a href="/api-reference#tag/Tracking">Email Tracking <span class="arrow">&rarr;</span></a>
+                <a href="/api-reference#tag/Webhooks">Webhooks <span class="arrow">&rarr;</span></a>
+                <a href="/api-reference#tag/SSL">SSL Certificates <span class="arrow">&rarr;</span></a>
+            </div>
+        </div>
+
+        <!-- Enterprise CTA -->
+        <div class="cta-banner">
+            <div>
+                <h3>Need more? Try Mailyte Enterprise</h3>
+                <p>Analytics, AI-powered search, GDPR compliance, IMAP migration, shared mailboxes, multi-tenancy, monitoring, and more.</p>
+            </div>
+            <a href="/features" class="btn btn-gold">Compare Editions &rarr;</a>
+        </div>
+    </div>
+
+    <footer>
+        <p>Mailyte Email Server v1.0.0 &mdash; Community Edition &mdash; AGPL-3.0</p>
+        <div class="links">
+            <a href="https://github.com/Techies-Africa/mailyte-mail-server-community">GitHub</a>
+            <a href="/features">Features</a>
+            <a href="https://mailyte.com">mailyte.com</a>
+            <a href="https://techies.africa">Techies Africa</a>
+        </div>
+    </footer>
+</body>
+</html>

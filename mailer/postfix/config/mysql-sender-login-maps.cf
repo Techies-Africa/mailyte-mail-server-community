@@ -1,0 +1,5 @@
+user = ${DB_USER}
+password = ${DB_PASSWORD}
+hosts = ${DB_HOST}:${DB_PORT}
+dbname = ${DB_NAME}
+query = SELECT email FROM email_accounts WHERE email='%s' AND status = 'active' UNION SELECT destination FROM aliases WHERE source='%s' AND active = 1

@@ -1,0 +1,27 @@
+
+# Enterprise MIME Header Security Checks
+# These rules validate MIME structure and prevent malicious content
+
+# Block dangerous MIME types
+/^Content-Type:\s*application\/x-executable/i    REJECT Executable MIME type blocked
+/^Content-Type:\s*application\/x-ms-dos-executable/i REJECT DOS executable blocked
+/^Content-Type:\s*application\/x-winexe/i        REJECT Windows executable blocked
+/^Content-Type:\s*application\/x-msdownload/i    REJECT Microsoft download blocked
+
+# Block suspicious filename patterns
+/^Content-Disposition:.*filename="[^"]*\.(exe|scr|bat|cmd|com|pif|vbs|js|jar)"/i REJECT Dangerous file extension blocked
+/^Content-Disposition:.*filename="[^"]*\.(docm|xlsm|pptm)"/i WARN Macro-enabled office document
+
+# Prevent MIME header injection
+/\n[^\s]/                                       REJECT MIME header injection attempt
+/\r[^\n]/                                       REJECT Carriage return without newline
+
+# Block oversized MIME parts (potential DoS)
+/^Content-Length:\s*[0-9]{8,}/                  REJECT MIME part too large
+
+# Monitor for steganography attempts
+/^Content-Type:\s*image\/.+/i                   INFO Image attachment detected
+/^Content-Type:\s*audio\/.+/i                   INFO Audio attachment detected
+
+# Block non-standard encoding (allow: 7bit, 8bit, binary, quoted-printable, base64)
+/^Content-Transfer-Encoding:\s*x-/i             REJECT Non-standard encoding blocked

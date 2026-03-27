@@ -1,0 +1,11 @@
+[project]
+name = "mailyte-email-server"
+version = "0.1.0"
+description = "Enterprise AI-powered email server platform"
+requires-python = ">=3.11"
+dependencies = [
+    "alembic>=1.16.1",
+    "pymysql>=1.1.0",
+    "sqlalchemy>=2.0.0",
+    "logging-config>=1.0.4",
+]

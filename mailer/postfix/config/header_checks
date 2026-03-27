@@ -1,0 +1,34 @@
+
+# Enterprise Security Header Checks
+# These rules help prevent malicious emails and enforce security policies
+
+# Block emails with dangerous attachments in Content-Type headers
+/^Content-Type:.*application\/x-msdownload/    REJECT Executable attachments not allowed
+/^Content-Type:.*application\/x-msdos-program/ REJECT Executable attachments not allowed  
+/^Content-Type:.*application\/x-winexe/        REJECT Executable attachments not allowed
+/^Content-Type:.*application\/x-ms-dos-executable/ REJECT Executable attachments not allowed
+
+# Block suspicious filename extensions in Content-Disposition
+/^Content-Disposition:.*filename=.*\.(exe|scr|bat|cmd|com|pif|vbs|js)"/i REJECT Dangerous attachment type blocked
+
+# Block emails claiming to be from system accounts
+/^From:.*\b(postmaster|mailer-daemon|apache|www-data|root|admin)@/i WARN Suspicious sender detected
+
+# Rate limit based on suspicious patterns
+/^Subject:.*\$\$\$/                          HOLD Possible spam - multiple dollar signs
+/^Subject:.*(URGENT|WINNER|LOTTERY|MILLION)/i HOLD Possible spam - suspicious keywords
+
+# Block emails with excessive HTML redirects
+/^Content-Type:.*text\/html.*/ if /meta.*refresh.*url=/i REJECT Suspicious HTML redirect
+
+# Monitor for potential phishing attempts
+/^Subject:.*(verify.*account|update.*payment|suspended.*account)/i WARN Potential phishing attempt
+
+# Block emails with suspicious Received headers indicating open relays
+/^Received:.*\[(192\.168\.|10\.|172\.1[6-9]\.|172\.2[0-9]\.|172\.3[0-1]\.)/  WARN Internal IP in public route
+
+# Security: Block emails with null bytes in headers
+/\x00/ REJECT Null bytes in headers not allowed
+
+# Configurable security rules (can be enabled/disabled via environment variables)
+# These are logged but not rejected by default to minimize deliverability impact

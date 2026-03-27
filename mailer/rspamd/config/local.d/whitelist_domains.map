@@ -1,0 +1,37 @@
+# Rspamd greylisting whitelist — domains that bypass greylisting
+# These are major providers with good sending infrastructure.
+# Add your own trusted domains below.
+
+gmail.com
+googlemail.com
+google.com
+outlook.com
+hotmail.com
+hotmail.co.uk
+live.com
+msn.com
+microsoft.com
+yahoo.com
+yahoo.co.uk
+yahoo.fr
+yahoo.de
+yahoo.es
+aol.com
+icloud.com
+me.com
+mac.com
+apple.com
+protonmail.com
+proton.me
+fastmail.com
+fastmail.fm
+zoho.com
+mailgun.org
+sendgrid.net
+amazonses.com
+sparkpostmail.com
+mandrill.com
+mailchimp.com
+constantcontact.com
+hubspot.com
+salesforce.com

@@ -1,0 +1,372 @@
+
+site_name: !ENV [SITE_NAME, 'Mailyte Email Server Handbook']
+site_description: !ENV [SITE_DESCRIPTION, 'The complete developer handbook for the Mailyte Email Server — everything you need to understand, build, and run the system.']
+site_author: Mailyte Engineering Team
+site_url: !ENV [SITE_URL, 'https://docs.mailyte.com']
+
+repo_name: mailyte-mail-server-community
+repo_url: https://github.com/Techies-Africa/mailyte-mail-server-community
+edit_uri: edit/main/docs/
+
+# Copyright
+copyright: Copyright &copy; 2024–2026 Mailyte by Techies Africa
+
+# Theme configuration
+theme:
+  name: material
+  language: en
+  custom_dir: overrides
+
+  # System font — no external font loading
+  font: false
+
+  # Color scheme
+  palette:
+    - scheme: slate
+      primary: black
+      accent: amber
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+    - scheme: default
+      primary: black
+      accent: amber
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+
+  # Features
+  features:
+    - announce.dismiss
+    - content.action.edit
+    - content.action.view
+    - content.code.annotate
+    - content.code.copy
+    - content.code.select
+    - content.tabs.link
+    - content.tooltips
+    - header.autohide
+    - navigation.expand
+    - navigation.footer
+    - navigation.indexes
+    - navigation.instant
+    - navigation.instant.progress
+    - navigation.path
+    - navigation.sections
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.top
+    - navigation.tracking
+    - search.highlight
+    - search.share
+    - search.suggest
+    - toc.follow
+    - toc.integrate
+
+  # Custom icons
+  icon:
+    logo: material/email-fast
+    repo: fontawesome/brands/github
+    admonition:
+      note: material/pencil-circle
+      tip: material/lightbulb-on
+      warning: material/alert-circle
+      danger: material/fire-alert
+      info: material/information
+      example: material/test-tube
+
+# Plugins
+plugins:
+  - search:
+      separator: '[\s\-,:!=\[\]()"`/]+|\.(?!\d)|&[lg]t;|(?!\b)(?=[A-Z][a-z])'
+  - minify:
+      minify_html: true
+  - git-revision-date-localized:
+      enable_creation_date: true
+      type: timeago
+  - exclude:
+      glob:
+        - "Dockerfile"
+        - "docker-compose.yml"
+        - "supervisord.conf"
+        - "requirements.txt"
+        - ".env*"
+        - "scripts/*"
+        - "nginx/*"
+        - "versions/*"
+        - "includes/*"
+  - glightbox:
+      touchNavigation: true
+      loop: false
+      effect: zoom
+      slide_effect: slide
+      width: 100%
+      height: auto
+      zoomable: true
+      draggable: true
+
+# Extensions
+markdown_extensions:
+  - abbr
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - toc:
+      permalink: true
+  - pymdownx.arithmatex:
+      generic: true
+  - pymdownx.betterem:
+      smart_enable: all
+  - pymdownx.caret
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+      use_pygments: true
+      auto_title: true
+  - pymdownx.inlinehilite
+  - pymdownx.keys
+  - pymdownx.magiclink:
+      repo_url_shorthand: true
+      user: TechiesAfrica
+      repo: mailyte-email-server
+  - pymdownx.mark
+  - pymdownx.smartsymbols
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.tilde
+  - pymdownx.snippets:
+      auto_append:
+        - includes/abbreviations.md
+
+# Extra CSS and JS
+extra_css:
+  - stylesheets/extra.css
+
+extra_javascript:
+  - javascripts/mathjax.js
+  - https://polyfill.io/v3/polyfill.min.js?features=es6
+  - https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js
+
+# Navigation structure
+# Grouped into 7 tabs so nothing overflows the header bar.
+# Each tab expands into sections in the sidebar.
+nav:
+  - Home: index.md
+
+  - Getting Started:
+    - getting-started/index.md
+    - Installation: getting-started/installation.md
+    - Configuration: getting-started/configuration.md
+    - Your First Steps: getting-started/first-steps.md
+    - Troubleshooting Setup: getting-started/troubleshooting.md
+
+  - Architecture:
+    - architecture/index.md
+    - How Data Flows: architecture/data-flow.md
+    - Services & Containers: architecture/service-architecture.md
+    - Database Design: architecture/database-design.md
+    - Security Model: architecture/security-model.md
+    - Scaling Strategy: architecture/scaling-strategy.md
+    - Organizations & Tenants: architecture/organization-model.md
+    - Multi-Tenant Isolation: architecture/multi-tenant.md
+
+  - Configuration:
+    - configuration/index.md
+    - Environment Variables: configuration/environment-variables.md
+    - Postfix (SMTP): configuration/postfix-configuration.md
+    - Dovecot (IMAP): configuration/dovecot-configuration.md
+    - Rspamd (Spam Filter): configuration/rspamd-configuration.md
+    - SSL Certificates: configuration/ssl-certificates.md
+    - DNS Records: configuration/dns-setup.md
+    - Performance Tuning: configuration/performance-tuning.md
+    - Multi-Tenant Setup: configuration/multi-tenant.md
+    - Monitoring Config: configuration/monitoring-configuration.md
+    - Prometheus Setup: configuration/prometheus-setup.md
+
+  - API & Features:
+    - API Reference:
+      - api/index.md
+      - Authentication: api/authentication.md
+      - Organizations: api/organizations.md
+      - Domains: api/domains.md
+      - Email Accounts: api/email-accounts.md
+      - Aliases: api/aliases.md
+      - Webhooks: api/webhooks.md
+      - Statistics: api/statistics.md
+      - Rate Limiting: api/rate-limiting.md
+      - Storage Management: api/storage-management.md
+      - RAG & AI Search: api/rag-system.md
+      - Monitoring: api/monitoring.md
+      - Error Handling: api/errors.md
+      - Code Examples:
+        - api/examples/php.md
+        - api/examples/python.md
+        - api/examples/javascript.md
+        - api/examples/curl.md
+    - Features:
+      - features/index.md
+      - Email Tracking: features/email-tracking.md
+      - Anti-Spam Protection: features/anti-spam.md
+      - Rate Limiting: features/rate-limiting.md
+      - Storage & Quotas: features/storage-quotas.md
+      - Webhooks: features/webhooks.md
+      - Templates: features/templates.md
+      - Analytics: features/analytics.md
+      - Archiving: features/archiving.md
+      - Encryption: features/encryption.md
+      - ActiveSync: features/activesync.md
+      - Backup & Restore: features/backup-restore.md
+      - Deliverability: features/deliverability.md
+      - AI-Powered Search: features/rag-integration.md
+      - Auto-Healing: features/auto-healing.md
+      - Multi-Tenant Support: features/multi-tenant.md
+
+  - Services:
+    - Mailer Infrastructure:
+      - mailer/index.md
+      - Postfix (SMTP): mailer/postfix.md
+      - Dovecot (IMAP/POP3): mailer/dovecot.md
+      - Rspamd (Anti-Spam): mailer/rspamd.md
+      - Certificate Manager: mailer/cert-manager.md
+      - Intrusion Detection: mailer/intrusion-detection.md
+      - Log Analyzer: mailer/log-analyzer.md
+    - Worker Modules:
+      - worker/index.md
+      - API Gateway: worker/api.md
+      - Email Tracking: worker/tracking.md
+      - Webhooks: worker/webhooks.md
+      - Analytics: worker/analytics.md
+      - Rate Limiter: worker/rate-limiter.md
+      - Storage Usage: worker/storage-usage.md
+      - RAG & AI Search: worker/rag.md
+      - Queue Manager: worker/queue-manager.md
+      - Monitoring Service: worker/monitoring.md
+      - Dashboard: worker/dashboard.md
+      - Templates: worker/templates.md
+      - Encryption: worker/encryption.md
+      - Archiver: worker/archiver.md
+      - ActiveSync: worker/activesync.md
+      - Backup Service: worker/backup.md
+      - Cloud Sync: worker/cloud-sync.md
+      - Delivery Optimizer: worker/delivery-optimizer.md
+
+  - Operations:
+    - Deployment:
+      - deployment/index.md
+      - Requirements: deployment/requirements.md
+      - Production Setup: deployment/production-setup.md
+      - Production Checklist: deployment/production-checklist.md
+      - Docker Deployment: deployment/docker-deployment.md
+      - Kubernetes: deployment/kubernetes.md
+      - Monitoring Stack: deployment/monitoring-stack.md
+      - Maintenance: deployment/maintenance.md
+      - Backup Strategies: deployment/backup-strategies.md
+      - Disaster Recovery: deployment/disaster-recovery.md
+      - Security Hardening: deployment/security-hardening.md
+      - Scaling Guide: deployment/scaling-guide.md
+    - Monitoring:
+      - monitoring/index.md
+      - Overview: monitoring/overview.md
+      - Prometheus: monitoring/prometheus.md
+      - Grafana Dashboards: monitoring/grafana.md
+      - Alerting: monitoring/alerting.md
+      - Health Checks: monitoring/health-checks.md
+      - Enterprise Metrics: monitoring/enterprise-metrics.md
+      - Service Monitoring: monitoring/service-monitoring.md
+      - System Monitoring: monitoring/system-monitoring.md
+      - Auto-Healing: monitoring/auto-healing.md
+      - Webhook Alerts: monitoring/webhook-notifications.md
+      - Performance: monitoring/performance.md
+      - SLA Monitoring: monitoring/sla-monitoring.md
+      - Troubleshooting: monitoring/troubleshooting.md
+    - Security:
+      - security/index.md
+      - Authentication: security/authentication.md
+      - Authorization: security/authorization.md
+      - Encryption: security/encryption.md
+      - Network Security: security/network-security.md
+      - Compliance: security/compliance.md
+      - Vulnerability Management: security/vulnerability-management.md
+      - Security Monitoring: security/security-monitoring.md
+      - Intrusion Detection: security/intrusion-detection.md
+      - Security Checklist: security/security-checklist.md
+
+  - Guides & Reference:
+    - Guides:
+      - guides/index.md
+      - Migrating from Mailgun: guides/migrating-from-mailgun.md
+      - Migrating from SendGrid: guides/migrating-from-sendgrid.md
+      - Setting Up DKIM: guides/setting-up-dkim.md
+      - Improving Deliverability: guides/improving-deliverability.md
+      - Scaling to Millions: guides/scaling-to-millions.md
+      - Custom Integrations: guides/custom-integrations.md
+      - Monitoring Setup: guides/monitoring-setup.md
+      - Prometheus Config: guides/prometheus-configuration.md
+      - Grafana Dashboards: guides/grafana-setup.md
+      - Backup Automation: guides/backup-automation.md
+      - Managing Organizations: guides/organization-management.md
+      - Domain Configuration: guides/domain-configuration.md
+      - Troubleshooting:
+        - guides/troubleshooting/email-delivery-issues.md
+        - guides/troubleshooting/ssl-certificate-issues.md
+        - guides/troubleshooting/database-performance.md
+        - guides/troubleshooting/network-connectivity.md
+        - guides/troubleshooting/monitoring-issues.md
+        - guides/troubleshooting/service-failures.md
+    - Reference:
+      - reference/index.md
+      - CLI Commands: reference/cli-commands.md
+      - Configuration Reference: reference/configuration-reference.md
+      - Database Schema: reference/database-schema.md
+      - Log Formats: reference/log-formats.md
+      - Webhook Events: reference/webhook-events.md
+      - Error Codes: reference/error-codes.md
+      - Performance Metrics: reference/performance-metrics.md
+      - Prometheus Metrics: reference/prometheus-metrics.md
+      - API Endpoints: reference/api-endpoints.md
+      - Environment Variables: reference/environment-variables.md
+      - Glossary: reference/glossary.md
+    - Development:
+      - development/index.md
+      - Getting Started: development/getting-started.md
+      - Adding Features: development/adding-features.md
+      - Contributing: development/contributing.md
+      - Coding Standards: development/coding-standards.md
+      - Testing: development/testing.md
+      - Custom Workers: development/custom-workers.md
+      - Plugin Development: development/plugin-development.md
+      - Monitoring Integration: development/monitoring-integration.md
+      - Metrics Implementation: development/metrics-implementation.md
+      - Release Process: development/release-process.md
+
+# Extra configuration
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/TechiesAfrica/mailyte-email-server
+    - icon: fontawesome/solid/envelope
+      link: mailto:engineering@mailyte.com
+  analytics:
+    provider: google
+    property: !ENV [GOOGLE_ANALYTICS_KEY, '']
+  consent:
+    title: Cookie consent
+    description: >-
+      We use cookies to recognize your repeated visits and preferences, as well
+      as to measure the effectiveness of our documentation and whether users
+      find what they're searching for. With your consent, you're helping us to
+      make our documentation better.

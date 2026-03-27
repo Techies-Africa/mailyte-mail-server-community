@@ -1,0 +1,6 @@
+# DKIM selector map — domain → selector
+# Populated by scripts/generate_dkim.py
+# Format: domain selector
+# Example:
+# example.com default
+# company.org mail2024

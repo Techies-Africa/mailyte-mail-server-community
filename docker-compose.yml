@@ -1,0 +1,547 @@
+
+services:
+  # Redis Service - Caching, rate limiting, queues, Rspamd backend
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - mailserver_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Database Service
+  mysql:
+    image: mysql:8.0
+    container_name: mysql
+    environment:
+      - MYSQL_ROOT_PASSWORD=${DB_ROOT_PASSWORD:-rootpassword}
+      - MYSQL_DATABASE=${DB_NAME:-mailserver}
+      - MYSQL_USER=${DB_USER:-mailuser}
+      - MYSQL_PASSWORD=${DB_PASSWORD:-mailpassword}
+      - MYSQL_ROUNDCUBE_DATABASE=${ROUNDCUBE_DB_NAME:-roundcubemail}
+    ports:
+      - "${DB_PORT:-3306}:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./database/migrations/sql:/docker-entrypoint-initdb.d
+    networks:
+      - mailserver_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${DB_ROOT_PASSWORD:-rootpassword}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # Postfix - SMTP Server
+  postfix:
+     build: ./mailer/postfix
+     container_name: postfix
+     hostname: ${HOSTNAME:-mail.example.com}
+     environment:
+       - HOSTNAME=${HOSTNAME:-mail.example.com}
+       - DOMAIN=${DOMAIN:-example.com}
+       - DB_HOST=mysql
+       - DB_PORT=3306
+       - DB_NAME=${DB_NAME:-mailserver}
+       - DB_USER=${DB_USER:-mailuser}
+       - DB_PASSWORD=${DB_PASSWORD:-mailpassword}
+       - REDIS_HOST=redis
+       - REDIS_PORT=6379
+       - DEFAULT_TENANT_ID=${DEFAULT_TENANT_ID:-default}
+       - DEFAULT_DOMAIN_ID=${DEFAULT_DOMAIN_ID:-default}
+       - TRACKING_SERVICE_URL=http://tracking:8086
+       - TRACKING_ENABLED=${TRACKING_ENABLED:-true}
+       - WEBHOOK_SECRET=${WEBHOOK_SECRET:-webhooksecret}
+       - WEBHOOK_SERVICE_URL=http://webhooks:8081
+     ports:
+       - "25:25"
+       - "587:587"
+       - "465:465"
+     volumes:
+       - ./storage/mail_data:/var/mail/vhosts
+       - ./storage/ssl_certs:/etc/ssl/certs/custom
+       - ./storage/ssl_private:/etc/ssl/private/custom
+       - ./storage/sni_config:/etc/ssl/sni:ro
+       - ./logs/mailer/postfix:/var/log/postfix
+       - ./config/mailer/postfix:/etc/postfix/custom
+     healthcheck:
+       test: ["CMD-SHELL", "postfix status || exit 1"]
+       interval: 30s
+       timeout: 10s
+       retries: 3
+       start_period: 20s
+     depends_on:
+       mysql:
+         condition: service_healthy
+       redis:
+         condition: service_healthy
+       rspamd:
+         condition: service_healthy
+     networks:
+       - mailserver_network
+     restart: unless-stopped
+
+  # Dovecot - IMAP/POP3 Mail Server
+  dovecot:
+     build: ./mailer/dovecot
+     container_name: dovecot
+     ports:
+       - "143:143"
+       - "993:993"
+       - "110:110"
+       - "995:995"
+       - "4190:4190"
+     environment:
+       - DB_HOST=mysql
+       - DB_PORT=3306
+       - DB_NAME=${DB_NAME:-mailserver}
+       - DB_USER=${DB_USER:-mailuser}
+       - DB_PASSWORD=${DB_PASSWORD:-mailpassword}
+       - REDIS_HOST=redis
+       - REDIS_PORT=6379
+     volumes:
+       - ./storage/mail_data:/var/mail/vhosts
+       - ./storage/ssl_certs:/etc/ssl/certs/custom
+       - ./storage/ssl_private:/etc/ssl/private/custom
+       - ./storage/sni_config:/etc/ssl/sni:ro
+       - ./logs/mailer/dovecot:/var/log/dovecot
+       - ./config/mailer/dovecot:/etc/dovecot/custom
+     healthcheck:
+       test: ["CMD-SHELL", "doveadm service status imap || exit 1"]
+       interval: 30s
+       timeout: 10s
+       retries: 3
+       start_period: 15s
+     depends_on:
+       mysql:
+         condition: service_healthy
+       redis:
+         condition: service_healthy
+     networks:
+       - mailserver_network
+     restart: unless-stopped
+
+  # Rspamd - Anti-spam and Email Filtering
+  rspamd:
+     build: ./mailer/rspamd
+     container_name: rspamd
+     ports:
+       - "11332:11332"
+       - "11334:11334"
+     environment:
+       - REDIS_HOST=redis
+       - REDIS_PORT=6379
+     volumes:
+       - rspamd_data:/var/lib/rspamd
+       - ./storage/dkim_keys:/var/lib/rspamd/dkim
+       - ./logs/mailer/rspamd:/var/log/rspamd
+       - ./config/mailer/rspamd:/etc/rspamd/custom
+     healthcheck:
+       test: ["CMD-SHELL", "python3 -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:11334/ping\")'"]
+       interval: 30s
+       timeout: 10s
+       retries: 3
+       start_period: 15s
+     depends_on:
+       redis:
+         condition: service_healthy
+     networks:
+       - mailserver_network
+     restart: unless-stopped
+
+  # Certificate Manager - Let's Encrypt SSL
+  cert_manager:
+     build: ./mailer/cert_manager
+     container_name: cert_manager
+     ports:
+       - "80:80"
+     environment:
+       - DB_HOST=mysql
+       - DB_PORT=3306
+       - DB_NAME=${DB_NAME:-mailserver}
+       - DB_USER=${DB_USER:-mailuser}
+       - DB_PASSWORD=${DB_PASSWORD:-mailpassword}
+       - ACME_EMAIL=${ACME_EMAIL:-admin@example.com}
+       - HOSTNAME=${HOSTNAME:-mail.example.com}
+       - DOMAIN=${DOMAIN:-example.com}
+       - ACME_STAGING=${ACME_STAGING:-true}
+       - SSL_CERT_PATH=/etc/ssl/certs
+       - SSL_KEY_PATH=/etc/ssl/private
+       - CERT_RENEWAL_DAYS=${CERT_RENEWAL_DAYS:-30}
+       - CERT_CHECK_INTERVAL=${CERT_CHECK_INTERVAL:-21600}
+       - SNI_CONFIG_PATH=/etc/ssl/sni
+       - DOCKER_RELOAD_ENABLED=${DOCKER_RELOAD_ENABLED:-true}
+       - POSTFIX_CONTAINER=postfix
+       - DOVECOT_CONTAINER=dovecot
+     volumes:
+       - ./storage/ssl_certs:/etc/ssl/certs
+       - ./storage/ssl_private:/etc/ssl/private
+       - ./storage/sni_config:/etc/ssl/sni
+       - letsencrypt_data:/etc/letsencrypt
+       - /var/run/docker.sock:/var/run/docker.sock:ro
+     depends_on:
+       mysql:
+         condition: service_healthy
+     networks:
+       - mailserver_network
+     restart: unless-stopped
+
+  # API - Management REST API
+  api:
+     build: ./worker/api
+     container_name: api
+     ports:
+       - "8083:8080"
+     environment:
+       - PORT=8080
+       - DB_HOST=mysql
+       - DB_PORT=3306
+       - DB_NAME=${DB_NAME:-mailserver}
+       - DB_USER=${DB_USER:-mailuser}
+       - DB_PASSWORD=${DB_PASSWORD:-mailpassword}
+       - REDIS_HOST=redis
+       - REDIS_PORT=6379
+       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-adminpass}
+       - ADMIN_TOKEN_SECRET=${ADMIN_TOKEN_SECRET:-tokensecret}
+       - FLASK_ENV=${FLASK_ENV:-development}
+       - FLASK_DEBUG=${FLASK_DEBUG:-1}
+     healthcheck:
+       test: ["CMD-SHELL", "python3 -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:8080/health\")'"]
+       interval: 30s
+       timeout: 10s
+       retries: 3
+       start_period: 15s
+     volumes:
+       - ./logs/worker/api:/app/logs
+       - ./worker/api:/app
+       - ./shared:/app/shared
+       - ./database:/app/database
+     depends_on:
+       mysql:
+         condition: service_healthy
+       redis:
+         condition: service_healthy
+     networks:
+       - mailserver_network
+     restart: unless-stopped
+
+  # Webhooks - Real-time Event Notifications
+  webhooks:
+     build: ./worker/webhooks
+     container_name: webhooks
+     ports:
+       - "8081:8081"
+     environment:
+       - WEBHOOK_URLS=${WEBHOOK_URLS:-http://0.0.0.0:5000/webhook/test}
+       - WEBHOOK_SECRET=${WEBHOOK_SECRET:-webhooksecret}
+       - DB_HOST=mysql
+       - DB_PORT=3306
+       - DB_NAME=${DB_NAME:-mailserver}
+       - DB_USER=${DB_USER:-mailuser}
+       - DB_PASSWORD=${DB_PASSWORD:-mailpassword}
+       - REDIS_HOST=redis
+       - REDIS_PORT=6379
+       - FLASK_ENV=${FLASK_ENV:-development}
+       - FLASK_DEBUG=${FLASK_DEBUG:-1}
+     healthcheck:
+       test: ["CMD-SHELL", "python3 -c 'import socket; s=socket.socket(); s.settimeout(2); s.connect((\"localhost\", 8081)); s.close()'"]
+       interval: 30s
+       timeout: 10s
+       retries: 3
+       start_period: 15s
+     volumes:
+       - ./logs/worker/webhooks:/app/logs
+       - ./worker/webhooks:/app
+       - ./shared:/app/shared
+       - ./database:/app/database
+     depends_on:
+       mysql:
+         condition: service_healthy
+       redis:
+         condition: service_healthy
+     networks:
+       - mailserver_network
+     restart: unless-stopped
+
+  # Tracking - Email Open/Click Tracking
+  tracking:
+     build:
+       context: .
+       dockerfile: ./worker/tracking/Dockerfile
+     container_name: tracking
+     ports:
+       - "8086:8086"
+     environment:
+       - DB_HOST=mysql
+       - DB_PORT=3306
+       - DB_USER=${DB_USER:-mailuser}
+       - DB_PASSWORD=${DB_PASSWORD:-mailpassword}
+       - DB_NAME=${DB_NAME:-mailserver}
+       - REDIS_HOST=redis
+       - REDIS_PORT=6379
+       - TRACKING_DOMAIN=${HOSTNAME:-mail.example.com}
+       - WEBHOOK_SECRET=${WEBHOOK_SECRET:-webhooksecret}
+       - WEBHOOK_URLS=${WEBHOOK_URLS:-http://0.0.0.0:5000/webhook/test}
+       - FLASK_ENV=${FLASK_ENV:-development}
+       - FLASK_DEBUG=${FLASK_DEBUG:-1}
+     volumes:
+       - ./logs/tracking:/app/logs
+       - ./worker/tracking:/app
+       - ./shared:/app/shared
+       - ./database:/app/database
+     healthcheck:
+       test: ["CMD-SHELL", "python3 -c 'import socket; s=socket.socket(); s.settimeout(2); s.connect((\"localhost\", 8086)); s.close()'"]
+       interval: 30s
+       timeout: 10s
+       retries: 3
+       start_period: 15s
+     depends_on:
+       mysql:
+         condition: service_healthy
+       redis:
+         condition: service_healthy
+     networks:
+       - mailserver_network
+     restart: unless-stopped
+
+  # Rate Limiter - Email Sending Rate Control
+  rate_limiter:
+    build:
+      context: .
+      dockerfile: ./worker/rate_limiter/Dockerfile
+    container_name: rate_limiter
+    ports:
+      - "8082:8082"
+    environment:
+      - DB_HOST=mysql
+      - DB_PORT=3306
+      - DB_NAME=${DB_NAME:-mailserver}
+      - DB_USER=${DB_USER:-mailuser}
+      - DB_PASSWORD=${DB_PASSWORD:-mailpassword}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_URL=redis://redis:6379/0
+      - FLASK_ENV=${FLASK_ENV:-development}
+      - FLASK_DEBUG=${FLASK_DEBUG:-1}
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c 'import socket; s=socket.socket(); s.settimeout(2); s.connect((\"localhost\", 8082)); s.close()'"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    volumes:
+      - ./logs/worker/rate_limiter:/app/logs
+      - ./shared:/app/shared
+      - ./database:/app/database
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - mailserver_network
+    restart: unless-stopped
+
+  # Autoconfig - Email client auto-configuration
+  autoconfig:
+     build:
+       context: .
+       dockerfile: ./worker/autoconfig/Dockerfile
+     container_name: autoconfig
+     ports:
+       - "8100:8100"
+     environment:
+       - PORT=8100
+       - DB_HOST=mysql
+       - DB_PORT=3306
+       - DB_NAME=${DB_NAME:-mailserver}
+       - DB_USER=${DB_USER:-mailuser}
+       - DB_PASSWORD=${DB_PASSWORD:-mailpassword}
+       - HOSTNAME=${HOSTNAME:-mail.example.com}
+       - DOMAIN=${DOMAIN:-example.com}
+       - MTA_STS_MODE=${MTA_STS_MODE:-testing}
+     healthcheck:
+       test: ["CMD-SHELL", "python3 -c 'import socket; s=socket.socket(); s.settimeout(2); s.connect((\"localhost\", 8100)); s.close()'"]
+       interval: 30s
+       timeout: 10s
+       retries: 3
+       start_period: 15s
+     depends_on:
+       mysql:
+         condition: service_healthy
+     networks:
+       - mailserver_network
+     restart: unless-stopped
+
+  # Email Templates
+  templates:
+     build: ./worker/templates
+     container_name: templates
+     ports:
+       - "8095:8089"
+     environment:
+       - PORT=8089
+       - DB_HOST=mysql
+       - DB_PORT=3306
+       - DB_NAME=${DB_NAME:-mailserver}
+       - DB_USER=${DB_USER:-mailuser}
+       - DB_PASSWORD=${DB_PASSWORD:-mailpassword}
+     healthcheck:
+       test: ["CMD-SHELL", "python3 -c 'import socket; s=socket.socket(); s.settimeout(2); s.connect((\"localhost\", 8089)); s.close()'"]
+       interval: 30s
+       timeout: 10s
+       retries: 3
+       start_period: 15s
+     depends_on:
+       mysql:
+         condition: service_healthy
+     networks:
+       - mailserver_network
+     restart: unless-stopped
+
+  # ========================================================================
+  # Webmail Clients (pick one or none — controlled via COMPOSE_PROFILES)
+  #
+  # Enable in .env:
+  #   COMPOSE_PROFILES=roundcube        # Roundcube only
+  #   COMPOSE_PROFILES=sogo             # SOGo only
+  #   COMPOSE_PROFILES=roundcube,sogo   # Both
+  #   (omit COMPOSE_PROFILES for no webmail)
+  # ========================================================================
+
+  # Roundcube — lightweight PHP webmail
+  roundcube:
+     image: roundcube/roundcubemail:latest
+     container_name: roundcube
+     profiles: ["roundcube"]
+     ports:
+       - "${ROUNDCUBE_PORT:-8880}:80"
+     environment:
+       - ROUNDCUBEMAIL_DEFAULT_HOST=dovecot
+       - ROUNDCUBEMAIL_DEFAULT_PORT=143
+       - ROUNDCUBEMAIL_SMTP_SERVER=tls://postfix
+       - ROUNDCUBEMAIL_SMTP_PORT=587
+       - ROUNDCUBEMAIL_SMTP_AUTH_TYPE=LOGIN
+       - ROUNDCUBEMAIL_DB_TYPE=mysql
+       - ROUNDCUBEMAIL_DB_HOST=mysql
+       - ROUNDCUBEMAIL_DB_NAME=${ROUNDCUBE_DB_NAME:-roundcubemail}
+       - ROUNDCUBEMAIL_DB_USER=${DB_USER:-mailuser}
+       - ROUNDCUBEMAIL_DB_PASSWORD=${DB_PASSWORD:-mailpassword}
+       - ROUNDCUBEMAIL_UPLOAD_MAX_FILESIZE=25M
+       - ROUNDCUBEMAIL_SKIN=elastic
+       - ROUNDCUBEMAIL_PLUGINS=archive,zipdownload,managesieve
+     volumes:
+       - ./config/mailer/roundcube/custom.config.inc.php:/var/roundcube/config/custom.config.inc.php:ro
+     healthcheck:
+       test: ["CMD-SHELL", "curl -sf http://localhost:80/ > /dev/null"]
+       interval: 30s
+       timeout: 10s
+       retries: 3
+       start_period: 20s
+     depends_on:
+       mysql:
+         condition: service_healthy
+       dovecot:
+         condition: service_started
+       postfix:
+         condition: service_started
+     networks:
+       - mailserver_network
+     restart: unless-stopped
+
+  # SOGo — full groupware (webmail + calendar + contacts + ActiveSync)
+  sogo:
+     image: ghcr.io/inverse-inc/sogo:latest
+     container_name: sogo
+     profiles: ["sogo"]
+     ports:
+       - "${SOGO_PORT:-8881}:80"
+     environment:
+       - MYSQL_HOST=mysql
+       - MYSQL_PORT=3306
+       - MYSQL_DATABASE=${SOGO_DB_NAME:-sogo}
+       - MYSQL_USER=${DB_USER:-mailuser}
+       - MYSQL_PASSWORD=${DB_PASSWORD:-mailpassword}
+       - SOGO_IMAP_SERVER=dovecot
+       - SOGO_SMTP_SERVER=postfix
+       - SOGO_MAIL_DOMAIN=${DOMAIN:-example.com}
+       - SOGO_TIME_ZONE=${TIMEZONE:-UTC}
+       - SOGO_LANGUAGE=English
+     healthcheck:
+       test: ["CMD-SHELL", "curl -sf http://localhost:80/SOGo/ > /dev/null || exit 1"]
+       interval: 30s
+       timeout: 10s
+       retries: 3
+       start_period: 30s
+     depends_on:
+       mysql:
+         condition: service_healthy
+       dovecot:
+         condition: service_started
+       postfix:
+         condition: service_started
+     networks:
+       - mailserver_network
+     restart: unless-stopped
+
+  # Documentation — Developer Handbook
+  docs:
+    build: ./docs
+    container_name: docs
+    ports:
+      - "${DOCS_PORT:-8000}:80"
+    environment:
+      - SITE_NAME=Mailyte Email Server Handbook
+      - SITE_DESCRIPTION=The complete developer handbook for the Mailyte Email Server
+      - SITE_URL=${SITE_URL:-http://localhost:8000}
+    volumes:
+      - ./docs:/app/docs-source:ro
+    networks:
+      - mailserver_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:80/ > /dev/null || curl -sf http://localhost:8000/ > /dev/null"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  mysql_data:
+    driver: local
+  redis_data:
+    driver: local
+  rspamd_data:
+    driver: local
+  letsencrypt_data:
+    driver: local
+  sni_config:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${SNI_CONFIG_PATH:-./storage/sni_config}
+  mail_storage:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${MAIL_STORAGE_PATH:-./storage/mail_data}
+
+networks:
+  mailserver_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

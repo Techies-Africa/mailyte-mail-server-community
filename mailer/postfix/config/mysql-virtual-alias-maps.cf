@@ -1,0 +1,6 @@
+
+user = ${DB_USER}
+password = ${DB_PASSWORD}
+hosts = ${DB_HOST}:${DB_PORT}
+dbname = ${DB_NAME}
+query = SELECT destination FROM aliases WHERE source='%s' AND active = 1

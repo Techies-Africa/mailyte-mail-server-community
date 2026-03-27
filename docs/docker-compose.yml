@@ -1,0 +1,77 @@
+
+# Standalone docs docker-compose — run ONLY the documentation server.
+#
+# Usage:
+#   cd docs
+#
+#   # Production (static build served by nginx):
+#   docker compose up -d
+#
+#   # Development (live-reload, edit files and see changes instantly):
+#   docker compose --profile dev up docs-dev
+#
+#   Open http://localhost:8000
+
+services:
+
+  # ── Production: build once, serve static files via nginx ──────────────
+  docs:
+    build: .
+    container_name: mailyte-docs
+    ports:
+      - "${DOCS_PORT:-8000}:80"
+      - "${DOCS_SSL_PORT:-8443}:443"
+    environment:
+      - DOCS_DOMAIN=${DOCS_DOMAIN:-localhost}
+      - SITE_NAME=${SITE_NAME:-Mailyte Email Server Handbook}
+      - SITE_DESCRIPTION=The complete developer handbook for the Mailyte Email Server
+      - SITE_URL=${SITE_URL:-http://localhost:8000}
+      - ACME_EMAIL=${ACME_EMAIL:-admin@mailyte.com}
+      - ACME_STAGING=${ACME_STAGING:-true}
+      - WEBHOOK_URLS=${WEBHOOK_URLS:-}
+      - WEBHOOK_SECRET=${WEBHOOK_SECRET:-}
+      - CERT_RENEWAL_DAYS=${CERT_RENEWAL_DAYS:-30}
+      - CERT_CHECK_INTERVAL=${CERT_CHECK_INTERVAL:-21600}
+    volumes:
+      - letsencrypt_data:/etc/letsencrypt
+      - ssl_certs:/etc/ssl/docs
+      - nginx_logs:/var/log/nginx
+      - docs_logs:/var/log/docs-ssl
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ── Development: mkdocs serve with live-reload ────────────────────────
+  docs-dev:
+    build: .
+    container_name: mailyte-docs-dev
+    profiles:
+      - dev
+    ports:
+      - "${DOCS_PORT:-8000}:8000"
+    environment:
+      - SITE_NAME=${SITE_NAME:-Mailyte Email Server Handbook}
+    command: ["mkdocs", "serve", "--dev-addr=0.0.0.0:8000", "--config-file=/app/docs-source/mkdocs.yml"]
+    volumes:
+      # Mount source for live-reload — edits show up instantly
+      - .:/app/docs-source
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  letsencrypt_data:
+    driver: local
+  ssl_certs:
+    driver: local
+  nginx_logs:
+    driver: local
+  docs_logs:
+    driver: local

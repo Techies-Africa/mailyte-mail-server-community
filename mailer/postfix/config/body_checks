@@ -1,0 +1,32 @@
+
+# Enterprise Security Body Content Checks  
+# These rules scan email body content for malicious patterns
+
+# Block common malware signature patterns
+/TVqQAAMAAAAEAAAA/                           REJECT Executable content detected in body
+/UEsDBBQAAAAI/                               REJECT Suspicious ZIP content detected
+
+# Block suspicious URLs (phishing protection)
+/https?:\/\/[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}/ WARN Suspicious IP-based URL detected
+/bit\.ly\/[a-zA-Z0-9]{6,}/                   WARN Shortened URL detected - potential phishing
+/tinyurl\.com\/[a-zA-Z0-9]{6,}/              WARN Shortened URL detected - potential phishing
+
+# Block cryptocurrency/financial scam patterns
+/(bitcoin|ethereum|cryptocurrency|crypto).*wallet.*address/i HOLD Potential cryptocurrency scam
+/send.*money.*western.*union/i               HOLD Potential money transfer scam
+
+# Block credential harvesting attempts
+/click.*here.*verify.*account/i              WARN Potential credential harvesting
+/update.*password.*immediately/i             WARN Potential credential harvesting
+
+# Monitor for data exfiltration attempts
+/base64,[A-Za-z0-9+\/]{100,}/               WARN Large base64 content detected
+/data:.*base64/                             WARN Base64 data URI detected
+
+# Block potential script injection
+/<script[^>]*>/i                            REJECT Script content not allowed in email
+/javascript:/i                              REJECT JavaScript URLs not allowed
+/vbscript:/i                               REJECT VBScript content not allowed
+
+# Configurable content filtering
+# These rules can be adjusted based on organization security policies
