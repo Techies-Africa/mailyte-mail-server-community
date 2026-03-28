@@ -12,8 +12,12 @@ Architecture:
   - Every payload has a consistent envelope: event type, timestamp, source
     service, org/domain context, and the event-specific data
   - HMAC-SHA256 signature on every request (X-Webhook-Signature header)
-  - Automatic retries with exponential backoff on failure
+  - Inline signature block in payload (timestamp + token + signature) for
+    replay-attack prevention, similar to Mailgun's webhook authentication
+  - Automatic retries with Mailgun-style schedule (7 attempts over ~8 hours)
+  - HTTP 406 response from endpoint permanently stops delivery (no retry, no DLQ)
   - Failed deliveries are logged to the `webhook_delivery_log` table
+  - Permanently failed events are written to the `webhook_dead_letters` table
   - Redis pub/sub for cross-container fan-out (services in different
     containers publish to Redis; a single dispatcher process picks them up)
 
@@ -22,13 +26,40 @@ Usage from any service:
     from shared.webhook_dispatcher import dispatch_event
 
     dispatch_event(
-        event_type="email.inbound",
-        data={"message_id": "abc123", "from": "a@b.com", "to": "c@d.com"},
+        event_type="email.delivered",
+        data={
+            "message_id": "<abc@example.com>",
+            "recipient": "user@example.com",
+            "delivery_status": {"code": 250, "message": "OK"},
+        },
         org_id=1,
         domain="example.com",
+        tags=["campaign:newsletter"],
+        user_variables={"order_id": "12345"},
     )
 
 That's it. The dispatcher handles queuing, signing, delivery, retries, and logging.
+
+Retry Schedule (Mailgun-inspired):
+  Attempt 1: immediate
+  Retry 1:   after 10 minutes
+  Retry 2:   after 10 minutes
+  Retry 3:   after 15 minutes
+  Retry 4:   after 30 minutes
+  Retry 5:   after 1 hour
+  Retry 6:   after 2 hours
+  Retry 7:   after 4 hours
+  Total window: ~8 hours, 7 retries
+  HTTP 406 from endpoint → stop immediately (not a failure, endpoint declined)
+
+Webhook Verification:
+  Every request carries two complementary mechanisms:
+  1. X-Webhook-Signature header: HMAC-SHA256 of the full JSON body.
+     Verify: hmac(secret, body) == header_value
+  2. Inline signature block in payload["signature"]:
+     {"timestamp": <unix_int>, "token": "<hex_nonce>", "signature": "<hmac>"}
+     Verify: hmac(secret, str(timestamp) + token) == signature
+     Use timestamp to reject replays older than 15 minutes.
 """
 
 import os
@@ -37,10 +68,12 @@ import time
 import hmac
 import hashlib
 import logging
+import secrets
 import threading
+import uuid
 from queue import Queue, Empty
 from datetime import datetime, timezone
-from typing import Optional, Any, Dict
+from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("webhook_dispatcher")
 
@@ -51,9 +84,13 @@ logger = logging.getLogger("webhook_dispatcher")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL", "")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET", "")
 WEBHOOK_TIMEOUT = int(os.getenv("WEBHOOK_TIMEOUT", "15"))
-WEBHOOK_MAX_RETRIES = int(os.getenv("WEBHOOK_MAX_RETRIES", "3"))
+WEBHOOK_MAX_RETRIES = int(os.getenv("WEBHOOK_MAX_RETRIES", "7"))
 WEBHOOK_WORKERS = int(os.getenv("WEBHOOK_WORKERS", "4"))
 WEBHOOK_QUEUE_SIZE = int(os.getenv("WEBHOOK_QUEUE_SIZE", "10000"))
+
+# Retry delay schedule in seconds (Mailgun-inspired: 7 retries over ~8 hours).
+# Index i = delay before attempt i+2 (i.e. before the first retry, second retry, ...).
+_RETRY_SCHEDULE: List[int] = [600, 600, 900, 1800, 3600, 7200, 14400]
 
 # Redis for cross-container pub/sub (optional — falls back to in-process queue)
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
@@ -72,6 +109,43 @@ SERVICE_NAME = os.getenv("SERVICE_NAME", "unknown")
 
 
 # ---------------------------------------------------------------------------
+# HMAC Signatures
+# ---------------------------------------------------------------------------
+
+def _sign_payload(payload_bytes: bytes) -> str:
+    """
+    Generate HMAC-SHA256 signature for the full webhook payload body.
+    Sent as X-Webhook-Signature: sha256=<hex>.
+    """
+    if not WEBHOOK_SECRET:
+        return ""
+    return hmac.new(
+        WEBHOOK_SECRET.encode("utf-8"),
+        payload_bytes,
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _build_signature_block(ts: int, token: str) -> dict:
+    """
+    Build an inline signature block for replay-attack prevention.
+
+    Receivers should verify:
+        hmac(secret, str(timestamp) + token) == signature
+
+    And reject payloads where abs(now - timestamp) > 900 (15 minutes).
+    """
+    if not WEBHOOK_SECRET:
+        return {"timestamp": ts, "token": token, "signature": ""}
+    sig = hmac.new(
+        WEBHOOK_SECRET.encode("utf-8"),
+        (str(ts) + token).encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return {"timestamp": ts, "token": token, "signature": sig}
+
+
+# ---------------------------------------------------------------------------
 # Event Envelope
 # ---------------------------------------------------------------------------
 
@@ -82,42 +156,46 @@ def _build_envelope(
     domain: Optional[str] = None,
     source_service: Optional[str] = None,
     metadata: Optional[Dict[str, Any]] = None,
+    tags: Optional[List[str]] = None,
+    user_variables: Optional[Dict[str, Any]] = None,
 ) -> dict:
-    """Build a standardized webhook event envelope."""
+    """
+    Build a standardized webhook event envelope.
+
+    Every envelope has a unique ``id`` for idempotency checking, an inline
+    ``signature`` block for replay-attack prevention, and optional ``tags``
+    and ``user_variables`` that pass through to the receiving endpoint unchanged.
+    """
+    now_utc = datetime.now(timezone.utc)
+    ts_int = int(now_utc.timestamp())
+    token = secrets.token_hex(32)
     return {
+        "id": str(uuid.uuid4()),
         "event": event_type,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": now_utc.isoformat(),
         "source": source_service or SERVICE_NAME,
         "org_id": org_id,
         "domain": domain,
+        "tags": tags or [],
+        "user_variables": user_variables or {},
         "data": data,
         "metadata": metadata or {},
+        "signature": _build_signature_block(ts_int, token),
     }
-
-
-# ---------------------------------------------------------------------------
-# HMAC Signature
-# ---------------------------------------------------------------------------
-
-def _sign_payload(payload_bytes: bytes) -> str:
-    """Generate HMAC-SHA256 signature for the webhook payload."""
-    if not WEBHOOK_SECRET:
-        return ""
-    return hmac.new(
-        WEBHOOK_SECRET.encode("utf-8"),
-        payload_bytes,
-        hashlib.sha256,
-    ).hexdigest()
 
 
 # ---------------------------------------------------------------------------
 # Delivery
 # ---------------------------------------------------------------------------
 
-def _deliver(envelope: dict, attempt: int = 1) -> bool:
+def _deliver(envelope: dict, attempt: int = 1) -> Optional[bool]:
     """
     Deliver a webhook event to the global URL.
-    Returns True on success, False on failure.
+
+    Returns:
+        True   — delivered successfully (2xx response)
+        None   — endpoint returned HTTP 406 (permanent no-retry signal)
+        False  — transient failure, caller should schedule a retry
     """
     if not WEBHOOK_URL:
         return False
@@ -129,11 +207,12 @@ def _deliver(envelope: dict, attempt: int = 1) -> bool:
 
     headers = {
         "Content-Type": "application/json",
+        "X-Webhook-Id": envelope.get("id", ""),
         "X-Webhook-Signature": f"sha256={signature}",
         "X-Webhook-Event": envelope.get("event", ""),
         "X-Webhook-Source": envelope.get("source", ""),
         "X-Webhook-Timestamp": envelope.get("timestamp", ""),
-        "User-Agent": "Mailyte-Webhook/1.0",
+        "User-Agent": "Mailyte-Webhook/2.0",
     }
 
     try:
@@ -148,12 +227,21 @@ def _deliver(envelope: dict, attempt: int = 1) -> bool:
             _log_delivery(envelope, resp.status_code, attempt, success=True)
             return True
 
+        if resp.status_code == 406:
+            logger.warning(
+                f"Webhook endpoint returned 406 No-Retry for {envelope.get('event')} "
+                f"(attempt {attempt}) — delivery permanently stopped"
+            )
+            _log_delivery(envelope, resp.status_code, attempt, success=False,
+                          error="HTTP 406: Endpoint requested permanent no-retry")
+            return None
+
         logger.warning(
-            f"Webhook delivery failed: {resp.status_code} for {envelope.get('event')} "
-            f"(attempt {attempt}/{WEBHOOK_MAX_RETRIES})"
+            f"Webhook delivery failed: HTTP {resp.status_code} for "
+            f"{envelope.get('event')} (attempt {attempt}/{WEBHOOK_MAX_RETRIES})"
         )
         _log_delivery(envelope, resp.status_code, attempt, success=False,
-                       error=f"HTTP {resp.status_code}: {resp.text[:500]}")
+                      error=f"HTTP {resp.status_code}: {resp.text[:500]}")
         return False
 
     except requests.Timeout:
@@ -202,17 +290,41 @@ def _write_to_dlq(envelope: dict):
 
 
 def _deliver_with_retries(envelope: dict):
-    """Deliver with exponential backoff retries. Writes to DLQ on final failure."""
+    """
+    Deliver with Mailgun-style retry schedule. Writes to DLQ on final failure.
+
+    Schedule: immediate → 10m → 10m → 15m → 30m → 1h → 2h → 4h
+    Total: 7 retries over approximately 8 hours.
+
+    If the endpoint returns HTTP 406, delivery is permanently stopped without
+    writing to the DLQ — the endpoint explicitly declined further delivery.
+    """
     for attempt in range(1, WEBHOOK_MAX_RETRIES + 1):
-        if _deliver(envelope, attempt):
+        result = _deliver(envelope, attempt)
+
+        if result is True:
+            return  # Success
+
+        if result is None:
+            # Endpoint returned 406 — permanent stop, not counted as a failure
+            logger.info(
+                f"Webhook delivery halted by endpoint (406 no-retry) for "
+                f"{envelope.get('event')} after {attempt} attempt(s)"
+            )
             return
+
+        # Transient failure — schedule next retry
         if attempt < WEBHOOK_MAX_RETRIES:
-            delay = min(2 ** attempt, 60)  # 2s, 4s, 8s... max 60s
+            delay = _RETRY_SCHEDULE[min(attempt - 1, len(_RETRY_SCHEDULE) - 1)]
+            logger.info(
+                f"Webhook retry {attempt}/{WEBHOOK_MAX_RETRIES} in {delay}s "
+                f"for {envelope.get('event')} (id={envelope.get('id', '')})"
+            )
             time.sleep(delay)
 
     logger.error(
         f"Webhook delivery abandoned after {WEBHOOK_MAX_RETRIES} attempts: "
-        f"{envelope.get('event')}"
+        f"{envelope.get('event')} (id={envelope.get('id', '')})"
     )
     _stats["failed"] += 1
     _write_to_dlq(envelope)
@@ -377,6 +489,8 @@ def dispatch_event(
     domain: Optional[str] = None,
     source_service: Optional[str] = None,
     metadata: Optional[Dict[str, Any]] = None,
+    tags: Optional[List[str]] = None,
+    user_variables: Optional[Dict[str, Any]] = None,
     use_redis: bool = False,
 ):
     """
@@ -386,13 +500,16 @@ def dispatch_event(
     (queuing, signing, delivery, retries, logging) is handled internally.
 
     Args:
-        event_type: Dotted event name, e.g. "email.inbound", "tracking.open",
+        event_type: Dotted event name, e.g. "email.delivered", "email.opened",
                     "storage.quota.exceeded", "migration.completed"
         data: Event-specific payload (dict)
         org_id: Organization ID (optional, for context)
         domain: Domain (optional, for context)
         source_service: Override the source service name (defaults to SERVICE_NAME env var)
         metadata: Additional metadata (optional)
+        tags: Caller-supplied tags passed through unchanged, e.g. ["campaign:newsletter"].
+        user_variables: Arbitrary caller-supplied key-value pairs passed through
+                        unchanged to the receiving endpoint.
         use_redis: If True, publish to Redis for cross-container dispatch.
                    Use this when the calling service doesn't have a direct
                    dispatcher worker pool (e.g., Postfix scripts).
@@ -407,6 +524,8 @@ def dispatch_event(
         domain=domain,
         source_service=source_service,
         metadata=metadata,
+        tags=tags,
+        user_variables=user_variables,
     )
 
     _stats["dispatched"] += 1
@@ -426,6 +545,8 @@ def dispatch_event_sync(
     org_id: Optional[int] = None,
     domain: Optional[str] = None,
     source_service: Optional[str] = None,
+    tags: Optional[List[str]] = None,
+    user_variables: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """
     Synchronous version — blocks until delivery completes (or all retries fail).
@@ -434,7 +555,10 @@ def dispatch_event_sync(
     if not WEBHOOK_URL:
         return False
 
-    envelope = _build_envelope(event_type, data, org_id, domain, source_service)
+    envelope = _build_envelope(
+        event_type, data, org_id, domain, source_service,
+        tags=tags, user_variables=user_variables,
+    )
     _stats["dispatched"] += 1
     _deliver_with_retries(envelope)
     return True
@@ -461,14 +585,16 @@ class Events:
 
     Naming convention: {category}.{action} or {category}.{subcategory}.{action}
 
-    Every activity dispatches a webhook — like Mailgun, Postmark, and SendGrid.
+    Naming convention: {category}.{action} or {category}.{subcategory}.{action}
+
+    Every activity dispatches a webhook.
     """
 
-    # ── Email — SMTP Lifecycle (Mailgun-style) ──────────────────────────
+    # ── Email — SMTP Lifecycle ───────────────────────────────────────────
     EMAIL_ACCEPTED = "email.accepted"          # Accepted by MTA for delivery
     EMAIL_INBOUND = "email.inbound"            # Inbound message received
     EMAIL_OUTBOUND = "email.outbound"          # Outbound message sent
-    EMAIL_DELIVERED = "email.delivered"         # Successfully delivered to recipient MTA
+    EMAIL_DELIVERED = "email.delivered"        # Successfully delivered to recipient MTA
     EMAIL_BOUNCED = "email.bounced"            # Bounced (hard or soft)
     EMAIL_DEFERRED = "email.deferred"          # Temporarily deferred, will retry
     EMAIL_REJECTED = "email.rejected"          # Rejected by policy/filter
@@ -502,7 +628,7 @@ class Events:
     FOLDER_SUBSCRIBED = "folder.subscribed"
     FOLDER_UNSUBSCRIBED = "folder.unsubscribed"
 
-    # ── Tracking (Mailgun/SendGrid-style) ───────────────────────────────
+    # ── Tracking ────────────────────────────────────────────────────────
     TRACKING_OPEN = "tracking.open"            # Email opened (pixel loaded)
     TRACKING_CLICK = "tracking.click"          # Link clicked
     TRACKING_UNSUBSCRIBE = "tracking.unsubscribe"  # Unsubscribe action
