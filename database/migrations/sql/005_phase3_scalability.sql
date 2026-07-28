@@ -90,6 +90,7 @@ DROP PROCEDURE IF EXISTS partition_mail_logs$$
 CREATE PROCEDURE partition_mail_logs()
 BEGIN
     DECLARE already_partitioned INT DEFAULT 0;
+    DECLARE fk_count INT DEFAULT 0;
 
     -- Check whether mail_logs is already partitioned
     SELECT COUNT(*) INTO already_partitioned
@@ -98,7 +99,15 @@ BEGIN
        AND TABLE_NAME   = 'mail_logs'
        AND PARTITION_NAME IS NOT NULL;
 
-    IF already_partitioned = 0 THEN
+    -- MySQL cannot partition a table that has foreign keys (ERROR 1506).
+    -- mail_logs keeps its organization FK, so skip partitioning rather than fail.
+    SELECT COUNT(*) INTO fk_count
+      FROM information_schema.TABLE_CONSTRAINTS
+     WHERE TABLE_SCHEMA    = DATABASE()
+       AND TABLE_NAME      = 'mail_logs'
+       AND CONSTRAINT_TYPE = 'FOREIGN KEY';
+
+    IF already_partitioned = 0 AND fk_count = 0 THEN
         ALTER TABLE mail_logs
             PARTITION BY RANGE (TO_DAYS(`timestamp`)) (
                 PARTITION p2026_01 VALUES LESS THAN (TO_DAYS('2026-02-01')),
@@ -122,6 +131,7 @@ DROP PROCEDURE IF EXISTS partition_mail_queue$$
 CREATE PROCEDURE partition_mail_queue()
 BEGIN
     DECLARE already_partitioned INT DEFAULT 0;
+    DECLARE fk_count INT DEFAULT 0;
 
     -- Check whether mail_queue is already partitioned
     SELECT COUNT(*) INTO already_partitioned
@@ -130,7 +140,15 @@ BEGIN
        AND TABLE_NAME   = 'mail_queue'
        AND PARTITION_NAME IS NOT NULL;
 
-    IF already_partitioned = 0 THEN
+    -- MySQL cannot partition a table that has foreign keys (ERROR 1506).
+    -- mail_queue keeps its organization FK, so skip partitioning rather than fail.
+    SELECT COUNT(*) INTO fk_count
+      FROM information_schema.TABLE_CONSTRAINTS
+     WHERE TABLE_SCHEMA    = DATABASE()
+       AND TABLE_NAME      = 'mail_queue'
+       AND CONSTRAINT_TYPE = 'FOREIGN KEY';
+
+    IF already_partitioned = 0 AND fk_count = 0 THEN
         ALTER TABLE mail_queue
             PARTITION BY RANGE (TO_DAYS(created_at)) (
                 PARTITION p2026_01 VALUES LESS THAN (TO_DAYS('2026-02-01')),
