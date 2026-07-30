@@ -4,6 +4,7 @@ import sys
 from logging.config import fileConfig
 from sqlalchemy import engine_from_config
 from sqlalchemy import pool
+from sqlalchemy import text
 from alembic import context
 
 # Add the project root to the Python path
@@ -64,6 +65,15 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
+# Advisory lock name (phase-08 task 8.3): prevents two `migrate` containers
+# -- e.g. a second replica started mid-deploy -- from racing to apply the
+# same revision concurrently. MySQL's GET_LOCK/RELEASE_LOCK are scoped to
+# the connection that acquired them, so both calls must run on the same
+# connection that then runs the migration.
+_MIGRATION_LOCK_NAME = "mailyte_schema_migration"
+_MIGRATION_LOCK_TIMEOUT_SECONDS = 60
+
+
 def run_migrations_online() -> None:
     """Run migrations in 'online' mode.
 
@@ -77,15 +87,44 @@ def run_migrations_online() -> None:
         poolclass=pool.NullPool,
     )
 
-    with connectable.connect() as connection:
-        context.configure(
-            connection=connection, 
-            target_metadata=target_metadata,
-            render_as_batch=True,  # Support for MySQL
+    # The lock connection is deliberately separate from the one handed to
+    # Alembic below. GET_LOCK/RELEASE_LOCK must pair on one session, but
+    # that session doesn't need to be the migration's own connection --
+    # and sharing it caused a real bug here: SQLAlchemy 2.x autobegins a
+    # transaction on that connection's first execute() (the GET_LOCK call
+    # itself), and MySQL's "non-transactional DDL" migration context never
+    # explicitly commits it, so alembic_version's own bookkeeping row --
+    # written as ordinary DML on the same connection -- was silently rolled
+    # back on close even though every CREATE TABLE in the same run had
+    # already taken effect (DDL auto-commits in MySQL; that row's DML
+    # didn't). Verified live: a 2-revision upgrade left every table from
+    # both revisions in place but alembic_version stuck on the first one.
+    lock_connection = connectable.connect()
+    got_lock = lock_connection.execute(
+        text("SELECT GET_LOCK(:name, :timeout)"),
+        {"name": _MIGRATION_LOCK_NAME, "timeout": _MIGRATION_LOCK_TIMEOUT_SECONDS},
+    ).scalar()
+    lock_connection.commit()
+    if not got_lock:
+        lock_connection.close()
+        raise RuntimeError(
+            f"Could not acquire migration lock '{_MIGRATION_LOCK_NAME}' within "
+            f"{_MIGRATION_LOCK_TIMEOUT_SECONDS}s -- another migration run is in progress"
         )
+    try:
+        with connectable.connect() as connection:
+            context.configure(
+                connection=connection,
+                target_metadata=target_metadata,
+                render_as_batch=True,  # Support for MySQL
+            )
 
-        with context.begin_transaction():
-            context.run_migrations()
+            with context.begin_transaction():
+                context.run_migrations()
+    finally:
+        lock_connection.execute(text("SELECT RELEASE_LOCK(:name)"), {"name": _MIGRATION_LOCK_NAME})
+        lock_connection.commit()
+        lock_connection.close()
 
 
 if context.is_offline_mode():

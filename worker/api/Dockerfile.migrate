@@ -1,0 +1,25 @@
+FROM python:3.9-slim
+
+WORKDIR /app
+
+# Reuses worker/api's dependency set -- alembic, SQLAlchemy and PyMySQL are
+# already there (they're what worker/api/utils/database.py and alembic/env.py
+# both need). Separate image from the `api` service itself: the api build
+# context is ./worker/api only and never sees the repo-root alembic/ and
+# database/ directories, so `migrate` needs its own Dockerfile with a
+# repo-root context (docker-compose.yml: build.context: .), matching the
+# pattern `monitoring` already uses for the same reason.
+COPY worker/api/requirements.txt .
+RUN pip install --no-cache-dir --timeout 120 --retries 10 -r requirements.txt
+
+COPY alembic.ini .
+COPY alembic/ ./alembic/
+COPY database/ ./database/
+COPY shared/ ./shared/
+COPY scripts/run_migrations.py ./scripts/run_migrations.py
+
+RUN groupadd -r mailyte && useradd -r -g mailyte -u 10001 mailyte \
+ && chown -R mailyte:mailyte /app
+USER mailyte
+
+CMD ["python", "scripts/run_migrations.py"]
