@@ -30,6 +30,15 @@ services:
       - MYSQL_ROUNDCUBE_DATABASE=${ROUNDCUBE_DB_NAME:-roundcubemail}
     ports:
       - "${DB_PORT:-3306}:3306"
+    # docker-entrypoint-initdb.d stays mounted here (phase-08) -- this repo's
+    # first-boot path only ever runs it once on a truly empty data
+    # directory. It produces exactly the 0001_baseline schema; the
+    # `migrate` service below is what makes every schema change *after*
+    # that reach a running deployment, including on upgrade -- initdb.d
+    # alone cannot do that, which was the whole defect this phase exists
+    # to fix. See mailyte-email-server's phase-08 build notes for why that
+    # repo removes this mount entirely instead: it ships a service with an
+    # ad-hoc-table race bad enough to justify it, this one doesn't.
     volumes:
       - mysql_data:/var/lib/mysql
       - ./database/migrations/sql:/docker-entrypoint-initdb.d
@@ -42,6 +51,30 @@ services:
       timeout: 5s
       retries: 10
       start_period: 30s
+
+  # Schema migrations (phase-08) -- runs once per `up`, after MySQL is
+  # healthy and before anything that touches the schema starts. A failed
+  # migration must stop the deploy, not let a half-migrated API start:
+  # `restart: "no"` plus every dependent service's
+  # `condition: service_completed_successfully` (not just service_started)
+  # is what enforces that.
+  migrate:
+    build:
+      context: .
+      dockerfile: ./worker/api/Dockerfile.migrate
+    container_name: migrate
+    environment:
+      - DB_HOST=mysql
+      - DB_PORT=3306
+      - DB_NAME=${DB_NAME:-mailserver}
+      - DB_USER=${DB_USER:-mailuser}
+      - DB_PASSWORD=${DB_PASSWORD:-mailpassword}
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - mailserver_network
+    restart: "no"
 
   # Postfix - SMTP Server
   postfix:
@@ -84,6 +117,8 @@ services:
      depends_on:
        mysql:
          condition: service_healthy
+       migrate:
+         condition: service_completed_successfully
        redis:
          condition: service_healthy
        rspamd:
@@ -126,6 +161,8 @@ services:
      depends_on:
        mysql:
          condition: service_healthy
+       migrate:
+         condition: service_completed_successfully
        redis:
          condition: service_healthy
      networks:
@@ -193,6 +230,8 @@ services:
      depends_on:
        mysql:
          condition: service_healthy
+       migrate:
+         condition: service_completed_successfully
      networks:
        - mailserver_network
      restart: unless-stopped
@@ -230,6 +269,8 @@ services:
      depends_on:
        mysql:
          condition: service_healthy
+       migrate:
+         condition: service_completed_successfully
        redis:
          condition: service_healthy
      networks:
@@ -268,6 +309,8 @@ services:
      depends_on:
        mysql:
          condition: service_healthy
+       migrate:
+         condition: service_completed_successfully
        redis:
          condition: service_healthy
      networks:
@@ -309,6 +352,8 @@ services:
      depends_on:
        mysql:
          condition: service_healthy
+       migrate:
+         condition: service_completed_successfully
        redis:
          condition: service_healthy
      networks:
@@ -347,6 +392,8 @@ services:
     depends_on:
       mysql:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
     networks:
@@ -380,6 +427,8 @@ services:
      depends_on:
        mysql:
          condition: service_healthy
+       migrate:
+         condition: service_completed_successfully
      networks:
        - mailserver_network
      restart: unless-stopped
@@ -406,6 +455,8 @@ services:
      depends_on:
        mysql:
          condition: service_healthy
+       migrate:
+         condition: service_completed_successfully
      networks:
        - mailserver_network
      restart: unless-stopped
@@ -452,6 +503,8 @@ services:
      depends_on:
        mysql:
          condition: service_healthy
+       migrate:
+         condition: service_completed_successfully
        dovecot:
          condition: service_started
        postfix:
@@ -487,6 +540,8 @@ services:
      depends_on:
        mysql:
          condition: service_healthy
+       migrate:
+         condition: service_completed_successfully
        dovecot:
          condition: service_started
        postfix:
