@@ -764,45 +764,17 @@ class CertificateManager:
         )
 
     def setup_certificate_tables(self):
-        conn = self.get_database_connection()
-        if not conn:
-            return
-
-        try:
-            cursor = conn.cursor()
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS ssl_certificates (
-                    id INT AUTO_INCREMENT PRIMARY KEY,
-                    domain VARCHAR(255) NOT NULL UNIQUE,
-                    status ENUM('active', 'failed', 'expired') DEFAULT 'failed',
-                    error_message TEXT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-                    INDEX idx_domain (domain),
-                    INDEX idx_status (status)
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-            """)
-            # ACME account rotation tracking — one row per account email
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS acme_account_stats (
-                    id INT AUTO_INCREMENT PRIMARY KEY,
-                    email VARCHAR(255) NOT NULL UNIQUE,
-                    certs_issued INT NOT NULL DEFAULT 0,
-                    success_count INT NOT NULL DEFAULT 0,
-                    failure_count INT NOT NULL DEFAULT 0,
-                    last_used TIMESTAMP NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-                    INDEX idx_email (email),
-                    INDEX idx_last_used (last_used)
-                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
-            """)
-            conn.commit()
-            cursor.close()
-            conn.close()
-            logger.info("Certificate tables verified (ssl_certificates, acme_account_stats)")
-        except Exception as e:
-            logger.error(f"Table setup failed: {e}")
+        """No-op since phase-08 (schema-migrations): both tables this used to
+        create with CREATE TABLE IF NOT EXISTS are now owned by the Alembic
+        migration chain -- ssl_certificates by 0001_baseline (it was already
+        there before this ever ran; this call was always a no-op in
+        practice), acme_account_stats by 0002_adhoc_table_tracking. compose
+        now makes this service depend_on `migrate: service_completed_successfully`,
+        so both are guaranteed to exist before `run()` below is reached.
+        Kept as a method (rather than deleting the call site in run()) so a
+        future re-add doesn't require re-wiring the startup sequence.
+        """
+        return
 
     def run(self):
         """Main loop — check certs periodically."""
