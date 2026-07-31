@@ -9,3 +9,19 @@ dependencies = [
     "sqlalchemy>=2.0.0",
     "logging-config>=1.0.4",
 ]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+exclude = ["database/migrations/archive", "alembic/versions"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "SIM"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+exclude = ["database/migrations/archive/", "alembic/versions/"]
