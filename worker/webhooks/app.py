@@ -173,10 +173,14 @@ class WebhookProcessor:
     """Processes webhooks"""
 
     def __init__(self):
-        self.webhook_urls = [""]  # Replace with actual urls
+        # Not wired to a real config source, and process_webhook() below doesn't even read
+        # this. Same bug as mailyte-email-server's copy of this file. Tracked, not fixed here:
+        # ../plans/03-mailyte-api/tracked-debt.md#5.
+        self.webhook_urls = [""]
 
     def process_webhook(self, event_data):
-        """Process the webhook event"""
+        """Not implemented -- never sends an HTTP request anywhere; only sleeps and logs.
+        Tracked, not fixed here: plans/03-mailyte-api/tracked-debt.md#5."""
         try:
             time.sleep(1)
             logger.info(f"Webhook processed: {event_data.get('event', 'unknown')}")
@@ -185,8 +189,6 @@ class WebhookProcessor:
 
     def _extract_organization_id(self, metadata):
         """Extract organization ID from metadata"""
-        # Implement logic to extract organization ID from metadata
-        # This is just a placeholder, replace with actual logic
         if metadata and "from" in metadata:
             from_address = metadata["from"]
             if "@" in from_address:
