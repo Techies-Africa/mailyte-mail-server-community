@@ -21,27 +21,24 @@ Supports multi-tenant architecture with per-organization data isolation.
 
 import json
 import logging
-import time
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any
 
-from sqlalchemy import create_engine, func, and_, or_, desc
-from sqlalchemy.orm import sessionmaker, Session
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy import and_, create_engine, desc, func
+from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import QueuePool
 from user_agents import parse
 
 from config import config_manager
-from database.models.core import Domain
-import sys
-from pathlib import Path
 
 # Add project root to Python path for database models
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
-from database.models import Base, EmailTracking, TrackingStatistics
+from database.models import EmailTracking
 
 logger = logging.getLogger(__name__)
 
@@ -133,9 +130,9 @@ class DatabaseService:
     def log_tracking_event(
         self,
         event_type: str,
-        tracking_data: Dict[str, str],
-        request_info: Dict[str, Any],
-        additional_data: Dict[str, Any] = None,
+        tracking_data: dict[str, str],
+        request_info: dict[str, Any],
+        additional_data: dict[str, Any] = None,
     ) -> bool:
         """
         Log a tracking event to the database using SQLAlchemy ORM with organization hierarchy.
@@ -177,9 +174,9 @@ class DatabaseService:
     def _log_tracking_event_sync(
         self,
         event_type: str,
-        tracking_data: Dict[str, str],
-        request_info: Dict[str, Any],
-        additional_data: Dict[str, Any] = None,
+        tracking_data: dict[str, str],
+        request_info: dict[str, Any],
+        additional_data: dict[str, Any] = None,
     ) -> bool:
         """
         Synchronously log a tracking event to the database using SQLAlchemy ORM.
@@ -261,7 +258,7 @@ class DatabaseService:
             logger.error(f"Failed to log tracking event: {e}")
             return False
 
-    def get_tracking_stats(self, email_id: str) -> Dict[str, Any]:
+    def get_tracking_stats(self, email_id: str) -> dict[str, Any]:
         """
         Get comprehensive tracking statistics for a specific email using SQLAlchemy queries.
 
@@ -416,7 +413,7 @@ class DatabaseService:
         except Exception as e:
             logger.error(f"Failed to cleanup old data: {e}")
 
-    def get_tenant_stats(self, tenant_id: str, days: int = 30) -> Dict[str, Any]:
+    def get_tenant_stats(self, tenant_id: str, days: int = 30) -> dict[str, Any]:
         """
         Get tracking statistics for a specific tenant.
 

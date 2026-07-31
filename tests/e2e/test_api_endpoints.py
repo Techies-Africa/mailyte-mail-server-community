@@ -30,12 +30,12 @@ Environment variables:
     API_KEY   - API key for authentication     (default: test-api-key)
 """
 
-import pytest
 import os
 import uuid
-import json
-import requests
 from datetime import datetime, timedelta
+
+import pytest
+import requests
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -1139,19 +1139,17 @@ class TestFilters:
         assert resp.status_code in (200, 404, 422, 500)
 
     def test_get_filter(self, base_mailbox):
-        resp = get(f"/api/v1/filters/test-script", params={"email": base_mailbox["_email"]})
+        resp = get("/api/v1/filters/test-script", params={"email": base_mailbox["_email"]})
         assert resp.status_code in (200, 404)
 
     def test_delete_filter(self, base_mailbox):
         resp = delete(
-            f"/api/v1/filters/nonexistent-script", params={"email": base_mailbox["_email"]}
+            "/api/v1/filters/nonexistent-script", params={"email": base_mailbox["_email"]}
         )
         assert resp.status_code in (200, 404)
 
     def test_activate_filter(self, base_mailbox):
-        resp = put(
-            f"/api/v1/filters/test-script/activate", params={"email": base_mailbox["_email"]}
-        )
+        resp = put("/api/v1/filters/test-script/activate", params={"email": base_mailbox["_email"]})
         assert resp.status_code in (200, 404)
 
     def test_manage_vacation(self, base_mailbox):

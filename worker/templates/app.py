@@ -18,18 +18,18 @@ Endpoints:
   GET    /templates/{template_id}/stats      — Template usage stats
 """
 
-from fastapi import FastAPI, HTTPException, Query
-from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any
-from datetime import datetime
+import hashlib
+import json
 import logging
 import os
-import json
-import hashlib
-import mysql.connector
-from jinja2 import Environment, BaseLoader, TemplateSyntaxError, UndefinedError
 from html.parser import HTMLParser
 from io import StringIO
+from typing import Any
+
+import mysql.connector
+from fastapi import FastAPI, HTTPException, Query
+from jinja2 import BaseLoader, Environment, TemplateSyntaxError, UndefinedError
+from pydantic import BaseModel, Field
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -65,9 +65,7 @@ class HTMLStripper(HTMLParser):
     def handle_starttag(self, tag, attrs):
         if tag in ("script", "style"):
             self._skip = True
-        elif tag == "br":
-            self.result.write("\n")
-        elif tag in ("p", "div", "tr", "li"):
+        elif tag == "br" or tag in ("p", "div", "tr", "li"):
             self.result.write("\n")
         elif tag == "a":
             for attr_name, attr_val in attrs:
@@ -102,34 +100,34 @@ def html_to_plaintext(html: str) -> str:
 class TemplateCreate(BaseModel):
     organization_id: str
     name: str = Field(..., description="Template name")
-    description: Optional[str] = None
+    description: str | None = None
     category: str = Field(
         "general", description="Category: transactional, marketing, notification, general"
     )
     subject_template: str = Field(..., description="Subject line (supports Jinja2 variables)")
     html_content: str = Field(..., description="HTML body (supports Jinja2 variables)")
-    plaintext_content: Optional[str] = Field(
+    plaintext_content: str | None = Field(
         None, description="Plaintext body (auto-generated from HTML if empty)"
     )
-    variables: List[str] = Field(
+    variables: list[str] = Field(
         default_factory=list, description="List of variable names used in template"
     )
-    metadata: Optional[Dict[str, Any]] = None
+    metadata: dict[str, Any] | None = None
 
 
 class TemplateUpdate(BaseModel):
-    name: Optional[str] = None
-    description: Optional[str] = None
-    category: Optional[str] = None
-    subject_template: Optional[str] = None
-    html_content: Optional[str] = None
-    plaintext_content: Optional[str] = None
-    variables: Optional[List[str]] = None
-    metadata: Optional[Dict[str, Any]] = None
+    name: str | None = None
+    description: str | None = None
+    category: str | None = None
+    subject_template: str | None = None
+    html_content: str | None = None
+    plaintext_content: str | None = None
+    variables: list[str] | None = None
+    metadata: dict[str, Any] | None = None
 
 
 class RenderRequest(BaseModel):
-    variables: Dict[str, Any] = Field(..., description="Template variable values")
+    variables: dict[str, Any] = Field(..., description="Template variable values")
     format: str = Field("both", description="Output format: html, plaintext, both")
 
 
@@ -137,12 +135,12 @@ class TemplateResponse(BaseModel):
     id: int
     organization_id: str
     name: str
-    description: Optional[str]
+    description: str | None
     category: str
     subject_template: str
     html_content: str
-    plaintext_content: Optional[str]
-    variables: List[str]
+    plaintext_content: str | None
+    variables: list[str]
     version: int
     render_count: int
     created_at: str
@@ -416,10 +414,10 @@ async def create_template(tpl: TemplateCreate):
     return _row_to_response(created)
 
 
-@app.get("/templates", response_model=List[TemplateResponse])
+@app.get("/templates", response_model=list[TemplateResponse])
 async def list_templates(
     organization_id: str = Query(...),
-    category: Optional[str] = Query(None),
+    category: str | None = Query(None),
     active_only: bool = Query(True),
 ):
     """List templates for an organization."""

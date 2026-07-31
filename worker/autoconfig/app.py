@@ -16,19 +16,18 @@ Endpoints:
   - GET  /health                                        Health check
 """
 
-import os
-import sys
 import logging
-import json
-from typing import Optional, List, Dict, Any
+import os
 from contextlib import contextmanager
+from typing import Any
 
-import uvicorn
-from fastapi import FastAPI, Query, Request, HTTPException, Path as PathParam
-from fastapi.responses import Response, JSONResponse
 import mysql.connector
-from mysql.connector import pooling
+import uvicorn
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import Path as PathParam
+from fastapi.responses import JSONResponse, Response
 from lxml import etree
+from mysql.connector import pooling
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -54,7 +53,7 @@ logger = logging.getLogger("autoconfig")
 # Database helpers
 # ---------------------------------------------------------------------------
 
-_pool: Optional[pooling.MySQLConnectionPool] = None
+_pool: pooling.MySQLConnectionPool | None = None
 
 
 def _get_pool() -> pooling.MySQLConnectionPool:
@@ -111,7 +110,7 @@ def get_mx_hostname(domain: str) -> str:
     return HOSTNAME
 
 
-def get_dkim_record(domain: str) -> Optional[Dict[str, str]]:
+def get_dkim_record(domain: str) -> dict[str, str] | None:
     """Fetch the active DKIM public key and selector for *domain*."""
     try:
         with get_db() as conn:
@@ -135,7 +134,7 @@ def get_dkim_record(domain: str) -> Optional[Dict[str, str]]:
     return None
 
 
-def get_mx_records_for_domain(domain: str) -> List[str]:
+def get_mx_records_for_domain(domain: str) -> list[str]:
     """Return a list of MX hostnames for a domain (used in MTA-STS)."""
     try:
         with get_db() as conn:
@@ -229,7 +228,7 @@ def build_autodiscover_xml(email: str, mx_hostname: str) -> bytes:
     return etree.tostring(root, xml_declaration=True, encoding="UTF-8", pretty_print=True)
 
 
-def parse_autodiscover_email(body: bytes) -> Optional[str]:
+def parse_autodiscover_email(body: bytes) -> str | None:
     """Extract the email address from an Autodiscover POX request body."""
     try:
         tree = etree.fromstring(body)
@@ -404,7 +403,7 @@ async def dns_records(
         )
         dkim_txt_value = f"v=DKIM1; k=rsa; p={pub_key_clean}"
 
-    records: List[Dict[str, Any]] = [
+    records: list[dict[str, Any]] = [
         # MX record
         {
             "type": "MX",

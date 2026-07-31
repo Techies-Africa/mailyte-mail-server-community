@@ -12,9 +12,10 @@ Rate limiting helps protect the tracking service from abuse
 and ensures fair usage across all clients.
 """
 
-import time
 import logging
-from typing import Dict, Any
+import time
+from typing import Any
+
 import redis
 
 from config import config_manager
@@ -170,7 +171,7 @@ class RateLimiter:
             # Allow request if check fails
             return False
 
-    def get_rate_limit_info(self, ip_address: str) -> Dict[str, Any]:
+    def get_rate_limit_info(self, ip_address: str) -> dict[str, Any]:
         """
         Get rate limit information for an IP address.
 
@@ -198,7 +199,7 @@ class RateLimiter:
         else:
             return self._get_memory_rate_limit_info(ip_address)
 
-    def _get_redis_rate_limit_info(self, ip_address: str) -> Dict[str, Any]:
+    def _get_redis_rate_limit_info(self, ip_address: str) -> dict[str, Any]:
         """Get rate limit info from Redis."""
         try:
             key = f"rate_limit:tracking:{ip_address}"
@@ -223,7 +224,7 @@ class RateLimiter:
                 "backend": "redis_error",
             }
 
-    def _get_memory_rate_limit_info(self, ip_address: str) -> Dict[str, Any]:
+    def _get_memory_rate_limit_info(self, ip_address: str) -> dict[str, Any]:
         """Get rate limit info from memory cache."""
         try:
             key = f"rate_limit:{ip_address}"

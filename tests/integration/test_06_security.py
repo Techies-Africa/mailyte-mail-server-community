@@ -5,29 +5,23 @@ Verifies authentication enforcement, TLS requirements,
 brute-force protection, input sanitisation, and credential storage.
 """
 
+import imaplib
 import os
 import socket
 import ssl
 import time
 
 import pytest
-import imaplib
 import requests
 
 from .conftest import (
-    SMTP_HOST,
-    SMTP_PORT,
-    SMTP_PORT_25,
+    API_BASE,
     IMAP_HOST,
     IMAP_PORT,
-    TEST_USER,
+    SMTP_HOST,
+    SMTP_PORT,
     TEST_PASS,
-    API_BASE,
-    DB_HOST,
-    DB_PORT,
-    DB_NAME,
-    DB_USER,
-    DB_PASS,
+    TEST_USER,
 )
 
 TIMEOUT = 10

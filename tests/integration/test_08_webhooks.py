@@ -6,14 +6,12 @@ dead-letter queue, inbound/outbound webhook endpoints,
 and secret validation against the live Docker services.
 """
 
-import pytest
 import requests
 
 from .conftest import (
     API_BASE,
-    WEBHOOKS_BASE,
-    TEST_DOMAIN,
     TEST_USER,
+    WEBHOOKS_BASE,
 )
 
 TIMEOUT = 10

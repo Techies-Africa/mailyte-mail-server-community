@@ -16,20 +16,19 @@ Usage:
   python3 tests/test_mail_flow.py --host mail.example.com
 """
 
+import argparse
+import email
+import imaplib
 import os
-import sys
+import poplib
+import smtplib
 import ssl
+import sys
 import time
 import uuid
-import email
-import smtplib
-import imaplib
-import poplib
-import argparse
-import hashlib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
 from datetime import datetime
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 
 # Default test configuration
 SMTP_HOST = os.getenv("SMTP_HOST", "localhost")
@@ -412,7 +411,7 @@ def test_smtp_banner_no_version():
             # Check that banner doesn't reveal Postfix version
             if "postfix" not in banner.lower() or "version" not in banner.lower():
                 result.passed = True
-                result.message = f"Banner does not reveal version info"
+                result.message = "Banner does not reveal version info"
             else:
                 result.message = f"Banner reveals version: {banner[:100]}"
     except Exception as e:
@@ -566,7 +565,7 @@ def setup_test_data():
         cursor.close()
         conn.close()
 
-        print(f"Test data created:")
+        print("Test data created:")
         print(f"  Domain: {TEST_DOMAIN}")
         print(f"  User:   {TEST_USER}")
         print(f"  Pass:   {TEST_PASS}")
@@ -612,7 +611,7 @@ def run_tests():
     msg_id = getattr(send_result, "data", None)
 
     if msg_id:
-        print(f"  Waiting for delivery (up to 30s)...")
+        print("  Waiting for delivery (up to 30s)...")
         retrieve_result = test_imap_retrieve(msg_id)
         results.append(retrieve_result)
         print(f"  {retrieve_result}")

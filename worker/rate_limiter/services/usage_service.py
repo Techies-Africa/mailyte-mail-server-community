@@ -14,10 +14,9 @@ reliable usage tracking with high performance and data consistency.
 """
 
 import logging
-import time
-from typing import Dict, Any, Optional, List, Tuple
-from datetime import datetime, timedelta
 from dataclasses import dataclass
+from datetime import datetime
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -52,9 +51,9 @@ class UsageStatistics:
     monthly_percentage: float = 0.0
 
     # Timestamps
-    first_request: Optional[datetime] = None
-    last_request: Optional[datetime] = None
-    last_updated: Optional[datetime] = None
+    first_request: datetime | None = None
+    last_request: datetime | None = None
+    last_updated: datetime | None = None
 
     def calculate_percentages(self):
         """Calculate usage percentages based on limits"""
@@ -65,7 +64,7 @@ class UsageStatistics:
         if self.monthly_limit > 0:
             self.monthly_percentage = (self.monthly_count / self.monthly_limit) * 100
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for API responses"""
         return {
             "entity_type": self.entity_type,
@@ -116,7 +115,7 @@ class RateLimitUsageService:
 
     def get_current_usage(
         self, entity_type: str, identifier: str, direction: str
-    ) -> Dict[str, int]:
+    ) -> dict[str, int]:
         """
         Get current usage counts for an entity with cache-first approach.
 
@@ -302,8 +301,8 @@ class RateLimitUsageService:
             )
 
     def get_bulk_usage_statistics(
-        self, entities: List[Tuple[str, str, str]], config_service
-    ) -> Dict[str, UsageStatistics]:
+        self, entities: list[tuple[str, str, str]], config_service
+    ) -> dict[str, UsageStatistics]:
         """
         Get usage statistics for multiple entities efficiently.
 
@@ -365,7 +364,7 @@ class RateLimitUsageService:
 
     def get_usage_trends(
         self, entity_type: str, identifier: str, direction: str, days: int = 7
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Get usage trends and analytics for an entity.
 
@@ -481,7 +480,7 @@ class RateLimitUsageService:
 
     def get_quota_status(
         self, entity_type: str, identifier: str, direction: str, config_rule
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Get quota status and remaining allowance for an entity.
 
@@ -578,7 +577,7 @@ class RateLimitUsageService:
                 "error": str(e),
             }
 
-    def get_usage_stats(self) -> Dict[str, Any]:
+    def get_usage_stats(self) -> dict[str, Any]:
         """
         Get usage service statistics and performance metrics.
 

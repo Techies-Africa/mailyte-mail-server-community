@@ -4,12 +4,18 @@ Mailyte CE — Edge Case Test Suite
 Tests boundary conditions, error handling, malicious inputs, and failure scenarios.
 """
 
-import requests, json, time, smtplib, imaplib, poplib, ssl, socket, os
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from email.mime.base import MIMEBase
-from email.utils import formatdate, make_msgid
+import imaplib
+import poplib
+import smtplib
+import socket
+import ssl
 from email import encoders
+from email.mime.base import MIMEBase
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.utils import formatdate, make_msgid
+
+import requests
 
 API = "http://api:8080/api/v1"
 KEY = "test-api-key-123"
@@ -171,7 +177,7 @@ print("\n--- 2. SMTP EDGE CASES ---")
 try:
     send_smtp("user@test.local", "nobody@test.local", "To Nobody", "Should bounce")
     test("Send to non-existent user", False, "Should have been rejected")
-except smtplib.SMTPRecipientsRefused as e:
+except smtplib.SMTPRecipientsRefused:
     test("Send to non-existent user rejected", True, "550 User unknown")
 except Exception as e:
     test("Send to non-existent user", False, str(e)[:80])
@@ -252,7 +258,7 @@ for i in range(20):
         rapid_ok += 1
     except:
         break
-test(f"Rapid sends (20x)", rapid_ok >= 15, f"{rapid_ok}/20 succeeded")
+test("Rapid sends (20x)", rapid_ok >= 15, f"{rapid_ok}/20 succeeded")
 
 # Connection without STARTTLS (should reject auth)
 try:
@@ -477,7 +483,7 @@ def api_request(_):
 with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
     results_list = list(executor.map(api_request, range(50)))
 ok_count = sum(results_list)
-test(f"API under load (50 concurrent)", ok_count >= 40, f"{ok_count}/50 succeeded")
+test("API under load (50 concurrent)", ok_count >= 40, f"{ok_count}/50 succeeded")
 
 
 # Health endpoint under load
@@ -492,7 +498,7 @@ def health_request(_):
 with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
     results_list = list(executor.map(health_request, range(50)))
 ok_count = sum(results_list)
-test(f"Health under load (50 concurrent)", ok_count >= 45, f"{ok_count}/50 succeeded")
+test("Health under load (50 concurrent)", ok_count >= 45, f"{ok_count}/50 succeeded")
 
 # Redis resilience
 import redis

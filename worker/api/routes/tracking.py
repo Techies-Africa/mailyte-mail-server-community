@@ -13,17 +13,14 @@ All endpoints maintain backward compatibility while supporting the enhanced
 organization hierarchy for multi-tenant environments.
 """
 
-from fastapi import APIRouter, Request, HTTPException, Query
+import logging
+import os
+
+import aiohttp
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from typing import Optional
-import logging
-import aiohttp
-import os
-from utils.auth import require_api_key, create_api_response
-from database.models import EmailTracking, TrackingStatistics
-from database.models.core import Organization, Domain, EmailAccount
-
+from utils.auth import require_api_key
 
 # ---------------------------------------------------------------------------
 # Pydantic Models
@@ -45,15 +42,15 @@ class ClickTrackingResponse(BaseModel):
 class UnsubscribeRequest(BaseModel):
     """Request model for unsubscribe POST actions."""
 
-    reason: Optional[str] = Field(None, description="Optional reason for unsubscribing")
-    feedback: Optional[str] = Field(None, description="Optional feedback from the recipient")
+    reason: str | None = Field(None, description="Optional reason for unsubscribing")
+    feedback: str | None = Field(None, description="Optional feedback from the recipient")
 
 
 class SuppressionCreate(BaseModel):
     """Request model for adding an email to the suppression list."""
 
     email: str = Field(..., description="Email address to suppress", examples=["user@example.com"])
-    reason: Optional[str] = Field(
+    reason: str | None = Field(
         None, description="Reason for suppression", examples=["bounce", "complaint", "manual"]
     )
 
@@ -73,8 +70,8 @@ class EmailStatsResponse(BaseModel):
     email_id: str = Field(..., description="The unique email identifier")
     opens: int = Field(0, description="Number of open events")
     clicks: int = Field(0, description="Number of click events")
-    first_opened_at: Optional[str] = Field(None, description="ISO 8601 timestamp of the first open")
-    last_opened_at: Optional[str] = Field(
+    first_opened_at: str | None = Field(None, description="ISO 8601 timestamp of the first open")
+    last_opened_at: str | None = Field(
         None, description="ISO 8601 timestamp of the most recent open"
     )
 
@@ -94,17 +91,19 @@ async def proxy_to_tracking(request: Request, endpoint, method="GET", data=None,
         if "Content-Type" in request.headers:
             headers["Content-Type"] = request.headers["Content-Type"]
 
-        async with aiohttp.ClientSession() as session:
-            async with session.request(
+        async with (
+            aiohttp.ClientSession() as session,
+            session.request(
                 method=method,
                 url=f"{TRACKING_API_BASE}{endpoint}",
                 headers=headers,
                 json=data,
                 params=params,
                 timeout=aiohttp.ClientTimeout(total=30),
-            ) as response:
-                response_data = await response.json()
-                return response_data, response.status
+            ) as response,
+        ):
+            response_data = await response.json()
+            return response_data, response.status
     except Exception as e:
         logger.error(f"Tracking service proxy error: {e}")
         return {"error": "Tracking service unavailable"}, 503

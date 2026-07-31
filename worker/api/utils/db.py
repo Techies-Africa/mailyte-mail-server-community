@@ -7,10 +7,11 @@ Usage:
         ...
 """
 
-import os
 import logging
-import mysql.connector
+import os
 from contextlib import contextmanager
+
+import mysql.connector
 
 logger = logging.getLogger(__name__)
 

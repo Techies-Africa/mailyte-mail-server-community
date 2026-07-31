@@ -24,33 +24,32 @@ The application is split into specialized services:
 - WebhookService: Handles notification delivery and retry logic
 """
 
-import os
 import sys
-import logging
-import time
 import threading
+import time
 from datetime import datetime
-from typing import Dict, Any, Optional, Tuple
 from pathlib import Path
-from fastapi import FastAPI, Request, HTTPException
+from typing import Any
+
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 # Add shared directory to path for logging
 project_root = Path(__file__).parent.parent.parent
 sys.path.append(str(project_root / "shared"))
 
-from shared.logging_config import get_service_logger, get_performance_logger, LogTimer
-from shared.metrics import get_metrics
-from shared.webhook_dispatcher import dispatch_event, Events
+from services.alert_service import RateLimitAlertService
+from services.cache_service import RateLimitCacheService
+from services.config_service import RateLimitConfigService
+from services.database_service import RateLimitDatabaseService
+from services.usage_service import RateLimitUsageService
+from services.webhook_service import RateLimitWebhookService
 
 # Import configuration and services
 from config import config
-from services.config_service import RateLimitConfigService
-from services.cache_service import RateLimitCacheService
-from services.database_service import RateLimitDatabaseService
-from services.usage_service import RateLimitUsageService
-from services.alert_service import RateLimitAlertService
-from services.webhook_service import RateLimitWebhookService
+from shared.logging_config import LogTimer, get_performance_logger
+from shared.metrics import get_metrics
+from shared.webhook_dispatcher import Events, dispatch_event
 
 # Initialize FastAPI application
 app = FastAPI(title="Rate Limiter Service")
@@ -158,7 +157,7 @@ class EnterpriseRateLimiter:
                 logger.error(f"Cleanup service error: {e}")
                 time.sleep(60)  # Wait 1 minute on error
 
-    def check_rate_limit(self, email: str, direction: str) -> Tuple[bool, str, Dict[str, Any]]:
+    def check_rate_limit(self, email: str, direction: str) -> tuple[bool, str, dict[str, Any]]:
         """
         Check if email can be sent/received within rate limits.
 
@@ -223,7 +222,7 @@ class EnterpriseRateLimiter:
             # Fail open - allow the request if there's an error
             return True, f"Rate limit check failed: {str(e)}", {"error": str(e)}
 
-    def _extract_organization_and_domain(self, email: str) -> Tuple[str, str]:
+    def _extract_organization_and_domain(self, email: str) -> tuple[str, str]:
         """
         Extract organization and domain from email address.
 
@@ -245,7 +244,7 @@ class EnterpriseRateLimiter:
 
     def _check_single_entity_limit(
         self, entity_type: str, identifier: str, direction: str
-    ) -> Tuple[bool, str, Dict[str, Any]]:
+    ) -> tuple[bool, str, dict[str, Any]]:
         """
         Check rate limit for a single entity (organization/domain/mailbox).
 
@@ -511,7 +510,7 @@ class EnterpriseRateLimiter:
 
     def get_usage_statistics(
         self, entity_type: str, identifier: str, direction: str
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Get comprehensive usage statistics for an entity.
 
@@ -575,7 +574,7 @@ class EnterpriseRateLimiter:
             logger.error(f"Error getting usage statistics: {e}")
             return {"error": str(e)}
 
-    def get_service_health(self) -> Dict[str, Any]:
+    def get_service_health(self) -> dict[str, Any]:
         """
         Get health status of all rate limiter services.
 

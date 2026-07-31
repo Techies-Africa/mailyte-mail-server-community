@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 
-import os
-from typing import Dict, Any, List, Optional
-from dataclasses import dataclass
-import logging
 import json
+import logging
+import os
+from dataclasses import dataclass
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -66,8 +66,8 @@ class TrackingConfig:
     cache_ttl: int = 300
 
     # Link rewriting settings
-    exclude_domains: List[str] = None
-    exclude_link_patterns: List[str] = None
+    exclude_domains: list[str] = None
+    exclude_link_patterns: list[str] = None
     preserve_utm_params: bool = True
 
     # Rate limiting
@@ -167,7 +167,7 @@ class ConfigManager:
             logger.warning(f"Invalid float value for {key}, using default: {default}")
             return default
 
-    def _get_list(self, key: str, default: List[str]) -> List[str]:
+    def _get_list(self, key: str, default: list[str]) -> list[str]:
         """Get list value from environment variable (comma-separated)"""
         value = os.getenv(key, "")
         if not value:
@@ -218,7 +218,7 @@ class ConfigManager:
 
         return True
 
-    def get_database_config(self) -> Dict[str, Any]:
+    def get_database_config(self) -> dict[str, Any]:
         """Get database configuration from environment variables"""
         return {
             "host": os.getenv("DB_HOST", "mysql"),
@@ -234,7 +234,7 @@ class ConfigManager:
         config = self.get_database_config()
         return f"mysql+pymysql://{config['user']}:{config['password']}@{config['host']}:{config['port']}/{config['database']}?charset={config['charset']}"
 
-    def get_webhook_config(self) -> Dict[str, Any]:
+    def get_webhook_config(self) -> dict[str, Any]:
         """Get webhook configuration"""
         webhook_urls = os.getenv("WEBHOOK_URLS", "").split(",")
         webhook_urls = [url.strip() for url in webhook_urls if url.strip()]
@@ -268,7 +268,7 @@ class ConfigManager:
 
     def get_organization_tracking_config(
         self, organization_id: str, domain_id: str = None
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Get tenant-specific tracking configuration"""
         # This would typically load from database in a real implementation
         # For now, return default configuration
@@ -283,7 +283,7 @@ class ConfigManager:
             "preserve_utm": self.config.preserve_utm_params,
         }
 
-    def get_organization_config(self, organization_id: str) -> Dict[str, Any]:
+    def get_organization_config(self, organization_id: str) -> dict[str, Any]:
         """
         Get configuration for a specific organization.
 

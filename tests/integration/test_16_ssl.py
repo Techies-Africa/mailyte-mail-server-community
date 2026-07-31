@@ -15,11 +15,11 @@ import requests
 
 from .conftest import (
     API_BASE,
-    SMTP_HOST,
-    SMTP_PORT,
     IMAP_HOST,
     IMAP_SSL_PORT,
     POP3_SSL_PORT,
+    SMTP_HOST,
+    SMTP_PORT,
 )
 
 TIMEOUT = 10  # seconds for network operations

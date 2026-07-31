@@ -10,17 +10,17 @@ Handles all webhook notifications with production-grade features:
 - Real-time event processing
 """
 
-import os
-import sys
-import json
-import time
-import logging
+import base64
 import hashlib
 import hmac
-import base64
+import json
+import os
+import sys
+import time
 from datetime import datetime
-from typing import Dict, List, Any, Optional
 from pathlib import Path
+from typing import Any
+
 import requests
 from cryptography.fernet import Fernet
 
@@ -28,7 +28,7 @@ from cryptography.fernet import Fernet
 project_root = Path(__file__).parent.parent.parent.parent
 sys.path.append(str(project_root / "shared"))
 
-from shared.logging_config import get_service_logger, LogTimer
+from shared.logging_config import LogTimer, get_service_logger
 
 logger = get_service_logger("webhook_notification")
 
@@ -69,10 +69,10 @@ class WebhookNotificationSender:
     def send_webhook(
         self,
         event_type: str,
-        payload: Dict[str, Any],
+        payload: dict[str, Any],
         include_eml: bool = False,
         eml_content: str = None,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """
         Send webhook notification with production features
 
@@ -124,8 +124,8 @@ class WebhookNotificationSender:
             return {"success": False, "message": str(e)}
 
     def _prepare_payload(
-        self, event_type: str, payload: Dict[str, Any], include_eml: bool, eml_content: str
-    ) -> Dict[str, Any]:
+        self, event_type: str, payload: dict[str, Any], include_eml: bool, eml_content: str
+    ) -> dict[str, Any]:
         """Prepare webhook payload with encryption if configured"""
         webhook_payload = {
             "event": event_type,
@@ -154,7 +154,7 @@ class WebhookNotificationSender:
 
         return webhook_payload
 
-    def _get_webhook_urls(self, event_type: str) -> List[Dict[str, Any]]:
+    def _get_webhook_urls(self, event_type: str) -> list[dict[str, Any]]:
         """Get webhook URLs configured for specific event type"""
         # This would typically query the database
         # For now, return environment-based configuration
@@ -250,8 +250,8 @@ class WebhookNotificationSender:
         return webhook_urls
 
     def _send_single_webhook(
-        self, webhook_config: Dict[str, Any], payload: Dict[str, Any], event_config: Dict[str, Any]
-    ) -> Dict[str, Any]:
+        self, webhook_config: dict[str, Any], payload: dict[str, Any], event_config: dict[str, Any]
+    ) -> dict[str, Any]:
         """Send webhook to a single URL with retries"""
         url = webhook_config["url"]
         secret = webhook_config.get("secret", "")
@@ -314,8 +314,8 @@ class WebhookNotificationSender:
         }
 
     def send_rate_limit_alert(
-        self, organization_id: str, quota_data: Dict[str, Any]
-    ) -> Dict[str, Any]:
+        self, organization_id: str, quota_data: dict[str, Any]
+    ) -> dict[str, Any]:
         """Send rate limit quota alert webhook"""
         return self.send_webhook(
             event_type="rate_limit.quota_alert",
@@ -327,8 +327,8 @@ class WebhookNotificationSender:
         )
 
     def send_rate_limit_exceeded(
-        self, organization_id: str, limit_data: Dict[str, Any]
-    ) -> Dict[str, Any]:
+        self, organization_id: str, limit_data: dict[str, Any]
+    ) -> dict[str, Any]:
         """Send rate limit exceeded webhook"""
         return self.send_webhook(
             event_type="rate_limit.limit_exceeded",
@@ -339,7 +339,7 @@ class WebhookNotificationSender:
             },
         )
 
-    def _get_recommended_action(self, quota_data: Dict[str, Any]) -> str:
+    def _get_recommended_action(self, quota_data: dict[str, Any]) -> str:
         """Get recommended action based on quota usage"""
         percentage = quota_data.get("quota_percentage", 0)
         alert_level = quota_data.get("alert_level", "normal")

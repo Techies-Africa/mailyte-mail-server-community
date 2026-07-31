@@ -13,25 +13,25 @@ import redis
 import requests
 
 from .conftest import (
-    API_BASE,
-    TRACKING_BASE,
-    WEBHOOKS_BASE,
-    RATE_LIMITER_BASE,
-    MONITORING_BASE,
     ANALYTICS_BASE,
+    API_BASE,
     DASHBOARD_BASE,
-    QUEUE_BASE,
-    STORAGE_BASE,
     DOCS_BASE,
-    SMTP_HOST,
-    SMTP_PORT,
-    SMTP_PORT_25,
     IMAP_HOST,
     IMAP_PORT,
     IMAP_SSL_PORT,
+    MONITORING_BASE,
     POP3_HOST,
     POP3_PORT,
     POP3_SSL_PORT,
+    QUEUE_BASE,
+    RATE_LIMITER_BASE,
+    SMTP_HOST,
+    SMTP_PORT,
+    SMTP_PORT_25,
+    STORAGE_BASE,
+    TRACKING_BASE,
+    WEBHOOKS_BASE,
 )
 
 TIMEOUT = 10  # seconds for HTTP / socket operations

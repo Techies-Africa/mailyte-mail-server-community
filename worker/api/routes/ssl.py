@@ -12,11 +12,12 @@ All endpoints require API key authentication.
 Admin endpoints additionally require admin_access on the API key.
 """
 
-from fastapi import APIRouter, Request, HTTPException, Query
-from fastapi.responses import JSONResponse
-from datetime import datetime, timedelta
 import logging
-from utils.auth import require_api_key, require_admin, create_api_response
+from datetime import datetime
+
+from fastapi import APIRouter, Query
+from fastapi.responses import JSONResponse
+from utils.auth import create_api_response, require_api_key
 from utils.database import get_db_connection
 
 logger = logging.getLogger(__name__)

@@ -7,19 +7,20 @@ services.
 """
 
 import socket
+
 import pytest
 import requests
 
 from .conftest import (
     API_BASE,
     API_KEY,
-    SMTP_HOST,
-    SMTP_PORT,
     IMAP_HOST,
     IMAP_PORT,
+    RATE_LIMITER_BASE,
+    SMTP_HOST,
+    SMTP_PORT,
     TRACKING_BASE,
     WEBHOOKS_BASE,
-    RATE_LIMITER_BASE,
 )
 
 TIMEOUT = 10  # seconds for HTTP / socket operations
@@ -156,7 +157,7 @@ class TestGracefulErrors:
         postfix."""
         try:
             sock = socket.create_connection((SMTP_HOST, SMTP_PORT), timeout=TIMEOUT)
-        except (socket.timeout, ConnectionRefusedError, OSError):
+        except (TimeoutError, ConnectionRefusedError, OSError):
             pytest.skip(f"Cannot connect to SMTP at {SMTP_HOST}:{SMTP_PORT}")
 
         try:
@@ -180,7 +181,7 @@ class TestGracefulErrors:
         dovecot."""
         try:
             sock = socket.create_connection((IMAP_HOST, IMAP_PORT), timeout=TIMEOUT)
-        except (socket.timeout, ConnectionRefusedError, OSError):
+        except (TimeoutError, ConnectionRefusedError, OSError):
             pytest.skip(f"Cannot connect to IMAP at {IMAP_HOST}:{IMAP_PORT}")
 
         try:

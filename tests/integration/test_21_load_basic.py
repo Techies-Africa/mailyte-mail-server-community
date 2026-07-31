@@ -6,8 +6,8 @@ number of simultaneous connections without errors.  These are NOT full
 load/stress tests — they exercise the happy path under mild parallelism.
 """
 
-import smtplib
 import imaplib
+import smtplib
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -17,17 +17,17 @@ import requests
 from .conftest import (
     API_BASE,
     API_KEY,
-    SMTP_HOST,
-    SMTP_PORT,
+    DB_HOST,
+    DB_NAME,
+    DB_PASS,
+    DB_PORT,
+    DB_USER,
     IMAP_HOST,
     IMAP_PORT,
-    TEST_USER,
+    SMTP_HOST,
+    SMTP_PORT,
     TEST_PASS,
-    DB_HOST,
-    DB_PORT,
-    DB_NAME,
-    DB_USER,
-    DB_PASS,
+    TEST_USER,
 )
 
 TIMEOUT = 15  # seconds for individual operations

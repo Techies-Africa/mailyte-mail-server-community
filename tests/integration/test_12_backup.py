@@ -7,8 +7,6 @@ are performed via database metadata since the test container does
 not mount the host scripts directory.
 """
 
-import pytest
-
 
 # ---------------------------------------------------------------------------
 # Backup infrastructure (DB-level verification)

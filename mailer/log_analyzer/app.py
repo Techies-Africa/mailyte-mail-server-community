@@ -10,17 +10,18 @@ Advanced log analysis for mail server operations including:
 - Security incident reports
 """
 
+import json
+import logging
 import os
 import re
 import sys
-import json
 import time
-import logging
+from collections import Counter, defaultdict
 from datetime import datetime, timedelta
-from collections import defaultdict, Counter
-import mysql.connector
 from pathlib import Path
+
 import geoip2.database
+import mysql.connector
 import requests
 
 # Add project root to path
@@ -117,7 +118,7 @@ class MailLogAnalyzer:
         cutoff_time = datetime.now() - timedelta(hours=hours)
 
         try:
-            with open(self.postfix_log, "r") as f:
+            with open(self.postfix_log) as f:
                 for line in f:
                     # Parse timestamp
                     try:
@@ -201,7 +202,7 @@ class MailLogAnalyzer:
         cutoff_time = datetime.now() - timedelta(hours=hours)
 
         try:
-            with open(self.rspamd_log, "r") as f:
+            with open(self.rspamd_log) as f:
                 for line in f:
                     # Parse timestamp
                     try:
@@ -454,7 +455,7 @@ def main():
             report = analyzer.generate_summary_report(hours=24)
 
             # Print summary to console
-            print(f"\n=== Mail Server Analysis Report ===")
+            print("\n=== Mail Server Analysis Report ===")
             print(f"Period: {report['period_hours']} hours")
             print(f"Delivery Rate: {report['delivery_statistics']['delivery_rate_percent']}%")
             print(f"Bounce Rate: {report['delivery_statistics']['bounce_rate_percent']}%")

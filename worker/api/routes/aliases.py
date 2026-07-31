@@ -4,14 +4,14 @@ Alias Management API Routes
 Email alias and forwarding management with production features
 """
 
-from fastapi import APIRouter, Request, HTTPException, Query
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
-from typing import Optional
-from datetime import datetime
+import html as html_module
 import logging
 import re
-import html as html_module
+from datetime import datetime
+
+from fastapi import APIRouter, Query, Request
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
 
 def sanitize_text(value):
@@ -26,12 +26,13 @@ def sanitize_text(value):
 
 import sys
 from pathlib import Path
+
+from utils.auth import create_api_response, require_api_key
 from utils.database import get_db_connection
-from utils.auth import require_api_key, create_api_response
 
 project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
-from shared.webhook_dispatcher import dispatch_event, Events
+from shared.webhook_dispatcher import Events, dispatch_event
 
 logger = logging.getLogger(__name__)
 router = APIRouter()

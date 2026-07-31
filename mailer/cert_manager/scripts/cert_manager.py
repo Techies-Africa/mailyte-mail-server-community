@@ -11,20 +11,20 @@ For development: Postfix/Dovecot entrypoints generate self-signed certs.
 For production: This service obtains real Let's Encrypt certs.
 """
 
-import os
-import sys
-import time
-import shutil
-import logging
-import subprocess
-import json
-import hmac
 import hashlib
+import hmac
+import json
+import logging
+import os
+import shutil
+import subprocess
 import threading
-import mysql.connector
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, as_completed
+
+import mysql.connector
 import requests
 
 logging.basicConfig(

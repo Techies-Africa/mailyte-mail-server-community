@@ -3,24 +3,24 @@
 Authentication Models - API keys and user sessions
 """
 
-from datetime import datetime
 from sqlalchemy import (
+    JSON,
+    BigInteger,
+    Boolean,
     Column,
+    DateTime,
+    ForeignKey,
+    Index,
     Integer,
     String,
-    DateTime,
     Text,
-    Boolean,
-    Index,
-    BigInteger,
-    ForeignKey,
-    JSON,
 )
-from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
+from sqlalchemy.sql import func
+
+from shared.ulid_utils import generate_ulid
 
 from . import Base
-from shared.ulid_utils import generate_ulid
 
 
 # API Authentication

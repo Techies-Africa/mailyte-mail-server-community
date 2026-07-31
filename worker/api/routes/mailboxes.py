@@ -16,14 +16,14 @@ Key Features:
 - Enhanced security features
 """
 
-from fastapi import APIRouter, Request, HTTPException, Query
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
-from typing import Optional
-from datetime import datetime
+import html as html_module
 import logging
 import re
-import html as html_module
+from datetime import datetime
+
+from fastapi import APIRouter, Query, Request
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
 
 def sanitize_text(value):
@@ -37,19 +37,21 @@ def sanitize_text(value):
     return html_module.escape(value, quote=True)
 
 
+import os
 import sys
 from pathlib import Path
-from utils.database import get_db_connection
-from utils.auth import require_api_key, create_api_response, hash_password, verify_password
-from database.models.core import Organization, Domain, EmailAccount
-from database.models.enums import AccountStatus
-from sqlalchemy.orm import sessionmaker
+
 from sqlalchemy import create_engine
-import os
+from sqlalchemy.orm import sessionmaker
+from utils.auth import create_api_response, hash_password, require_api_key
+from utils.database import get_db_connection
+
+from database.models.core import Domain, EmailAccount, Organization
+from database.models.enums import AccountStatus
 
 project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
-from shared.webhook_dispatcher import dispatch_event, Events
+from shared.webhook_dispatcher import Events, dispatch_event
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -67,7 +69,7 @@ class MailboxCreate(BaseModel):
         description="Password for IMAP/SMTP authentication (will be bcrypt-hashed)",
         example="SecureP@ss123!",
     )
-    name: Optional[str] = Field(
+    name: str | None = Field(
         None, description="Display name of the mailbox owner", example="John Doe"
     )
     domain_id: str = Field(
@@ -81,17 +83,17 @@ class MailboxCreate(BaseModel):
 
 
 class MailboxUpdate(BaseModel):
-    name: Optional[str] = Field(None, description="Updated display name")
-    status: Optional[str] = Field(
+    name: str | None = Field(None, description="Updated display name")
+    status: str | None = Field(
         None, description="Account status: active, inactive, or suspended", example="active"
     )
-    storage_quota: Optional[int] = Field(None, description="Updated storage quota in bytes")
-    forward_enabled: Optional[bool] = Field(None, description="Enable email forwarding")
-    forward_destination: Optional[str] = Field(
+    storage_quota: int | None = Field(None, description="Updated storage quota in bytes")
+    forward_enabled: bool | None = Field(None, description="Enable email forwarding")
+    forward_destination: str | None = Field(
         None, description="Forwarding destination email address"
     )
-    vacation_enabled: Optional[bool] = Field(None, description="Enable vacation auto-responder")
-    vacation_message: Optional[str] = Field(None, description="Vacation auto-reply message text")
+    vacation_enabled: bool | None = Field(None, description="Enable vacation auto-responder")
+    vacation_message: str | None = Field(None, description="Vacation auto-reply message text")
 
 
 class QuotaUpdate(BaseModel):

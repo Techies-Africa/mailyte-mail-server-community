@@ -14,12 +14,11 @@ systems when rate limits approach or exceed configured thresholds.
 """
 
 import logging
-import time
 import threading
-from typing import Dict, Any, Optional, List, Set
-from datetime import datetime, timedelta
+import time
 from dataclasses import dataclass
-import json
+from datetime import datetime, timedelta
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +40,7 @@ class AlertThreshold:
     dedup_window: int = 300  # 5 minutes
 
     # Alert priorities
-    priority_map: Dict[str, int] = None
+    priority_map: dict[str, int] = None
 
     def __post_init__(self):
         if self.priority_map is None:
@@ -78,8 +77,8 @@ class RateLimitAlertService:
         self.monitoring_interval = 60  # Check every minute
 
         # Alert deduplication tracking
-        self.recent_alerts: Set[str] = set()
-        self.alert_history: Dict[str, datetime] = {}
+        self.recent_alerts: set[str] = set()
+        self.alert_history: dict[str, datetime] = {}
 
         # Performance tracking
         self.alerts_sent = 0
@@ -294,7 +293,7 @@ class RateLimitAlertService:
             logger.error(f"Error in threshold checking: {e}")
             return False
 
-    def _determine_alert_level(self, usage_percentage: float, config_rule) -> Optional[str]:
+    def _determine_alert_level(self, usage_percentage: float, config_rule) -> str | None:
         """
         Determine alert level based on usage percentage and thresholds.
 
@@ -532,7 +531,7 @@ class RateLimitAlertService:
             logger.error(f"Error cleaning up old alerts: {e}")
             return 0
 
-    def get_alert_stats(self) -> Dict[str, Any]:
+    def get_alert_stats(self) -> dict[str, Any]:
         """
         Get alert service statistics and performance metrics.
 

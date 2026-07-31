@@ -16,14 +16,15 @@ Key Features:
 - Enhanced multi-tenant support
 """
 
-from fastapi import APIRouter, Request, HTTPException, Query
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any
-from datetime import datetime
+import html as html_module
 import logging
 import re
-import html as html_module
+from datetime import datetime
+from typing import Any
+
+from fastapi import APIRouter, Query, Request
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
 
 def sanitize_text(value):
@@ -36,23 +37,25 @@ def sanitize_text(value):
     return html_module.escape(value, quote=True)
 
 
-import sys
 import base64
-import subprocess
-from pathlib import Path
-from utils.database import get_db_connection
-from utils.auth import require_api_key, create_api_response
-from database.models.core import Organization, Domain, EmailAccount
-from database.models.certificates import DKIMKey
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy import create_engine
-from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.hazmat.primitives import serialization
 import os
+import subprocess
+import sys
+from pathlib import Path
+
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from utils.auth import create_api_response, require_api_key
+from utils.database import get_db_connection
+
+from database.models.certificates import DKIMKey
+from database.models.core import Domain, EmailAccount, Organization
 
 project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
-from shared.webhook_dispatcher import dispatch_event, Events
+from shared.webhook_dispatcher import Events, dispatch_event
 
 # ---------------------------------------------------------------------------
 # Pydantic request/response models for OpenAPI documentation
@@ -68,7 +71,7 @@ class DomainCreate(BaseModel):
     organization_id: str = Field(
         ..., description="ID of the organization that owns this domain", example="org-123"
     )
-    description: Optional[str] = Field(
+    description: str | None = Field(
         None, description="Human-readable description of this domain", example="Main company domain"
     )
     dkim_enabled: bool = Field(
@@ -80,13 +83,13 @@ class DomainCreate(BaseModel):
     max_users: int = Field(1000, description="Maximum number of mailboxes allowed on this domain")
     max_quota: int = Field(10737418240, description="Maximum total storage in bytes (default 10GB)")
     active: bool = Field(True, description="Whether the domain is active and accepting mail")
-    rate_limits: Optional[Dict[str, Any]] = Field(
+    rate_limits: dict[str, Any] | None = Field(
         None, description="Rate-limiting rules for outbound email"
     )
-    storage_quotas: Optional[Dict[str, Any]] = Field(
+    storage_quotas: dict[str, Any] | None = Field(
         None, description="Per-account default storage quota overrides"
     )
-    external_id: Optional[str] = Field(
+    external_id: str | None = Field(
         None, description="External system ID for integration", example="dom-ext-456"
     )
 
@@ -94,28 +97,28 @@ class DomainCreate(BaseModel):
 class DomainUpdate(BaseModel):
     """Request body for updating an existing domain."""
 
-    description: Optional[str] = Field(None, description="Updated description")
-    active: Optional[bool] = Field(None, description="Enable or disable the domain")
-    max_users: Optional[int] = Field(None, description="Updated max users limit")
-    max_quota: Optional[int] = Field(None, description="Updated max storage quota in bytes")
-    dkim_enabled: Optional[bool] = Field(None, description="Enable or disable DKIM signing")
-    dkim_selector: Optional[str] = Field(None, description="Updated DKIM selector name")
-    rate_limits: Optional[Dict[str, Any]] = Field(None, description="Updated rate-limiting rules")
-    storage_quotas: Optional[Dict[str, Any]] = Field(
+    description: str | None = Field(None, description="Updated description")
+    active: bool | None = Field(None, description="Enable or disable the domain")
+    max_users: int | None = Field(None, description="Updated max users limit")
+    max_quota: int | None = Field(None, description="Updated max storage quota in bytes")
+    dkim_enabled: bool | None = Field(None, description="Enable or disable DKIM signing")
+    dkim_selector: str | None = Field(None, description="Updated DKIM selector name")
+    rate_limits: dict[str, Any] | None = Field(None, description="Updated rate-limiting rules")
+    storage_quotas: dict[str, Any] | None = Field(
         None, description="Updated storage quota overrides"
     )
-    external_id: Optional[str] = Field(None, description="Updated external system ID")
+    external_id: str | None = Field(None, description="Updated external system ID")
 
 
 class DomainQuotaUpdate(BaseModel):
     """Request body for updating domain quota settings."""
 
-    max_quota: Optional[int] = Field(
+    max_quota: int | None = Field(
         None, description="New total storage quota in bytes", example=21474836480
     )
-    max_users: Optional[int] = Field(None, description="New maximum mailbox count", example=500)
-    rate_limits: Optional[Dict[str, Any]] = Field(None, description="Updated rate-limiting rules")
-    storage_quotas: Optional[Dict[str, Any]] = Field(
+    max_users: int | None = Field(None, description="New maximum mailbox count", example=500)
+    rate_limits: dict[str, Any] | None = Field(None, description="Updated rate-limiting rules")
+    storage_quotas: dict[str, Any] | None = Field(
         None, description="Updated per-account storage quota overrides"
     )
 
@@ -126,17 +129,17 @@ class DNSRecord(BaseModel):
     type: str = Field(..., description="DNS record type (MX, TXT, CNAME)", example="MX")
     name: str = Field(..., description="DNS record name", example="example.com")
     value: str = Field(..., description="DNS record value", example="mx.mailyte.com.")
-    priority: Optional[int] = Field(None, description="Priority (for MX records)", example=10)
+    priority: int | None = Field(None, description="Priority (for MX records)", example=10)
     description: str = Field(..., description="Human-readable explanation of this record")
 
 
 class LegacyDomainEdit(BaseModel):
     """Request body for the legacy (mailcow-compatible) domain edit endpoint."""
 
-    items: List[str] = Field(
+    items: list[str] = Field(
         ..., description="List of domain names or IDs to update", example=["example.com"]
     )
-    attr: Dict[str, Any] = Field(
+    attr: dict[str, Any] = Field(
         ...,
         description="Attribute key-value pairs to set on each domain",
         example={"active": 1, "maxquota": 10240},

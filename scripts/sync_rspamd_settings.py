@@ -19,15 +19,15 @@ Usage:
     python3 sync_rspamd_settings.py --org <id>    # Sync specific org
 """
 
+import argparse
 import json
+import logging
 import os
 import sys
 import time
-import argparse
-import logging
 
-import redis
 import mysql.connector
+import redis
 
 logging.basicConfig(
     level=logging.INFO,

@@ -8,7 +8,8 @@ and unsubscribe management to maintain sending reputation.
 
 import logging
 from datetime import datetime, timedelta
-from typing import List, Dict, Optional, Any
+from typing import Any
+
 from database_service import DatabaseService
 
 logger = logging.getLogger(__name__)
@@ -117,7 +118,7 @@ class SuppressionService:
             logger.error(f"Error checking suppression for {email}: {e}")
             return False
 
-    def get_suppression_reason(self, email: str, organization_id: str) -> Optional[str]:
+    def get_suppression_reason(self, email: str, organization_id: str) -> str | None:
         """Get suppression reason for email."""
         try:
             query = """
@@ -181,7 +182,7 @@ class SuppressionService:
             logger.error(f"Error cleaning up expired suppressions: {e}")
             return 0
 
-    def get_suppression_stats(self, organization_id: str) -> Dict[str, Any]:
+    def get_suppression_stats(self, organization_id: str) -> dict[str, Any]:
         """Get suppression statistics for organization."""
         try:
             query = """

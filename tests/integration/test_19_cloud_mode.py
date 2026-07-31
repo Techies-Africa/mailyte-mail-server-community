@@ -8,10 +8,11 @@ that the remote database is properly initialised.
 """
 
 import os
+
 import pytest
 import redis
 
-from .conftest import DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASS
+from .conftest import DB_HOST, DB_NAME
 
 TIMEOUT = 10  # seconds for network operations
 
@@ -47,7 +48,7 @@ class TestCloudModeConfig:
         env_example = os.path.join(PROJECT_ROOT, ".env.example")
         if not os.path.exists(env_example):
             pytest.skip(".env.example not found at project root")
-        with open(env_example, "r") as fh:
+        with open(env_example) as fh:
             contents = fh.read()
         assert "DB_HOST" in contents, (
             ".env.example does not mention DB_HOST — operators won't know "

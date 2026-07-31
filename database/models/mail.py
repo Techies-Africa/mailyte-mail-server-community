@@ -3,26 +3,26 @@
 Mail Processing Models - Mail queue and delivery logs
 """
 
-from datetime import datetime
 from sqlalchemy import (
+    JSON,
     Column,
-    Integer,
-    String,
     DateTime,
-    Text,
-    Boolean,
-    Index,
-    BigInteger,
     Float,
     ForeignKey,
-    JSON,
+    Index,
+    Integer,
+    String,
+    Text,
+)
+from sqlalchemy import (
     Enum as SQLEnum,
 )
 from sqlalchemy.sql import func
 
+from shared.ulid_utils import generate_ulid
+
 from . import Base
 from .enums import MailStatus
-from shared.ulid_utils import generate_ulid
 
 
 # Mail Processing and Queue

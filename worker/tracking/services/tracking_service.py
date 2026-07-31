@@ -12,18 +12,17 @@ All tracking operations are performed through this centralized service
 to ensure consistency and maintainability.
 """
 
-import os
-import json
+import base64
 import hashlib
 import hmac
-import secrets
-import base64
-import time
-import re
-from datetime import datetime
-from urllib.parse import quote, unquote, urlparse, parse_qs, urlencode
-from typing import Dict, List, Optional, Any
 import logging
+import os
+import re
+import secrets
+import time
+from datetime import datetime
+from typing import Any
+from urllib.parse import parse_qs, quote, urlencode, urlparse
 
 from config import config_manager
 
@@ -41,7 +40,7 @@ class TrackingService:
         self.config = config_manager
         logger.info("Tracking service initialized")
 
-    def generate_tracking_id(self, email_data: Dict[str, Any], organization_id: str) -> str:
+    def generate_tracking_id(self, email_data: dict[str, Any], organization_id: str) -> str:
         """
         Generate unique tracking ID for email.
 
@@ -114,7 +113,7 @@ class TrackingService:
         encoded_url = quote(original_url, safe="")
         return f"{protocol}://{subdomain}.{domain}/track/click/{tracking_id}?url={encoded_url}"
 
-    def inject_tracking_into_html(self, html_content: str, tracking_data: Dict[str, Any]) -> str:
+    def inject_tracking_into_html(self, html_content: str, tracking_data: dict[str, Any]) -> str:
         """
         Inject tracking pixel and modify links in HTML content.
 
@@ -295,7 +294,7 @@ class TrackingService:
         logger.debug(f"Generated tracking ID for email {email_id}")
         return tracking_id
 
-    def decode_tracking_id(self, tracking_id: str) -> Optional[Dict[str, str]]:
+    def decode_tracking_id(self, tracking_id: str) -> dict[str, str] | None:
         """
         Decode and verify a tracking ID.
 
@@ -504,7 +503,7 @@ class TrackingService:
         logger.debug(f"Rewritten {links_rewritten} links for tracking")
         return html_content, links_rewritten
 
-    def get_tenant_config(self, tenant_id: str, domain_id: str = None) -> Dict[str, Any]:
+    def get_tenant_config(self, tenant_id: str, domain_id: str = None) -> dict[str, Any]:
         """
         Get tenant-specific tracking configuration.
 

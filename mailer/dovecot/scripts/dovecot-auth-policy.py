@@ -24,23 +24,18 @@ import logging
 import os
 import sys
 import time
-import hmac
-import hashlib
-import ipaddress
-from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from urllib.parse import urlparse, parse_qs
 from pathlib import Path
 
-import redis
 import mysql.connector
+import redis
 
 # Add project root to path for shared imports
 project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 try:
-    from shared.webhook_dispatcher import dispatch_event, Events
+    from shared.webhook_dispatcher import Events, dispatch_event
 
     _dispatcher_available = True
 except ImportError:

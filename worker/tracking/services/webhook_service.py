@@ -12,27 +12,27 @@ All webhook operations are encrypted and distributed across multiple
 endpoints for reliability and performance optimization.
 """
 
-import json
+import base64
 import hashlib
 import hmac
-import time
-import base64
-import secrets
+import json
 import logging
+import os
+import secrets
+import sys
+import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-from typing import Dict, List, Any, Optional, Tuple
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Any
+
+import requests
 from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
-import requests
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy.exc import SQLAlchemyError
 
 from config import config_manager
-import sys
-import os
 
 # Add database models to path
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
@@ -45,7 +45,7 @@ class WebhookEncryption:
     """Handles AES-256 encryption/decryption for webhook payloads"""
 
     @staticmethod
-    def generate_key_from_password(password: str, salt: bytes = None) -> Tuple[bytes, bytes]:
+    def generate_key_from_password(password: str, salt: bytes = None) -> tuple[bytes, bytes]:
         """Generate encryption key from password using PBKDF2"""
         if salt is None:
             salt = secrets.token_bytes(32)
@@ -60,7 +60,7 @@ class WebhookEncryption:
         return key, salt
 
     @staticmethod
-    def encrypt_payload(payload: Dict[str, Any], encryption_key: str) -> Dict[str, str]:
+    def encrypt_payload(payload: dict[str, Any], encryption_key: str) -> dict[str, str]:
         """Encrypt webhook payload using AES-256"""
         try:
             # Generate key from password
@@ -82,7 +82,7 @@ class WebhookEncryption:
             raise
 
     @staticmethod
-    def decrypt_payload(encrypted_data: Dict[str, str], encryption_key: str) -> Dict[str, Any]:
+    def decrypt_payload(encrypted_data: dict[str, str], encryption_key: str) -> dict[str, Any]:
         """Decrypt webhook payload (for testing/verification)"""
         try:
             salt = base64.b64decode(encrypted_data["salt"])
@@ -133,7 +133,7 @@ class EnterpriseWebhookService:
 
     def get_webhooks_for_event(
         self, event_type: str, service_type: str, tenant_id: str = None, domain_id: str = None
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """
         Retrieve webhook URLs configured for specific event and service types.
 
@@ -227,9 +227,9 @@ class EnterpriseWebhookService:
     def send_tracking_webhook(
         self,
         event_type: str,
-        tracking_data: Dict[str, str],
-        request_info: Dict[str, Any],
-        additional_data: Dict[str, Any] = None,
+        tracking_data: dict[str, str],
+        request_info: dict[str, Any],
+        additional_data: dict[str, Any] = None,
     ):
         """
         Send encrypted webhook notification for a tracking event to all configured endpoints.
@@ -260,7 +260,7 @@ class EnterpriseWebhookService:
         # Send to all configured webhooks
         self._send_to_multiple_webhooks(webhooks, payload, f"tracking.{event_type}")
 
-    def send_smtp_webhook(self, event_type: str, smtp_data: Dict[str, Any]):
+    def send_smtp_webhook(self, event_type: str, smtp_data: dict[str, Any]):
         """
         Send encrypted webhook notification for SMTP events.
 
@@ -292,10 +292,10 @@ class EnterpriseWebhookService:
     def _create_tracking_payload(
         self,
         event_type: str,
-        tracking_data: Dict[str, str],
-        request_info: Dict[str, Any],
-        additional_data: Dict[str, Any] = None,
-    ) -> Dict[str, Any]:
+        tracking_data: dict[str, str],
+        request_info: dict[str, Any],
+        additional_data: dict[str, Any] = None,
+    ) -> dict[str, Any]:
         """Create tracking webhook payload with privacy filtering."""
         # Filter request info based on privacy settings
         filtered_request_info = {}
@@ -339,7 +339,7 @@ class EnterpriseWebhookService:
         return payload
 
     def _send_to_multiple_webhooks(
-        self, webhooks: List[Dict[str, Any]], payload: Dict[str, Any], event_identifier: str
+        self, webhooks: list[dict[str, Any]], payload: dict[str, Any], event_identifier: str
     ):
         """Send payload to multiple webhook endpoints with encryption and failover."""
         if not webhooks:
@@ -377,7 +377,7 @@ class EnterpriseWebhookService:
         )
 
     def _send_single_webhook(
-        self, webhook: Dict[str, Any], payload: Dict[str, Any], event_identifier: str
+        self, webhook: dict[str, Any], payload: dict[str, Any], event_identifier: str
     ) -> bool:
         """Send payload to a single webhook endpoint with encryption and retry logic."""
         webhook_url = webhook["url"]
@@ -446,7 +446,7 @@ class EnterpriseWebhookService:
         )
         return False
 
-    def _generate_signature(self, payload: Dict[str, Any], secret: str) -> str:
+    def _generate_signature(self, payload: dict[str, Any], secret: str) -> str:
         """Generate HMAC signature for webhook validation."""
         payload_json = json.dumps(payload, sort_keys=True)
         signature = hmac.new(
@@ -454,7 +454,7 @@ class EnterpriseWebhookService:
         ).hexdigest()
         return f"sha256={signature}"
 
-    def _add_authentication(self, headers: Dict[str, str], auth_type: str, auth_credentials: str):
+    def _add_authentication(self, headers: dict[str, str], auth_type: str, auth_credentials: str):
         """Add authentication headers based on configuration."""
         if auth_type == "bearer":
             headers["Authorization"] = f"Bearer {auth_credentials}"
@@ -484,7 +484,7 @@ class EnterpriseWebhookService:
         except Exception as e:
             logger.error(f"Failed to update webhook stats for ID {webhook_id}: {e}")
 
-    def get_webhook_health_status(self) -> Dict[str, Any]:
+    def get_webhook_health_status(self) -> dict[str, Any]:
         """Get health status of all configured webhooks."""
         try:
             session = self.SessionLocal()

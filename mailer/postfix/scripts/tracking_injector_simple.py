@@ -6,11 +6,10 @@ A lightweight version of the tracking injector that works as a Postfix filter.
 This script injects tracking into emails by calling the tracking service API.
 """
 
-import sys
+import logging
 import os
 import subprocess
-import tempfile
-import logging
+import sys
 
 # Configure logging
 logging.basicConfig(

@@ -6,8 +6,7 @@ Provides easy commands for testing various aspects of the system
 
 import subprocess
 import sys
-import os
-import time
+
 import requests
 
 
@@ -152,7 +151,7 @@ def check_dependencies():
             missing.append(package)
 
     if missing:
-        print(f"\n📥 Install missing packages with:")
+        print("\n📥 Install missing packages with:")
         print(f"pip install {' '.join(missing)}")
         return False
 

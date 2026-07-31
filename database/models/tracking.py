@@ -3,27 +3,25 @@
 Tracking Models - Email tracking events and statistics
 """
 
-from datetime import datetime
 from sqlalchemy import (
+    JSON,
     Column,
+    DateTime,
+    ForeignKey,
+    Index,
     Integer,
     String,
-    DateTime,
     Text,
-    Boolean,
-    Index,
-    BigInteger,
-    Float,
-    ForeignKey,
-    JSON,
+)
+from sqlalchemy import (
     Enum as SQLEnum,
 )
 from sqlalchemy.sql import func
-from sqlalchemy.orm import relationship
+
+from shared.ulid_utils import generate_ulid
 
 from . import Base
 from .enums import EventType
-from shared.ulid_utils import generate_ulid
 
 
 # Email Tracking

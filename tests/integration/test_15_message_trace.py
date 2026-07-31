@@ -5,12 +5,10 @@ Verifies the message-trace API endpoints and backing database tables
 against the live Docker services.
 """
 
-import pytest
 import requests
 
 from .conftest import (
     API_BASE,
-    API_KEY,
     TEST_USER,
 )
 

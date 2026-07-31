@@ -11,21 +11,21 @@ This service monitors the health and performance of all configured webhooks:
 Integrates with the main health monitoring system for comprehensive oversight.
 """
 
+import logging
 import os
 import sys
-import json
 import time
-import logging
 from datetime import datetime, timedelta
-from typing import Dict, List, Any, Optional
+from typing import Any
+
 import requests
-from sqlalchemy import create_engine, text
+from flask import Flask, jsonify
+from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from flask import Flask, jsonify, request
 
 # Add database models to path
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", ".."))
-from database.models import WebhookURL, WebhookEvent
+from database.models import WebhookURL
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -58,7 +58,7 @@ class WebhookHealthMonitor:
             f"/{os.getenv('DB_NAME')}?charset=utf8mb4"
         )
 
-    def get_webhook_health_summary(self) -> Dict[str, Any]:
+    def get_webhook_health_summary(self) -> dict[str, Any]:
         """Get overall webhook health summary."""
         try:
             session = self.SessionLocal()
@@ -99,7 +99,7 @@ class WebhookHealthMonitor:
             logger.error(f"Failed to get webhook health summary: {e}")
             return {"error": str(e)}
 
-    def get_detailed_webhook_health(self) -> List[Dict[str, Any]]:
+    def get_detailed_webhook_health(self) -> list[dict[str, Any]]:
         """Get detailed health information for all webhooks."""
         try:
             session = self.SessionLocal()
@@ -140,7 +140,7 @@ class WebhookHealthMonitor:
             logger.error(f"Failed to get detailed webhook health: {e}")
             return []
 
-    def _calculate_webhook_health(self, webhook: WebhookURL) -> Dict[str, Any]:
+    def _calculate_webhook_health(self, webhook: WebhookURL) -> dict[str, Any]:
         """Calculate health status for a single webhook."""
         total_attempts = webhook.success_count + webhook.failure_count
         success_rate = (webhook.success_count / total_attempts * 100) if total_attempts > 0 else 0
@@ -201,7 +201,7 @@ class WebhookHealthMonitor:
         # Show first 30 and last 10 characters
         return f"{url[:30]}...{url[-10:]}"
 
-    def test_webhook_connectivity(self, webhook_id: int) -> Dict[str, Any]:
+    def test_webhook_connectivity(self, webhook_id: int) -> dict[str, Any]:
         """Test connectivity to a specific webhook endpoint."""
         try:
             session = self.SessionLocal()

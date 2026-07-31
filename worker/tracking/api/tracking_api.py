@@ -12,13 +12,14 @@ All endpoints include comprehensive error handling, rate limiting,
 and webhook notifications.
 """
 
-import sys
 import logging
-from pathlib import Path
+import sys
 from datetime import datetime
+from pathlib import Path
 from urllib.parse import unquote
-from fastapi import APIRouter, Request, Query
-from fastapi.responses import JSONResponse, Response, RedirectResponse
+
+from fastapi import APIRouter, Query, Request
+from fastapi.responses import JSONResponse, RedirectResponse, Response
 from services.rate_limiter import RateLimitExceeded
 
 # Ensure project root is on sys.path for shared imports
@@ -26,7 +27,7 @@ _project_root = Path(__file__).parent.parent.parent.parent
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
-from shared.webhook_dispatcher import dispatch_event, Events
+from shared.webhook_dispatcher import Events, dispatch_event
 
 logger = logging.getLogger(__name__)
 

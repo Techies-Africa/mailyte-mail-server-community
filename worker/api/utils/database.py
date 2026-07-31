@@ -3,10 +3,11 @@
 Database utilities for API Gateway
 """
 
-import os
 import logging
-import mysql.connector
+import os
 from datetime import datetime
+
+import mysql.connector
 
 logger = logging.getLogger(__name__)
 

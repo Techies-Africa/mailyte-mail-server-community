@@ -20,13 +20,13 @@ pytestmark = pytest.mark.xdist_group("smtp_delivery")
 from .conftest import (
     SMTP_HOST,
     SMTP_PORT,
-    TEST_USER,
-    TEST_PASS,
     TEST_DOMAIN,
+    TEST_PASS,
+    TEST_USER,
+    clear_inbox,
+    get_inbox_messages,
     send_test_email,
     wait_for_delivery,
-    get_inbox_messages,
-    clear_inbox,
 )
 
 TIMEOUT = 15  # seconds for SMTP operations
@@ -295,10 +295,10 @@ class TestSMTPAttachments:
         that include file attachments.  A failure here would indicate problems
         with the content filter or MIME parser in the delivery pipeline.
         """
+        from email import encoders
+        from email.mime.base import MIMEBase
         from email.mime.multipart import MIMEMultipart
         from email.mime.text import MIMEText
-        from email.mime.base import MIMEBase
-        from email import encoders
         from email.utils import formatdate, make_msgid
 
         subject = f"Attachment test {uuid.uuid4().hex[:8]}"

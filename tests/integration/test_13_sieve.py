@@ -12,11 +12,7 @@ import requests
 
 from .conftest import (
     API_BASE,
-    API_KEY,
     IMAP_HOST,
-    IMAP_PORT,
-    TEST_USER,
-    TEST_PASS,
 )
 
 TIMEOUT = 10
@@ -75,7 +71,7 @@ class TestManageSieve:
         sock.settimeout(TIMEOUT)
         try:
             sock.connect((IMAP_HOST, 4190))
-        except (ConnectionRefusedError, socket.timeout, OSError) as exc:
+        except (TimeoutError, ConnectionRefusedError, OSError) as exc:
             pytest.fail(f"ManageSieve port 4190 not reachable: {exc}")
         finally:
             sock.close()

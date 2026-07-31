@@ -15,17 +15,18 @@ Features:
 """
 
 import logging
-import time
-import threading
-from datetime import datetime, timedelta
-from typing import Dict, Any, Optional, List
-from sqlalchemy import create_engine, text
-from sqlalchemy.orm import sessionmaker
-from sqlalchemy.exc import SQLAlchemyError
 
 # Import models
 import sys
+import threading
+import time
+from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
+
+from sqlalchemy import create_engine
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import sessionmaker
 
 project_root = Path(__file__).parent.parent.parent.parent
 sys.path.append(str(project_root))
@@ -44,7 +45,7 @@ class WebhookCleanupService:
     flexibility to keep failed deliveries longer for retry purposes.
     """
 
-    def __init__(self, db_url: str, config: Dict[str, Any]):
+    def __init__(self, db_url: str, config: dict[str, Any]):
         """
         Initialize the webhook cleanup service.
 
@@ -287,7 +288,7 @@ class WebhookCleanupService:
 
         return total_deleted
 
-    def cleanup_now(self) -> Dict[str, Any]:
+    def cleanup_now(self) -> dict[str, Any]:
         """
         Perform immediate cleanup and return results.
 
@@ -309,7 +310,7 @@ class WebhookCleanupService:
             logger.error(f"Immediate cleanup failed: {e}")
             return {"success": False, "message": f"Cleanup failed: {str(e)}", "error": str(e)}
 
-    def get_cleanup_stats(self) -> Dict[str, Any]:
+    def get_cleanup_stats(self) -> dict[str, Any]:
         """
         Get cleanup service statistics.
 
@@ -338,7 +339,7 @@ class WebhookCleanupService:
             },
         }
 
-    def update_config(self, new_config: Dict[str, Any]):
+    def update_config(self, new_config: dict[str, Any]):
         """
         Update cleanup configuration at runtime.
 
@@ -358,7 +359,7 @@ class WebhookCleanupService:
             self.stop()
 
 
-def create_cleanup_service(db_url: str, config: Dict[str, Any]) -> WebhookCleanupService:
+def create_cleanup_service(db_url: str, config: dict[str, Any]) -> WebhookCleanupService:
     """
     Factory function to create a webhook cleanup service.
 

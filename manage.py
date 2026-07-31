@@ -16,11 +16,10 @@ Usage:
     python manage.py db:seed                    Run database seeders (placeholder)
 """
 
-import os
-import sys
-import subprocess
 import argparse
-from datetime import datetime
+import os
+import subprocess
+import sys
 
 # Ensure project root is on the path
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))

@@ -15,21 +15,19 @@ Endpoints:
   POST   /filters/vacation        — Manage vacation responder
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel, Field
-from typing import Optional, List
-from datetime import datetime, timedelta
 import logging
 import os
-import json
 import sys
+from datetime import datetime
 from pathlib import Path
 
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from utils.db import get_db
 
 project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
-from shared.webhook_dispatcher import dispatch_event, Events
+from shared.webhook_dispatcher import Events, dispatch_event
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -60,17 +58,15 @@ class SieveScriptResponse(BaseModel):
     content: str
     active: bool
     size: int
-    created_at: Optional[str] = None
+    created_at: str | None = None
 
 
 class VacationRequest(BaseModel):
     enabled: bool = Field(..., description="Enable or disable the vacation responder")
-    subject: Optional[str] = Field("Out of Office", description="Auto-reply subject line")
-    message: Optional[str] = Field(None, description="Auto-reply message body")
-    start_date: Optional[str] = Field(
-        None, description="Start date (ISO 8601)", example="2026-04-01"
-    )
-    end_date: Optional[str] = Field(None, description="End date (ISO 8601)", example="2026-04-15")
+    subject: str | None = Field("Out of Office", description="Auto-reply subject line")
+    message: str | None = Field(None, description="Auto-reply message body")
+    start_date: str | None = Field(None, description="Start date (ISO 8601)", example="2026-04-01")
+    end_date: str | None = Field(None, description="End date (ISO 8601)", example="2026-04-15")
     reply_interval: int = Field(86400, description="Minimum seconds between replies to same sender")
     external_only: bool = Field(False, description="Only reply to external senders")
 
@@ -149,7 +145,7 @@ def _get_active_link(email: str) -> str:
 
 @router.get(
     "/",
-    response_model=List[SieveScriptResponse],
+    response_model=list[SieveScriptResponse],
     summary="List Sieve filter scripts",
     description="List all Sieve scripts for a user, including each script's content, size, creation date, and whether it is the currently active script.",
 )
@@ -179,7 +175,7 @@ async def list_filters(
             if f.endswith(".sieve"):
                 name = f.replace(".sieve", "")
                 filepath = os.path.join(sieve_dir, f)
-                with open(filepath, "r") as fh:
+                with open(filepath) as fh:
                     content = fh.read()
                 stat = os.stat(filepath)
                 scripts.append(
@@ -197,7 +193,7 @@ async def list_filters(
 
 @router.get(
     "/templates",
-    response_model=List[FilterTemplate],
+    response_model=list[FilterTemplate],
     summary="List filter templates",
     description="Return the collection of pre-built Sieve filter templates (forward, auto-reply, move by subject/sender, block sender, attachment filter) that users can customize.",
 )
@@ -222,7 +218,7 @@ async def get_filter(
     if not os.path.exists(filepath):
         raise HTTPException(status_code=404, detail=f"Script '{name}' not found")
 
-    with open(filepath, "r") as f:
+    with open(filepath) as f:
         content = f.read()
 
     active_link = _get_active_link(email)

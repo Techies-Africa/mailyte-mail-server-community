@@ -14,8 +14,8 @@ and multi-tenant isolation.
 
 import logging
 from datetime import datetime
-from typing import Optional
-from fastapi import APIRouter, Request, Query
+
+from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
 
 logger = logging.getLogger(__name__)
@@ -231,7 +231,7 @@ async def get_tenant_stats(
     tenant_id: str,
     request: Request,
     days: int = Query(default=30),
-    domain_id: Optional[str] = Query(default=None),
+    domain_id: str | None = Query(default=None),
 ):
     """
     Get tracking statistics for a specific tenant.

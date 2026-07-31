@@ -11,8 +11,7 @@ Production:  AWS RDS, ElastiCache, S3
 """
 
 import os
-from dataclasses import dataclass, field
-from typing import Optional
+from dataclasses import dataclass
 
 
 @dataclass
@@ -178,7 +177,7 @@ class AppConfig:
 
 
 # Singleton instance
-_config: Optional[AppConfig] = None
+_config: AppConfig | None = None
 
 
 def get_config() -> AppConfig:

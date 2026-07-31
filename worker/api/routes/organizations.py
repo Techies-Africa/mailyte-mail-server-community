@@ -10,14 +10,15 @@ This module provides API endpoints for:
 - Usage statistics and monitoring
 """
 
-from fastapi import APIRouter, Request, HTTPException, Query
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any
-from datetime import datetime
+import html as html_module
 import logging
 import re
-import html as html_module
+from datetime import datetime
+from typing import Any
+
+from fastapi import APIRouter, Query, Request
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
 
 def sanitize_text(value):
@@ -30,18 +31,19 @@ def sanitize_text(value):
     return html_module.escape(value, quote=True)
 
 
+import os
 import sys
 from pathlib import Path
-from utils.database import get_db_connection
-from utils.auth import require_api_key, create_api_response
-from database.models.core import Organization, Domain, EmailAccount
-from sqlalchemy.orm import sessionmaker
+
 from sqlalchemy import create_engine
-import os
+from sqlalchemy.orm import sessionmaker
+from utils.auth import create_api_response, require_api_key
+
+from database.models.core import Domain, EmailAccount, Organization
 
 project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
-from shared.webhook_dispatcher import dispatch_event, Events
+from shared.webhook_dispatcher import Events, dispatch_event
 
 # ---------------------------------------------------------------------------
 # Pydantic request/response models for OpenAPI documentation
@@ -57,31 +59,31 @@ class OrganizationCreate(BaseModel):
         example="acme-corp",
     )
     name: str = Field(..., description="Organization display name", example="Acme Corp")
-    external_id: Optional[str] = Field(
+    external_id: str | None = Field(
         None, description="External system ID for integration", example="acme-123"
     )
-    admin_email: Optional[str] = Field(
+    admin_email: str | None = Field(
         None, description="Admin contact email", example="admin@acme.com"
     )
-    admin_name: Optional[str] = Field(None, description="Admin contact name", example="Jane Doe")
-    description: Optional[str] = Field(
+    admin_name: str | None = Field(None, description="Admin contact name", example="Jane Doe")
+    description: str | None = Field(
         None, description="Organization description", example="Primary business unit"
     )
-    settings: Optional[Dict[str, Any]] = Field(
+    settings: dict[str, Any] | None = Field(
         None, description="Arbitrary organization-level settings"
     )
-    rate_limits: Optional[Dict[str, Any]] = Field(
+    rate_limits: dict[str, Any] | None = Field(
         None, description="Rate-limiting rules applied across all domains"
     )
-    storage_quotas: Optional[Dict[str, Any]] = Field(
+    storage_quotas: dict[str, Any] | None = Field(
         None, description="Organization-wide storage quota overrides"
     )
-    webhook_urls: Optional[List[str]] = Field(
+    webhook_urls: list[str] | None = Field(
         None,
         description="Webhook endpoints for event notifications",
         example=["https://hooks.example.com/mailyte"],
     )
-    webhook_secret: Optional[str] = Field(
+    webhook_secret: str | None = Field(
         None, description="Shared secret for signing webhook payloads"
     )
     active: bool = Field(True, description="Whether the organization is active")
@@ -90,28 +92,28 @@ class OrganizationCreate(BaseModel):
 class OrganizationUpdate(BaseModel):
     """Request body for updating an existing organization."""
 
-    name: Optional[str] = Field(None, description="Updated organization display name")
-    external_id: Optional[str] = Field(None, description="Updated external system ID")
-    admin_email: Optional[str] = Field(None, description="Updated admin contact email")
-    admin_name: Optional[str] = Field(None, description="Updated admin contact name")
-    description: Optional[str] = Field(None, description="Updated organization description")
-    settings: Optional[Dict[str, Any]] = Field(None, description="Updated organization settings")
-    rate_limits: Optional[Dict[str, Any]] = Field(None, description="Updated rate-limiting rules")
-    storage_quotas: Optional[Dict[str, Any]] = Field(
+    name: str | None = Field(None, description="Updated organization display name")
+    external_id: str | None = Field(None, description="Updated external system ID")
+    admin_email: str | None = Field(None, description="Updated admin contact email")
+    admin_name: str | None = Field(None, description="Updated admin contact name")
+    description: str | None = Field(None, description="Updated organization description")
+    settings: dict[str, Any] | None = Field(None, description="Updated organization settings")
+    rate_limits: dict[str, Any] | None = Field(None, description="Updated rate-limiting rules")
+    storage_quotas: dict[str, Any] | None = Field(
         None, description="Updated storage quota overrides"
     )
-    webhook_urls: Optional[List[str]] = Field(None, description="Updated webhook endpoint list")
-    webhook_secret: Optional[str] = Field(None, description="Updated webhook secret")
-    active: Optional[bool] = Field(None, description="Enable or disable the organization")
+    webhook_urls: list[str] | None = Field(None, description="Updated webhook endpoint list")
+    webhook_secret: str | None = Field(None, description="Updated webhook secret")
+    active: bool | None = Field(None, description="Enable or disable the organization")
 
 
 class OrganizationQuotaUpdate(BaseModel):
     """Request body for updating organization quota settings."""
 
-    storage_quotas: Optional[Dict[str, Any]] = Field(
+    storage_quotas: dict[str, Any] | None = Field(
         None, description="Organization-wide storage quota overrides"
     )
-    rate_limits: Optional[Dict[str, Any]] = Field(
+    rate_limits: dict[str, Any] | None = Field(
         None, description="Organization-wide rate-limiting rules"
     )
 

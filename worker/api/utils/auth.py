@@ -7,13 +7,14 @@ Route handlers that need auth should add: `auth: dict = Depends(require_api_key(
 The legacy decorator syntax `@require_api_key('read')` also works via the wrapper.
 """
 
-import os
-import logging
 import inspect
-from typing import Optional
-from fastapi import Request, HTTPException, Depends
-from functools import wraps
+import logging
+import os
 from datetime import datetime
+from functools import wraps
+
+from fastapi import HTTPException, Request
+
 from .database import get_db_connection
 
 logger = logging.getLogger(__name__)
@@ -84,7 +85,7 @@ def create_api_response(response_type, message, data=None):
     return response
 
 
-def get_org_context(request: Request) -> Optional[str]:
+def get_org_context(request: Request) -> str | None:
     """Return the organization_id bound to the current API key, if any."""
     api_key_data = getattr(request.state, "api_key_data", None)
     if api_key_data:

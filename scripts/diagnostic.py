@@ -4,13 +4,11 @@ Mailyte Mail Server - Comprehensive Diagnostic Tool
 Analyzes the system and provides a roadmap to production readiness
 """
 
-import os
-import sys
 import json
 import subprocess
-from pathlib import Path
+import sys
 from datetime import datetime
-from typing import Dict, List, Tuple
+from pathlib import Path
 
 
 class Colors:
@@ -152,7 +150,7 @@ class MailServerDiagnostic:
 
         self.report["services"] = service_status
 
-    def check_service_completeness(self, service_path: Path, service_name: str) -> Dict:
+    def check_service_completeness(self, service_path: Path, service_name: str) -> dict:
         """Check if a service is complete"""
         status = {
             "exists": service_path.exists(),
@@ -245,7 +243,7 @@ class MailServerDiagnostic:
             if compose_file.exists():
                 self.success(f"{compose_file.name} found")
 
-                with open(compose_file, "r") as f:
+                with open(compose_file) as f:
                     content = f.read()
                     enabled_services = content.count("build:")
                     commented_services = content.count("#   build:")
@@ -463,23 +461,23 @@ class MailServerDiagnostic:
         self.print_header("QUICK START COMMANDS")
 
         print(f"{Colors.BOLD}1. Initial Setup:{Colors.ENDC}")
-        print(f"   cp .env.example .env")
-        print(f"   # Edit .env with your configuration")
+        print("   cp .env.example .env")
+        print("   # Edit .env with your configuration")
         print()
 
         print(f"{Colors.BOLD}2. Start with Docker Compose:{Colors.ENDC}")
-        print(f"   docker compose up -d mysql")
-        print(f"   docker compose up -d rate_limiter")
-        print(f"   # Enable more services as needed")
+        print("   docker compose up -d mysql")
+        print("   docker compose up -d rate_limiter")
+        print("   # Enable more services as needed")
         print()
 
         print(f"{Colors.BOLD}3. Check service health:{Colors.ENDC}")
-        print(f"   docker compose ps")
-        print(f"   docker compose logs -f [service_name]")
+        print("   docker compose ps")
+        print("   docker compose logs -f [service_name]")
         print()
 
         print(f"{Colors.BOLD}4. Run diagnostics again:{Colors.ENDC}")
-        print(f"   python diagnostic.py")
+        print("   python diagnostic.py")
 
     def save_report(self):
         """Save diagnostic report to JSON"""

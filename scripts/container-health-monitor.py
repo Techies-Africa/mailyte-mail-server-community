@@ -4,14 +4,12 @@ Mailyte Container Health Monitor and Auto-Fix Tool
 Monitors all containers, detects issues, and automatically fixes common problems
 """
 
-import os
-import sys
 import json
+import os
 import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
 
 
 class Colors:
@@ -58,7 +56,7 @@ class ContainerHealthMonitor:
         print(f"{Colors.OKGREEN}🔧{Colors.ENDC} {msg}")
         self.fixes_applied.append(msg)
 
-    def run_command(self, cmd: List[str], timeout: int = 30) -> Tuple[int, str, str]:
+    def run_command(self, cmd: list[str], timeout: int = 30) -> tuple[int, str, str]:
         """Run a command and return exit code, stdout, stderr"""
         try:
             result = subprocess.run(
@@ -70,7 +68,7 @@ class ContainerHealthMonitor:
         except Exception as e:
             return -1, "", str(e)
 
-    def get_container_list(self) -> List[Dict]:
+    def get_container_list(self) -> list[dict]:
         """Get list of all containers defined in docker-compose"""
         code, stdout, stderr = self.run_command(
             ["docker", "compose", "ps", "-a", "--format", "json"]
@@ -91,7 +89,7 @@ class ContainerHealthMonitor:
             self.error("Failed to parse container list JSON")
             return []
 
-    def check_container_status(self, container: Dict) -> Dict:
+    def check_container_status(self, container: dict) -> dict:
         """Check detailed status of a container"""
         name = container.get("Name", "unknown")
         state = container.get("State", "unknown")
@@ -213,7 +211,7 @@ class ContainerHealthMonitor:
 
         return False
 
-    def fix_port_conflict(self, container_name: str, health_info: Dict) -> bool:
+    def fix_port_conflict(self, container_name: str, health_info: dict) -> bool:
         """Fix port binding conflicts"""
         self.info(f"Attempting to fix port conflict for {container_name}")
 
@@ -279,7 +277,7 @@ class ContainerHealthMonitor:
 
         return False
 
-    def auto_fix_issues(self, container_name: str, health_info: Dict) -> bool:
+    def auto_fix_issues(self, container_name: str, health_info: dict) -> bool:
         """Automatically fix detected issues"""
         issues = health_info.get("issues", [])
 
@@ -389,7 +387,7 @@ class ContainerHealthMonitor:
                     # Show last few log lines
                     logs = health.get("logs", "").strip().split("\n")
                     if logs:
-                        print(f"    Recent logs:")
+                        print("    Recent logs:")
                         for log_line in logs[-5:]:
                             if log_line.strip():
                                 print(f"      {log_line[:100]}")

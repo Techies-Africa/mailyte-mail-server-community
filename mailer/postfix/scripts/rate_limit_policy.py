@@ -24,13 +24,12 @@ If the HTTP service is unreachable the script fails open (DUNNO) so that
 mail is never silently dropped because of a service outage.
 """
 
-import os
-import sys
 import json
 import logging
-from typing import Dict
-from urllib.request import Request, urlopen
+import os
+import sys
 from urllib.error import URLError
+from urllib.request import Request, urlopen
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -84,7 +83,7 @@ def _http_post_text(url: str, body: str, timeout: int = HTTP_TIMEOUT) -> str:
 # ---------------------------------------------------------------------------
 # Policy logic
 # ---------------------------------------------------------------------------
-def check_via_json_api(attrs: Dict[str, str]) -> str:
+def check_via_json_api(attrs: dict[str, str]) -> str:
     """
     Check rate limit using the /check_rate_limit JSON API.
 
@@ -149,7 +148,7 @@ def check_via_policy_endpoint(raw_request: str) -> str:
     return "DUNNO"
 
 
-def process_request(attrs: Dict[str, str], raw_request: str) -> str:
+def process_request(attrs: dict[str, str], raw_request: str) -> str:
     """Decide which backend to use and return the Postfix policy action."""
     if USE_POLICY_ENDPOINT:
         return check_via_policy_endpoint(raw_request)
@@ -169,7 +168,7 @@ def main():
 
     while True:
         try:
-            attrs: Dict[str, str] = {}
+            attrs: dict[str, str] = {}
             raw_lines = []
 
             for line in sys.stdin:

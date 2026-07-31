@@ -38,16 +38,16 @@ Usage:
     rows = pool.cached_query("SELECT * FROM domains WHERE active = %s", (1,), ttl=600)
 """
 
-import os
-import json
 import hashlib
+import json
 import logging
+import os
 from contextlib import contextmanager
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any
 
-import mysql.connector
-from mysql.connector import pooling, Error as MySQLError
+from mysql.connector import Error as MySQLError
+from mysql.connector import pooling
 
 logger = logging.getLogger(__name__)
 
@@ -75,14 +75,14 @@ class DatabasePool:
         self,
         pool_size: int = 10,
         pool_name: str = "mailyte_pool",
-        db_host: Optional[str] = None,
-        db_port: Optional[int] = None,
-        db_name: Optional[str] = None,
-        db_user: Optional[str] = None,
-        db_password: Optional[str] = None,
-        read_host: Optional[str] = None,
-        redis_host: Optional[str] = None,
-        redis_port: Optional[int] = None,
+        db_host: str | None = None,
+        db_port: int | None = None,
+        db_name: str | None = None,
+        db_user: str | None = None,
+        db_password: str | None = None,
+        read_host: str | None = None,
+        redis_host: str | None = None,
+        redis_port: int | None = None,
     ):
         self.pool_size = pool_size
         self.pool_name = pool_name
@@ -104,10 +104,10 @@ class DatabasePool:
         self._redis_port = int(redis_port or os.getenv("REDIS_PORT", "6379"))
 
         # Pools are created lazily on first use
-        self._primary_pool: Optional[pooling.MySQLConnectionPool] = None
-        self._replica_pool: Optional[pooling.MySQLConnectionPool] = None
+        self._primary_pool: pooling.MySQLConnectionPool | None = None
+        self._replica_pool: pooling.MySQLConnectionPool | None = None
         self._redis_client = None
-        self._redis_available: Optional[bool] = None
+        self._redis_available: bool | None = None
 
     # ------------------------------------------------------------------
     # Pool creation
@@ -157,7 +157,7 @@ class DatabasePool:
         return self._primary_pool
 
     @property
-    def replica_pool(self) -> Optional[pooling.MySQLConnectionPool]:
+    def replica_pool(self) -> pooling.MySQLConnectionPool | None:
         """Lazy accessor for the replica pool. Returns None when no replica is configured."""
         if not self._read_host:
             return None
@@ -343,7 +343,7 @@ class DatabasePool:
             return None
 
     @staticmethod
-    def _cache_key(query: str, params: Optional[tuple]) -> str:
+    def _cache_key(query: str, params: tuple | None) -> str:
         """Generate a deterministic cache key from query text and parameters."""
         raw = json.dumps({"q": query, "p": params}, sort_keys=True, default=str)
         digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
@@ -352,9 +352,9 @@ class DatabasePool:
     def cached_query(
         self,
         query: str,
-        params: Optional[tuple] = None,
+        params: tuple | None = None,
         ttl: int = 300,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """
         Execute a read query with Redis-backed caching.
 
@@ -405,7 +405,7 @@ class DatabasePool:
 
         return serialisable_rows
 
-    def invalidate_cache(self, query: str, params: Optional[tuple] = None) -> bool:
+    def invalidate_cache(self, query: str, params: tuple | None = None) -> bool:
         """
         Remove a cached query result from Redis.
 
@@ -456,7 +456,7 @@ class DatabasePool:
 # Singleton helper
 # ======================================================================
 
-_db_pool_instance: Optional[DatabasePool] = None
+_db_pool_instance: DatabasePool | None = None
 
 
 def get_db_pool(**kwargs) -> DatabasePool:
@@ -501,7 +501,7 @@ def generate_partition_sql(
     table_name: str,
     partition_column: str,
     interval: str = "monthly",
-    start_date: Optional[datetime] = None,
+    start_date: datetime | None = None,
     num_partitions: int = 12,
 ) -> str:
     """
@@ -540,7 +540,7 @@ def generate_partition_sql(
         today = datetime.utcnow()
         start_date = today.replace(day=1)
 
-    partitions: List[str] = []
+    partitions: list[str] = []
     current = start_date
 
     for _ in range(num_partitions):
@@ -580,7 +580,7 @@ def generate_partition_sql(
 # ======================================================================
 
 
-def _make_serialisable(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def _make_serialisable(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """
     Convert row dictionaries so that every value is JSON-serialisable.
 
@@ -588,11 +588,12 @@ def _make_serialisable(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     their string representations.
     """
     import decimal
-    from datetime import date, timedelta as td
+    from datetime import date
+    from datetime import timedelta as td
 
-    clean: List[Dict[str, Any]] = []
+    clean: list[dict[str, Any]] = []
     for row in rows:
-        clean_row: Dict[str, Any] = {}
+        clean_row: dict[str, Any] = {}
         for key, value in row.items():
             if isinstance(value, (datetime, date)):
                 clean_row[key] = value.isoformat()

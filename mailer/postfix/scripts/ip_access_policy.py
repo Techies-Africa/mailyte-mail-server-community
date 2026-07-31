@@ -22,21 +22,22 @@ If an organization has NO ip_access_rules, all IPs are allowed (default open).
 If an organization HAS whitelist rules, ONLY those IPs are allowed.
 """
 
+import ipaddress
+import json
+import logging
 import os
 import sys
-import logging
-import ipaddress
+from pathlib import Path
+
 import mysql.connector
 import redis
-import json
-from pathlib import Path
 
 # Add project root for shared imports
 project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 try:
-    from shared.webhook_dispatcher import dispatch_event, Events
+    from shared.webhook_dispatcher import Events, dispatch_event
 
     _dispatcher_available = True
 except ImportError:

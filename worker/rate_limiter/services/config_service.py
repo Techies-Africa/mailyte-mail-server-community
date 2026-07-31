@@ -13,14 +13,14 @@ The service provides a high-performance interface for retrieving rate limit
 configurations while ensuring data consistency and minimal database load.
 """
 
-import logging
 import json
-from typing import Dict, Any, Optional, List, Tuple
-from datetime import datetime, timedelta
-from dataclasses import dataclass, asdict
-import mysql.connector
-from mysql.connector import pooling
+import logging
+from dataclasses import asdict, dataclass
+from datetime import datetime
+from typing import Any
+
 import redis
+from mysql.connector import pooling
 
 from config import config
 
@@ -96,7 +96,7 @@ class RateLimitConfigService:
             logger.error(f"Failed to create database connection pool: {e}")
             raise
 
-    def _create_redis_client(self) -> Optional[redis.Redis]:
+    def _create_redis_client(self) -> redis.Redis | None:
         """Create Redis client for caching"""
         try:
             redis_client = redis.Redis(**config.get_redis_connection_kwargs())
@@ -485,7 +485,7 @@ class RateLimitConfigService:
         except Exception as e:
             logger.warning(f"Failed to invalidate cache: {e}")
 
-    def get_config_stats(self) -> Dict[str, Any]:
+    def get_config_stats(self) -> dict[str, Any]:
         """Get configuration service statistics"""
         stats = {
             "service": "config_service",
@@ -548,10 +548,10 @@ class RateLimitRule:
     critical_threshold: int = 95
 
     # Metadata
-    description: Optional[str] = None
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
-    created_by: Optional[str] = None
+    description: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    created_by: str | None = None
 
 
 class RateLimitConfigService:
@@ -575,7 +575,7 @@ class RateLimitConfigService:
 
         logger.info("Rate limit configuration service initialized")
 
-    def _init_database_pool(self) -> Optional[pooling.MySQLConnectionPool]:
+    def _init_database_pool(self) -> pooling.MySQLConnectionPool | None:
         """
         Initialize MySQL connection pool for database operations.
 
@@ -606,7 +606,7 @@ class RateLimitConfigService:
             logger.error(f"Failed to create database connection pool: {e}")
             return None
 
-    def _init_redis(self) -> Optional[redis.Redis]:
+    def _init_redis(self) -> redis.Redis | None:
         """
         Initialize Redis connection for caching.
 
@@ -977,8 +977,8 @@ class RateLimitConfigService:
             return False
 
     def list_rate_limit_rules(
-        self, entity_type: Optional[str] = None, identifier: Optional[str] = None
-    ) -> List[RateLimitRule]:
+        self, entity_type: str | None = None, identifier: str | None = None
+    ) -> list[RateLimitRule]:
         """
         List rate limit rules with optional filtering.
 
@@ -1074,7 +1074,7 @@ class RateLimitConfigService:
         except Exception as e:
             logger.warning(f"Failed to invalidate config cache: {e}")
 
-    def get_config_stats(self) -> Dict[str, Any]:
+    def get_config_stats(self) -> dict[str, Any]:
         """
         Get configuration service statistics.
 

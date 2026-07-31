@@ -15,17 +15,16 @@ Usage:
     python3 generate_dkim.py --dns <domain>        # Show DNS record for domain
 """
 
-import os
-import sys
 import argparse
+import os
 import textwrap
-import mysql.connector
 from datetime import datetime
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
-from cryptography.hazmat.backends import default_backend
 from pathlib import Path
 
+import mysql.connector
+from cryptography.hazmat.backends import default_backend
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 
 # Configuration from environment
 DB_CONFIG = {

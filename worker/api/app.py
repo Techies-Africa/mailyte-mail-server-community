@@ -1,11 +1,12 @@
-from fastapi import FastAPI, HTTPException, Depends, Request
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, HTMLResponse
-from fastapi.staticfiles import StaticFiles
-import uvicorn
 import os
 import sys
 from pathlib import Path
+
+import uvicorn
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 # Add project root to path
 project_root = Path(__file__).parent.parent.parent
@@ -196,13 +197,13 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 @app.get("/", include_in_schema=False)
 async def root():
-    with open(os.path.join(TEMPLATES_DIR, "landing.html"), "r") as f:
+    with open(os.path.join(TEMPLATES_DIR, "landing.html")) as f:
         return HTMLResponse(f.read())
 
 
 @app.get("/features", include_in_schema=False)
 async def features():
-    with open(os.path.join(TEMPLATES_DIR, "features.html"), "r") as f:
+    with open(os.path.join(TEMPLATES_DIR, "features.html")) as f:
         return HTMLResponse(f.read())
 
 

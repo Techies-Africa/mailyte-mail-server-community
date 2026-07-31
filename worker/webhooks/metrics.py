@@ -4,7 +4,7 @@ Provides metrics collection functionality for the webhooks service.
 """
 
 import time
-from typing import Dict, Any
+from typing import Any
 
 # Simple metrics collection
 _metrics = {
@@ -18,7 +18,7 @@ _metrics = {
 _start_time = time.time()
 
 
-def get_metrics() -> Dict[str, Any]:
+def get_metrics() -> dict[str, Any]:
     """Get current metrics for the webhooks service."""
     global _metrics, _start_time
 

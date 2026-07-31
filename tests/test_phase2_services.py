@@ -16,15 +16,14 @@ Usage:
   python3 tests/test_phase2_services.py --service api  # Test specific service
 """
 
+import argparse
+import json
 import os
 import sys
-import json
 import time
-import uuid
-import argparse
-import urllib.request
 import urllib.error
-from datetime import datetime
+import urllib.request
+import uuid
 
 # ---------------------------------------------------------------------------
 # Configuration — host ports from docker-compose.yml

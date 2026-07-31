@@ -12,22 +12,22 @@ from sqlalchemy.ext.declarative import declarative_base
 Base = declarative_base()
 
 # Import all models to make them available
-from .core import Organization, Domain, EmailAccount, Alias
-from .mail import MailQueue, MailLog
-from .tracking import EmailTracking, TrackingStatistics
-from .webhooks import WebhookURL, WebhookDeliveryLog
-from .certificates import SSLCertificate, DKIMKey
 from .authentication import APIKey, UserSession
-from .system import SystemConfig, HealthCheck, ServiceMetrics
+from .certificates import DKIMKey, SSLCertificate
+from .core import Alias, Domain, EmailAccount, Organization
 from .enums import (
     AccountStatus,
-    CertificateStatus,
-    MailStatus,
-    EventType,
-    WebhookDeliveryStatus,
     AlertLevel,
+    CertificateStatus,
+    EventType,
     LimitType,
+    MailStatus,
+    WebhookDeliveryStatus,
 )
+from .mail import MailLog, MailQueue
+from .system import HealthCheck, ServiceMetrics, SystemConfig
+from .tracking import EmailTracking, TrackingStatistics
+from .webhooks import WebhookDeliveryLog, WebhookURL
 
 # Export all models
 __all__ = [

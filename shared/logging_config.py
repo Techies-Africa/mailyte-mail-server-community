@@ -13,9 +13,9 @@ Features:
 - Service-specific log files in organized directory structure
 """
 
-import os
 import logging
 import logging.handlers
+import os
 from datetime import datetime
 from pathlib import Path
 
@@ -232,9 +232,7 @@ class LogTimer:
 
 
 import logging
-import os
 from logging.handlers import RotatingFileHandler
-from pathlib import Path
 
 
 def setup_logging(log_level=None):

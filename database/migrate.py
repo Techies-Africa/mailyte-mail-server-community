@@ -15,8 +15,8 @@ Usage:
 """
 
 import os
-import sys
 import subprocess
+import sys
 from pathlib import Path
 
 # Add project root to Python path
@@ -28,7 +28,7 @@ def load_env_file():
     """Load environment variables from .env file"""
     env_file = project_root / ".env"
     if env_file.exists():
-        with open(env_file, "r") as f:
+        with open(env_file) as f:
             for line in f:
                 line = line.strip()
                 if line and not line.startswith("#") and "=" in line:

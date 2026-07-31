@@ -12,9 +12,8 @@ NOTE: This entire module runs serially (no xdist parallelism) because
 several tests manipulate raw socket state on the same ports.
 """
 
-import socket
 import smtplib
-import ssl
+import socket
 import uuid
 
 import pytest
@@ -25,9 +24,9 @@ from .conftest import (
     SMTP_HOST,
     SMTP_PORT,
     SMTP_PORT_25,
-    TEST_USER,
-    TEST_PASS,
     TEST_DOMAIN,
+    TEST_PASS,
+    TEST_USER,
 )
 
 TIMEOUT = 15  # seconds for socket operations
@@ -169,7 +168,7 @@ class TestInboundProtocolSecurity:
                     # If we have received responses to all three commands, stop
                     if resp.count(b"\r\n") >= 3:
                         break
-            except socket.timeout:
+            except TimeoutError:
                 pass  # timeout is fine — we got what we got
 
             # The test passes as long as the server did not crash.
@@ -200,10 +199,10 @@ class TestInboundHeaderChecks:
         any message carrying a .exe attachment before it reaches the user's
         mailbox.
         """
+        from email import encoders
+        from email.mime.base import MIMEBase
         from email.mime.multipart import MIMEMultipart
         from email.mime.text import MIMEText
-        from email.mime.base import MIMEBase
-        from email import encoders
         from email.utils import formatdate, make_msgid
 
         msg = MIMEMultipart()

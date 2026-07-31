@@ -13,13 +13,14 @@ The service provides Redis-backed counters for rate limiting while maintaining
 data consistency and handling Redis failures gracefully.
 """
 
-import logging
 import json
+import logging
 import time
-from typing import Dict, Any, Optional, List, Tuple
 from datetime import datetime, timedelta
+from typing import Any
+
 import redis
-from redis.exceptions import RedisError, ConnectionError
+from redis.exceptions import RedisError
 
 from config import config
 
@@ -56,7 +57,7 @@ class RateLimitCacheService:
 
         logger.info("Rate limit cache service initialized")
 
-    def _init_redis(self) -> Optional[redis.Redis]:
+    def _init_redis(self) -> redis.Redis | None:
         """
         Initialize Redis connection with connection pooling and error handling.
 
@@ -90,7 +91,7 @@ class RateLimitCacheService:
 
     def increment_counter(
         self, entity_type: str, identifier: str, direction: str, amount: int = 1
-    ) -> Dict[str, int]:
+    ) -> dict[str, int]:
         """
         Atomically increment usage counters for an entity.
 
@@ -164,7 +165,7 @@ class RateLimitCacheService:
 
     def get_current_counts(
         self, entity_type: str, identifier: str, direction: str
-    ) -> Dict[str, int]:
+    ) -> dict[str, int]:
         """
         Get current usage counts for an entity across all time windows.
 
@@ -226,7 +227,7 @@ class RateLimitCacheService:
             logger.error(f"Unexpected error getting counts: {e}")
             return {"hourly_count": 0, "daily_count": 0, "monthly_count": 0}
 
-    def get_bulk_counts(self, entities: List[Tuple[str, str, str]]) -> Dict[str, Dict[str, int]]:
+    def get_bulk_counts(self, entities: list[tuple[str, str, str]]) -> dict[str, dict[str, int]]:
         """
         Get current counts for multiple entities in a single operation.
 
@@ -351,7 +352,7 @@ class RateLimitCacheService:
             logger.error(f"Error setting cache: {e}")
             return False
 
-    def get_rate_limit_cache(self, cache_key: str) -> Optional[Any]:
+    def get_rate_limit_cache(self, cache_key: str) -> Any | None:
         """
         Get a value from the rate limit cache.
 
@@ -461,7 +462,7 @@ class RateLimitCacheService:
             logger.error(f"Error during counter cleanup: {e}")
             return 0
 
-    def get_cache_stats(self) -> Dict[str, Any]:
+    def get_cache_stats(self) -> dict[str, Any]:
         """
         Get cache service statistics and health information.
 
@@ -507,7 +508,7 @@ class RateLimitCacheService:
 
         return stats
 
-    def health_check(self) -> Dict[str, Any]:
+    def health_check(self) -> dict[str, Any]:
         """
         Perform health check on the cache service.
 

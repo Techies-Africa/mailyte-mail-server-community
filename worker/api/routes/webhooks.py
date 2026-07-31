@@ -8,20 +8,19 @@ All operations are org-scoped via the API key's organization_id.
 
 import json
 import logging
-import os
 import secrets
 import sys
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, Request, HTTPException, Query
+from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse
-from utils.auth import require_api_key, create_api_response, get_org_context
+from utils.auth import create_api_response, require_api_key
 from utils.database import get_db_connection
 
 project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
-from shared.webhook_dispatcher import dispatch_event, Events
+from shared.webhook_dispatcher import Events, dispatch_event
 
 logger = logging.getLogger(__name__)
 router = APIRouter()

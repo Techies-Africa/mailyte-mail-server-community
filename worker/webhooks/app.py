@@ -14,32 +14,31 @@ The service is designed with modular architecture for scalability
 and includes comprehensive security features for production environments.
 """
 
-import os
-import sys
-import json
-import logging
-import threading
-import queue
-import time
-from pathlib import Path
-from datetime import datetime
-from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import JSONResponse, PlainTextResponse
-import email
 import base64
+import email
+import os
+import queue
+import sys
+import threading
+import time
+from datetime import datetime
+from pathlib import Path
+
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 # Add shared directory to path
 project_root = Path(__file__).parent.parent.parent
 sys.path.append(str(project_root / "shared"))
 
 from metrics import get_metrics
-from shared.logging_config import get_service_logger, get_performance_logger, LogTimer
-from shared.webhook_dispatcher import dispatch_event, Events
+from services.cleanup_service import WebhookCleanupService
 
 # Import modular webhook services
-from services.email_processor import email_processor
 from services.notification_sender import notification_sender
-from services.cleanup_service import WebhookCleanupService
+
+from shared.logging_config import LogTimer, get_performance_logger
+from shared.webhook_dispatcher import Events, dispatch_event
 
 app = FastAPI(title="Webhooks Service")
 

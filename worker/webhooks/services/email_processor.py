@@ -13,17 +13,14 @@ All processing is designed to be secure and privacy-aware,
 with configurable options for content filtering and anonymization.
 """
 
-import email
 import base64
+import email
 import logging
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from email.mime.base import MIMEBase
-from email import encoders
-from typing import Dict, List, Any, Optional, Tuple
-import chardet
-from pathlib import Path
 import os
+from pathlib import Path
+from typing import Any
+
+import chardet
 
 logger = logging.getLogger(__name__)
 
@@ -125,7 +122,7 @@ class EmailProcessor:
             logger.error(f"Failed to extract organization from email {email_address}: {e}")
             return "default"
 
-    def extract_email_metadata(self, eml_content: str) -> Dict[str, Any]:
+    def extract_email_metadata(self, eml_content: str) -> dict[str, Any]:
         """
         Extract comprehensive metadata from email content with privacy protection.
 
@@ -192,7 +189,7 @@ class EmailProcessor:
                 "attachment_count": 0,
             }
 
-    def _analyze_multipart_message(self, msg: email.message.Message) -> Dict[str, Any]:
+    def _analyze_multipart_message(self, msg: email.message.Message) -> dict[str, Any]:
         """Analyze multipart message structure and attachments."""
         attachment_info = {
             "has_attachments": False,
@@ -242,7 +239,7 @@ class EmailProcessor:
 
         return attachment_info
 
-    def _analyze_single_part_message(self, msg: email.message.Message) -> Dict[str, Any]:
+    def _analyze_single_part_message(self, msg: email.message.Message) -> dict[str, Any]:
         """Analyze single-part message structure."""
         content_type = msg.get_content_type()
 
@@ -257,7 +254,7 @@ class EmailProcessor:
             "other_parts": 1 if content_type not in ["text/plain", "text/html"] else 0,
         }
 
-    def _extract_body_summary(self, msg: email.message.Message) -> Dict[str, Any]:
+    def _extract_body_summary(self, msg: email.message.Message) -> dict[str, Any]:
         """Extract body content summary without including full content."""
         body_info = {
             "has_text_body": False,
@@ -329,7 +326,7 @@ class EmailProcessor:
 
         return body_info
 
-    def _decode_part_content(self, part: email.message.Message) -> Optional[str]:
+    def _decode_part_content(self, part: email.message.Message) -> str | None:
         """Safely decode email part content with encoding detection."""
         try:
             payload = part.get_payload(decode=True)
@@ -358,7 +355,7 @@ class EmailProcessor:
 
     def extract_attachments(
         self, eml_content: str, include_content: bool = False
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """
         Extract attachment information from email with optional content inclusion.
 
@@ -437,7 +434,7 @@ class EmailProcessor:
             logger.error(f"Failed to extract attachments: {e}")
             return []
 
-    def create_eml_summary(self, eml_content: str) -> Dict[str, Any]:
+    def create_eml_summary(self, eml_content: str) -> dict[str, Any]:
         """
         Create a comprehensive email summary for webhook notifications.
 
@@ -480,7 +477,7 @@ class EmailProcessor:
                 },
             }
 
-    def _check_sensitive_content(self, metadata: Dict[str, Any]) -> bool:
+    def _check_sensitive_content(self, metadata: dict[str, Any]) -> bool:
         """Check if email contains potentially sensitive content."""
         # Simple heuristics for sensitive content detection
         sensitive_indicators = [
@@ -539,8 +536,9 @@ class EmailProcessor:
               existing webhook functionality.
         """
         try:
-            import mysql.connector
             import os
+
+            import mysql.connector
 
             conn = mysql.connector.connect(
                 host=os.getenv("DB_HOST", "localhost"),

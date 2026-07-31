@@ -10,13 +10,11 @@ import pytest
 import requests
 
 from .conftest import (
+    API_BASE,
+    RATE_LIMITER_BASE,
     TRACKING_BASE,
     WEBHOOKS_BASE,
-    RATE_LIMITER_BASE,
-    API_BASE,
-    API_KEY,
 )
-
 
 # ---------------------------------------------------------------------------
 # Tracking service

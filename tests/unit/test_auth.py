@@ -5,9 +5,8 @@ Unit tests for worker/api/utils/auth.py
 
 import hashlib
 import sys
-import os
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+
 import pytest
 
 project_root = Path(__file__).parent.parent.parent
@@ -15,11 +14,11 @@ sys.path.insert(0, str(project_root))
 sys.path.insert(0, str(project_root / "worker" / "api"))
 
 from utils.auth import (
-    hash_password,
-    verify_password,
-    validate_update_columns,
     ALLOWED_DOMAIN_UPDATE_COLUMNS,
     ALLOWED_MAILBOX_UPDATE_COLUMNS,
+    hash_password,
+    validate_update_columns,
+    verify_password,
 )
 
 

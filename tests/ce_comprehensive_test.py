@@ -4,7 +4,15 @@ Mailyte CE — Comprehensive Test Suite
 Tests all Community Edition features against running Docker services.
 """
 
-import requests, json, time, smtplib, imaplib, poplib, ssl, socket, os
+import imaplib
+import os
+import poplib
+import smtplib
+import socket
+import ssl
+import time
+
+import requests
 
 API = os.getenv("API_BASE", "http://api:8080/api/v1")
 KEY = os.getenv("API_KEY", "test-api-key-123")
@@ -20,8 +28,8 @@ def test(name, passed, detail=""):
 
 
 def send_email(from_addr, to_addr, subject, body, password="testpass123", html=False):
-    from email.mime.text import MIMEText
     from email.mime.multipart import MIMEMultipart
+    from email.mime.text import MIMEText
     from email.utils import formatdate, make_msgid
 
     msg = MIMEMultipart("alternative")
@@ -119,7 +127,7 @@ for i in range(10):
         bulk_ok += 1
     except:
         pass
-test(f"Bulk send (10 emails)", bulk_ok == 10, f"{bulk_ok}/10 sent")
+test("Bulk send (10 emails)", bulk_ok == 10, f"{bulk_ok}/10 sent")
 
 # HTML email
 try:

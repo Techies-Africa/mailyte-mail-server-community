@@ -10,14 +10,12 @@ Tests the new features added in the latest revision:
 - dispatch_event / dispatch_event_sync signatures
 """
 
-import json
-import hmac
 import hashlib
-import time
-import threading
-from unittest.mock import patch, MagicMock, call
-import sys
+import hmac
 import os
+import sys
+import time
+from unittest.mock import MagicMock, patch
 
 # Make shared/ importable from the repo root
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))

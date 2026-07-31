@@ -3,12 +3,12 @@
 System Models - System configuration and health monitoring
 """
 
-from datetime import datetime
-from sqlalchemy import Column, String, DateTime, Text, Index, BigInteger, Float, JSON
+from sqlalchemy import JSON, Column, DateTime, Float, Index, String, Text
 from sqlalchemy.sql import func
 
-from . import Base
 from shared.ulid_utils import generate_ulid
+
+from . import Base
 
 
 # System Configuration

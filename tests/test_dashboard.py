@@ -3,16 +3,16 @@
 Unit tests for Dashboard Service
 """
 
-import unittest
 import json
 import os
 import sys
-from unittest.mock import patch, MagicMock
+import unittest
+from unittest.mock import MagicMock, patch
 
 # Add the parent directory to the path so we can import our modules
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from worker.dashboard.app import app, DashboardService
+from worker.dashboard.app import app
 
 
 class TestDashboardService(unittest.TestCase):

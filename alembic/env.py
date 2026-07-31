@@ -1,9 +1,9 @@
 import os
 import sys
 from logging.config import fileConfig
-from sqlalchemy import engine_from_config
-from sqlalchemy import pool
-from sqlalchemy import text
+
+from sqlalchemy import engine_from_config, pool, text
+
 from alembic import context
 
 # Add the project root to the Python path

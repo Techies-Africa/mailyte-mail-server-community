@@ -62,18 +62,18 @@ Webhook Verification:
      Use timestamp to reject replays older than 15 minutes.
 """
 
-import os
-import json
-import time
-import hmac
 import hashlib
+import hmac
+import json
 import logging
+import os
 import secrets
 import threading
+import time
 import uuid
-from queue import Queue, Empty
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from datetime import UTC, datetime
+from queue import Empty, Queue
+from typing import Any
 
 logger = logging.getLogger("webhook_dispatcher")
 
@@ -90,7 +90,7 @@ WEBHOOK_QUEUE_SIZE = int(os.getenv("WEBHOOK_QUEUE_SIZE", "10000"))
 
 # Retry delay schedule in seconds (Mailgun-inspired: 7 retries over ~8 hours).
 # Index i = delay before attempt i+2 (i.e. before the first retry, second retry, ...).
-_RETRY_SCHEDULE: List[int] = [600, 600, 900, 1800, 3600, 7200, 14400]
+_RETRY_SCHEDULE: list[int] = [600, 600, 900, 1800, 3600, 7200, 14400]
 
 # Redis for cross-container pub/sub (optional — falls back to in-process queue)
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
@@ -153,13 +153,13 @@ def _build_signature_block(ts: int, token: str) -> dict:
 
 def _build_envelope(
     event_type: str,
-    data: Dict[str, Any],
-    org_id: Optional[int] = None,
-    domain: Optional[str] = None,
-    source_service: Optional[str] = None,
-    metadata: Optional[Dict[str, Any]] = None,
-    tags: Optional[List[str]] = None,
-    user_variables: Optional[Dict[str, Any]] = None,
+    data: dict[str, Any],
+    org_id: int | None = None,
+    domain: str | None = None,
+    source_service: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    tags: list[str] | None = None,
+    user_variables: dict[str, Any] | None = None,
 ) -> dict:
     """
     Build a standardized webhook event envelope.
@@ -168,7 +168,7 @@ def _build_envelope(
     ``signature`` block for replay-attack prevention, and optional ``tags``
     and ``user_variables`` that pass through to the receiving endpoint unchanged.
     """
-    now_utc = datetime.now(timezone.utc)
+    now_utc = datetime.now(UTC)
     ts_int = int(now_utc.timestamp())
     token = secrets.token_hex(32)
     return {
@@ -191,7 +191,7 @@ def _build_envelope(
 # ---------------------------------------------------------------------------
 
 
-def _deliver(envelope: dict, attempt: int = 1) -> Optional[bool]:
+def _deliver(envelope: dict, attempt: int = 1) -> bool | None:
     """
     Deliver a webhook event to the global URL.
 
@@ -388,7 +388,7 @@ def _log_delivery(envelope: dict, status_code: int, attempt: int, success: bool,
                 attempt,
                 error[:2000] if error else None,
                 envelope.get("org_id"),
-                datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S") if success else None,
+                datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S") if success else None,
             ),
         )
         conn.commit()
@@ -517,13 +517,13 @@ def _enqueue(envelope: dict):
 
 def dispatch_event(
     event_type: str,
-    data: Dict[str, Any],
-    org_id: Optional[int] = None,
-    domain: Optional[str] = None,
-    source_service: Optional[str] = None,
-    metadata: Optional[Dict[str, Any]] = None,
-    tags: Optional[List[str]] = None,
-    user_variables: Optional[Dict[str, Any]] = None,
+    data: dict[str, Any],
+    org_id: int | None = None,
+    domain: str | None = None,
+    source_service: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    tags: list[str] | None = None,
+    user_variables: dict[str, Any] | None = None,
     use_redis: bool = False,
 ):
     """
@@ -574,12 +574,12 @@ def dispatch_event(
 
 def dispatch_event_sync(
     event_type: str,
-    data: Dict[str, Any],
-    org_id: Optional[int] = None,
-    domain: Optional[str] = None,
-    source_service: Optional[str] = None,
-    tags: Optional[List[str]] = None,
-    user_variables: Optional[Dict[str, Any]] = None,
+    data: dict[str, Any],
+    org_id: int | None = None,
+    domain: str | None = None,
+    source_service: str | None = None,
+    tags: list[str] | None = None,
+    user_variables: dict[str, Any] | None = None,
 ) -> bool:
     """
     Synchronous version — blocks until delivery completes (or all retries fail).

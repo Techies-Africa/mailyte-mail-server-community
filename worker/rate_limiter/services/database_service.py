@@ -14,11 +14,10 @@ and connection management for high-availability operations.
 """
 
 import logging
-import mysql.connector
-from mysql.connector import pooling
 from datetime import datetime, timedelta
-from typing import Dict, Any, Optional, List
-import json
+from typing import Any
+
+from mysql.connector import pooling
 
 from config import config
 
@@ -46,7 +45,7 @@ class RateLimitDatabaseService:
 
         logger.info("Rate limit database service initialized")
 
-    def _init_database_pool(self) -> Optional[pooling.MySQLConnectionPool]:
+    def _init_database_pool(self) -> pooling.MySQLConnectionPool | None:
         """
         Initialize MySQL connection pool with retry logic and error handling.
 
@@ -268,7 +267,7 @@ class RateLimitDatabaseService:
         period: str,
         start_time: datetime,
         end_time: datetime,
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """
         Retrieve usage data from database using the new organization structure.
 
@@ -326,7 +325,7 @@ class RateLimitDatabaseService:
 
     def get_current_usage_stats(
         self, entity_type: str, identifier: str, direction: str
-    ) -> Dict[str, int]:
+    ) -> dict[str, int]:
         """
         Get current usage statistics for entity using new organization structure.
 
@@ -447,7 +446,7 @@ class RateLimitDatabaseService:
 
     def increment_usage_data(
         self, entity_type: str, identifier: str, direction: str, amount: int = 1
-    ) -> Dict[str, int]:
+    ) -> dict[str, int]:
         """
         Increment usage counters in database (fallback when Redis unavailable).
 
@@ -507,7 +506,7 @@ class RateLimitDatabaseService:
 
     def get_usage_history(
         self, entity_type: str, identifier: str, direction: str, days: int = 7
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """
         Get historical usage data for an entity.
 
@@ -586,7 +585,7 @@ class RateLimitDatabaseService:
 
     def get_top_usage_entities(
         self, entity_type: str, direction: str, window: str = "daily", limit: int = 100
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """
         Get top entities by usage for monitoring and alerting.
 
@@ -698,7 +697,7 @@ class RateLimitDatabaseService:
             logger.error(f"Error creating alert record: {e}")
             return False
 
-    def get_pending_webhook_alerts(self, limit: int = 100) -> List[Dict[str, Any]]:
+    def get_pending_webhook_alerts(self, limit: int = 100) -> list[dict[str, Any]]:
         """
         Get alerts that need webhook notifications sent.
 
@@ -778,7 +777,7 @@ class RateLimitDatabaseService:
             logger.error(f"Error updating webhook alert status: {e}")
             return False
 
-    def get_database_stats(self) -> Dict[str, Any]:
+    def get_database_stats(self) -> dict[str, Any]:
         """
         Get database service statistics and performance metrics.
 
@@ -824,7 +823,7 @@ class RateLimitDatabaseService:
 
         return stats
 
-    def health_check(self) -> Dict[str, Any]:
+    def health_check(self) -> dict[str, Any]:
         """
         Perform health check on the database service.
 

@@ -8,8 +8,7 @@ Swagger docs, and the OpenAPI schema against the live API service.
 import pytest
 import requests
 
-from .conftest import API_BASE, API_KEY, ADMIN_TOKEN, TEST_DOMAIN, TEST_ORG
-
+from .conftest import API_BASE, TEST_DOMAIN
 
 # Route prefixes — the app registers routers with /api/v1/{module} prefix
 # and routes define their own sub-paths (e.g. "/" or "/stats/{domain}").

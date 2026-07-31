@@ -5,12 +5,12 @@ These tests run against LIVE Docker services — they are NOT unit tests.
 Ensure the dev environment is running: ./start.sh dev
 """
 
-import os
-import time
-import pytest
-import requests
-import smtplib
 import imaplib
+import os
+import smtplib
+import time
+
+import pytest
 
 # ---------------------------------------------------------------------------
 # Configuration — read from env or use defaults matching docker-compose

@@ -6,22 +6,21 @@ This script processes bounced emails from Postfix and categorizes them
 as hard bounces, soft bounces, or blocks for proper handling.
 """
 
-import sys
+import logging
 import os
 import re
-import json
-import logging
-import requests
+import sys
 from datetime import datetime
 from email import message_from_string
-from email.header import decode_header
 from pathlib import Path
+
+import requests
 
 # Add project root to path for shared imports
 project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
-from shared.webhook_dispatcher import dispatch_event, Events
+from shared.webhook_dispatcher import Events, dispatch_event
 
 # Configure logging
 logging.basicConfig(

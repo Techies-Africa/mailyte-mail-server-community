@@ -27,23 +27,24 @@ Environment variables:
     API_KEY       - API key for authentication     (default: test-api-key)
 """
 
-import pytest
+import email
+import imaplib
+import json
 import os
+import smtplib
+import ssl
+import threading
 import time
 import uuid
-import smtplib
-import imaplib
-import email
-import ssl
-import json
-import requests
-import threading
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from email.mime.base import MIMEBase
+from datetime import datetime
 from email import encoders
-from datetime import datetime, timedelta
+from email.mime.base import MIMEBase
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+import pytest
+import requests
 
 # ---------------------------------------------------------------------------
 # Configuration from environment

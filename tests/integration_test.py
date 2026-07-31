@@ -4,13 +4,12 @@ Integration Tests for Mailyte Mail Server
 Tests inter-service communication and API endpoints
 """
 
-import requests
 import json
-import time
-import os
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
-import threading
+
+import requests
 
 
 class IntegrationTester:
@@ -251,4 +250,4 @@ if __name__ == "__main__":
     with open("integration_test_results.json", "w") as f:
         json.dump(results, f, indent=2)
 
-    print(f"\n💾 Test results saved to: integration_test_results.json")
+    print("\n💾 Test results saved to: integration_test_results.json")

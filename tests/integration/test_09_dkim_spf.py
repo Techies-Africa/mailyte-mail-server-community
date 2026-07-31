@@ -12,10 +12,10 @@ import pytest
 import requests
 
 from .conftest import (
+    clear_inbox,
+    get_inbox_messages,
     send_test_email,
     wait_for_delivery,
-    get_inbox_messages,
-    clear_inbox,
 )
 
 TIMEOUT = 10

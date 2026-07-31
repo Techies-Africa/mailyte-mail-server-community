@@ -6,15 +6,15 @@ Automated SSL certificate management for the documentation site using Let's Encr
 Handles certificate generation, renewal, and nginx configuration updates.
 """
 
+import json
+import logging
 import os
+import subprocess
 import sys
 import time
-import logging
-import subprocess
+from datetime import datetime
+
 import requests
-from datetime import datetime, timedelta
-from pathlib import Path
-import json
 
 # Configure logging
 logging.basicConfig(
@@ -290,8 +290,8 @@ server {{
             headers = {"Content-Type": "application/json", "User-Agent": "DocsSSLManager/1.0"}
 
             if self.webhook_secret:
-                import hmac
                 import hashlib
+                import hmac
 
                 signature = hmac.new(
                     self.webhook_secret.encode(), payload.encode(), hashlib.sha256

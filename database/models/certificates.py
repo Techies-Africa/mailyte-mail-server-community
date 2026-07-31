@@ -3,24 +3,26 @@
 Certificate Models - SSL certificates and DKIM keys
 """
 
-from datetime import datetime
 from sqlalchemy import (
+    Boolean,
     Column,
+    DateTime,
+    ForeignKey,
+    Index,
     Integer,
     String,
-    DateTime,
     Text,
-    Boolean,
-    Index,
-    ForeignKey,
+)
+from sqlalchemy import (
     Enum as SQLEnum,
 )
-from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
+from sqlalchemy.sql import func
+
+from shared.ulid_utils import generate_ulid
 
 from . import Base
 from .enums import CertificateStatus
-from shared.ulid_utils import generate_ulid
 
 
 # SSL Certificate Management

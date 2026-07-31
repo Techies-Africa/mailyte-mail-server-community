@@ -3,13 +3,10 @@
 Unit tests for shared/webhook_dispatcher.py
 """
 
-import json
-import time
 import os
 import sys
+import time
 from pathlib import Path
-from unittest.mock import patch, MagicMock
-import pytest
 
 # Set env vars before import
 os.environ["WEBHOOK_URL"] = "http://example.com/webhook"
@@ -21,12 +18,11 @@ project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from shared.webhook_dispatcher import (
+    Events,
     _build_envelope,
     _sign_payload,
     dispatch_event,
     get_dispatcher_stats,
-    Events,
-    WEBHOOK_MAX_RETRIES,
 )
 
 

@@ -3,28 +3,28 @@
 Core Models - Organization, Domain, EmailAccount, and Alias management
 """
 
-from datetime import datetime
-from typing import Optional
 from sqlalchemy import (
+    JSON,
+    BigInteger,
+    Boolean,
     Column,
+    DateTime,
+    ForeignKey,
+    Index,
     Integer,
     String,
-    DateTime,
     Text,
-    Boolean,
-    Index,
-    BigInteger,
-    Float,
-    ForeignKey,
-    JSON,
+)
+from sqlalchemy import (
     Enum as SQLEnum,
 )
-from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
+from sqlalchemy.sql import func
+
+from shared.ulid_utils import generate_ulid
 
 from . import Base
 from .enums import AccountStatus
-from shared.ulid_utils import generate_ulid
 
 
 # Core Organization Management

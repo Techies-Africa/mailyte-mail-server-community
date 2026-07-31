@@ -10,8 +10,6 @@ import requests
 
 from .conftest import (
     API_BASE,
-    API_KEY,
-    TEST_DOMAIN,
 )
 
 TIMEOUT = 10

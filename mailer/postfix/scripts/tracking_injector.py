@@ -42,23 +42,19 @@ Created: 2024
 License: MIT
 """
 
-import sys
-import os
-import json
-import re
 import email
 import email.policy
-import requests
-import logging
 import hashlib
-import time
+import json
+import logging
+import os
 import signal
+import sys
+import time
 from datetime import datetime
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from email.mime.base import MIMEBase
-from email import encoders
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Any
+
+import requests
 
 # Configure comprehensive logging for debugging and monitoring
 logging.basicConfig(
@@ -120,7 +116,7 @@ class PostfixTrackingInjector:
         self.db_timeout = int(os.getenv("DB_TIMEOUT", "5"))
 
         # Log initialization with current configuration
-        logger.info(f"Tracking injector initialized:")
+        logger.info("Tracking injector initialized:")
         logger.info(f"  - Tracking enabled: {self.tracking_enabled}")
         logger.info(f"  - Service URL: {self.tracking_service_url}")
         logger.info(f"  - Database: {self.db_host}:{self.db_port}/{self.db_name}")
@@ -141,9 +137,7 @@ class PostfixTrackingInjector:
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
 
-    def extract_email_metadata(
-        self, message: email.message.EmailMessage
-    ) -> Optional[Dict[str, Any]]:
+    def extract_email_metadata(self, message: email.message.EmailMessage) -> dict[str, Any] | None:
         """
         Extract comprehensive metadata from email message for tracking.
 
@@ -268,7 +262,7 @@ class PostfixTrackingInjector:
 
         return False
 
-    def get_tenant_domain_ids(self, sender_domain: str, sender_email: str) -> Tuple[str, str]:
+    def get_tenant_domain_ids(self, sender_domain: str, sender_email: str) -> tuple[str, str]:
         """
         Resolve tenant and domain IDs from database based on sender information.
 
@@ -481,7 +475,7 @@ class PostfixTrackingInjector:
         return html_content
 
     def process_message_content(
-        self, message: email.message.EmailMessage, metadata: Dict[str, Any]
+        self, message: email.message.EmailMessage, metadata: dict[str, Any]
     ) -> email.message.EmailMessage:
         """
         Process email message content to inject tracking for all recipients.
@@ -594,7 +588,7 @@ class PostfixTrackingInjector:
                         logger.error(f"Error processing single-part HTML: {e}")
 
             # Log processing summary
-            logger.info(f"Content processing completed:")
+            logger.info("Content processing completed:")
             logger.info(f"  - HTML parts found: {processed_parts}")
             logger.info(f"  - Parts modified: {modified_parts}")
             logger.info(f"  - Email ID: {email_id}")
@@ -708,7 +702,7 @@ class PostfixTrackingInjector:
                 modified_email = modified_message.as_bytes(policy=email.policy.default)
                 output_size = len(modified_email)
 
-                logger.info(f"Email processing completed successfully:")
+                logger.info("Email processing completed successfully:")
                 logger.info(f"  - Original size: {email_size} bytes")
                 logger.info(f"  - Modified size: {output_size} bytes")
                 logger.info(f"  - Size change: {output_size - email_size:+d} bytes")
@@ -944,7 +938,7 @@ class PostfixTrackingInjector:
             response = requests.post(webhook_url, data=payload, headers=headers, timeout=timeout)
 
             if response.status_code == 200:
-                logger.debug(f"Webhook sent successfully for tracking event")
+                logger.debug("Webhook sent successfully for tracking event")
             else:
                 logger.warning(f"Webhook failed with status: {response.status_code}")
 

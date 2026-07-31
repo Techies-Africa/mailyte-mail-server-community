@@ -36,9 +36,10 @@ import sys
 from pathlib import Path
 
 from alembic.config import Config
-from alembic import command
 from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, inspect, text
+
+from alembic import command
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
@@ -93,7 +94,7 @@ def main() -> None:
             )
         else:
             stamp_target = (
-                "0002_adhoc_table_tracking" if _ADHOC_SENTINEL_TABLES <= tables else "0001_baseline"
+                "0002_adhoc_table_tracking" if tables >= _ADHOC_SENTINEL_TABLES else "0001_baseline"
             )
             logger.info(
                 f"Schema present but alembic_version is {current!r} (untracked or a stale non-Alembic "

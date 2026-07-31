@@ -14,19 +14,20 @@ The service ensures reliable delivery of rate limit alerts to external systems
 via webhook endpoints with comprehensive error handling and monitoring.
 """
 
-import logging
-import time
-import json
-import threading
-import queue
-from typing import Dict, Any, Optional, List
-from datetime import datetime, timedelta
-import requests
-from requests.exceptions import RequestException, Timeout, ConnectionError
+import base64
 import hashlib
 import hmac
-import base64
+import json
+import logging
+import queue
+import threading
+import time
+from datetime import datetime
+from typing import Any
+
+import requests
 from cryptography.fernet import Fernet
+from requests.exceptions import ConnectionError, Timeout
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +90,7 @@ class WebhookDeliveryQueue:
             except Exception as e:
                 logger.error(f"Webhook worker {worker_name} error: {e}")
 
-    def _process_delivery(self, delivery_task: Dict[str, Any]) -> bool:
+    def _process_delivery(self, delivery_task: dict[str, Any]) -> bool:
         """
         Process individual webhook delivery with retry logic.
 
@@ -149,7 +150,7 @@ class WebhookDeliveryQueue:
         logger.error(f"Webhook delivery failed after {max_retries + 1} attempts: {webhook_url}")
         return False
 
-    def queue_delivery(self, delivery_task: Dict[str, Any]) -> bool:
+    def queue_delivery(self, delivery_task: dict[str, Any]) -> bool:
         """
         Queue webhook delivery task.
 
@@ -166,7 +167,7 @@ class WebhookDeliveryQueue:
             logger.error("Webhook delivery queue is full")
             return False
 
-    def get_stats(self) -> Dict[str, Any]:
+    def get_stats(self) -> dict[str, Any]:
         """Get webhook delivery queue statistics"""
         return {
             "queue_size": self.webhook_queue.qsize(),
@@ -212,7 +213,7 @@ class RateLimitWebhookService:
 
         logger.info("Rate limit webhook service initialized")
 
-    def send_rate_limit_alert(self, alert_data: Dict[str, Any]) -> bool:
+    def send_rate_limit_alert(self, alert_data: dict[str, Any]) -> bool:
         """
         Send rate limit alert via webhooks.
 
@@ -272,7 +273,7 @@ class RateLimitWebhookService:
             logger.error(f"Error sending rate limit alert: {e}")
             return False
 
-    def send_quota_notification(self, quota_data: Dict[str, Any]) -> bool:
+    def send_quota_notification(self, quota_data: dict[str, Any]) -> bool:
         """
         Send quota usage notification via webhooks.
 
@@ -327,7 +328,7 @@ class RateLimitWebhookService:
             logger.error(f"Error sending quota notification: {e}")
             return False
 
-    def _get_webhook_urls_for_event(self, event_type: str) -> List[Dict[str, Any]]:
+    def _get_webhook_urls_for_event(self, event_type: str) -> list[dict[str, Any]]:
         """
         Get webhook URLs configured for specific event type.
 
@@ -403,8 +404,8 @@ class RateLimitWebhookService:
         return cache_age.total_seconds() < self.cache_ttl
 
     def _prepare_webhook_payload(
-        self, data: Dict[str, Any], webhook_config: Dict[str, Any]
-    ) -> Dict[str, Any]:
+        self, data: dict[str, Any], webhook_config: dict[str, Any]
+    ) -> dict[str, Any]:
         """
         Prepare webhook payload with encryption if configured.
 
@@ -454,8 +455,8 @@ class RateLimitWebhookService:
             return {"error": "Failed to prepare payload"}
 
     def _prepare_webhook_headers(
-        self, webhook_config: Dict[str, Any], payload: Dict[str, Any]
-    ) -> Dict[str, str]:
+        self, webhook_config: dict[str, Any], payload: dict[str, Any]
+    ) -> dict[str, str]:
         """
         Prepare HTTP headers for webhook delivery.
 
@@ -508,7 +509,7 @@ class RateLimitWebhookService:
 
         return headers
 
-    def test_webhook_delivery(self, webhook_id: int) -> Dict[str, Any]:
+    def test_webhook_delivery(self, webhook_id: int) -> dict[str, Any]:
         """
         Test webhook delivery for a specific webhook configuration.
 
@@ -583,7 +584,7 @@ class RateLimitWebhookService:
             logger.error(f"Error testing webhook delivery: {e}")
             return {"success": False, "error": f"Test failed: {str(e)}"}
 
-    def get_webhook_stats(self) -> Dict[str, Any]:
+    def get_webhook_stats(self) -> dict[str, Any]:
         """
         Get webhook service statistics and performance metrics.
 

@@ -4,9 +4,9 @@ Integration tests for IMAP and POP3 access.
 Tests run against live Dovecot services — ensure the dev environment is up.
 """
 
-import ssl
 import imaplib
 import poplib
+import ssl
 
 import pytest
 
@@ -17,10 +17,9 @@ from .conftest import (
     POP3_HOST,
     POP3_PORT,
     POP3_SSL_PORT,
-    TEST_USER,
     TEST_PASS,
+    TEST_USER,
 )
-
 
 # ---------------------------------------------------------------------------
 # IMAP Tests

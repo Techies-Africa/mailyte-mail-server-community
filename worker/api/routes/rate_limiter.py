@@ -4,12 +4,13 @@ Rate Limiter Module API Routes
 Exposes controlled rate limiting functionality through the API gateway
 """
 
-from fastapi import APIRouter, Request, HTTPException, Query
-from fastapi.responses import JSONResponse
 import logging
-import aiohttp
 import os
-from utils.auth import require_api_key, create_api_response
+
+import aiohttp
+from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
+from utils.auth import require_api_key
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -26,17 +27,19 @@ async def proxy_to_rate_limiter(request: Request, endpoint, method="GET", data=N
         if "Content-Type" in request.headers:
             headers["Content-Type"] = request.headers["Content-Type"]
 
-        async with aiohttp.ClientSession() as session:
-            async with session.request(
+        async with (
+            aiohttp.ClientSession() as session,
+            session.request(
                 method=method,
                 url=f"{RATE_LIMITER_API_BASE}{endpoint}",
                 headers=headers,
                 json=data,
                 params=params,
                 timeout=aiohttp.ClientTimeout(total=30),
-            ) as response:
-                response_data = await response.json()
-                return response_data, response.status
+            ) as response,
+        ):
+            response_data = await response.json()
+            return response_data, response.status
     except Exception as e:
         logger.error(f"Rate limiter service proxy error: {e}")
         return {"error": "Rate limiter service unavailable"}, 503

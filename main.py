@@ -5,7 +5,6 @@ Mailyte Mail Server - Main Entry Point
 
 import os
 import sys
-import asyncio
 from pathlib import Path
 
 # Add the project root to Python path
@@ -38,8 +37,9 @@ def main():
 
     # Import and start the API server
     try:
-        from worker.api.app import app
         import uvicorn
+
+        from worker.api.app import app
 
         # Use 0.0.0.0 for Replit compatibility
         host = os.getenv("HOST", "0.0.0.0")

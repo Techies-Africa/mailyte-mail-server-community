@@ -14,30 +14,28 @@ through environment variables managed by the config system.
 """
 
 import sys
-import os
 from pathlib import Path
+
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from datetime import datetime
 
 # Add shared directory and database models to path
 project_root = Path(__file__).parent.parent.parent
 sys.path.append(str(project_root / "shared"))
 
-from shared.logging_config import get_service_logger, get_performance_logger, LogTimer
-from database.models import Base
-
-# Import our modular services
-from config import config_manager
-from services.tracking_service import TrackingService
-from services.database_service import DatabaseService
-from services.webhook_service import EnterpriseWebhookService as WebhookService
-from services.rate_limiter import RateLimiter
+from api.health_api import health_api
+from api.stats_api import stats_api
 
 # Import API routers
 from api.tracking_api import tracking_api
-from api.health_api import health_api
-from api.stats_api import stats_api
+from services.database_service import DatabaseService
+from services.rate_limiter import RateLimiter
+from services.tracking_service import TrackingService
+from services.webhook_service import EnterpriseWebhookService as WebhookService
+
+# Import our modular services
+from config import config_manager
+from shared.logging_config import LogTimer, get_performance_logger
 
 # Configure service-specific logging
 logger, log_performance = get_performance_logger("tracking")
@@ -126,7 +124,7 @@ def create_app():
         # Log final configuration status
         config = config_manager.config
         logger.info("Email Tracking Service initialized successfully")
-        logger.info(f"Configuration summary:")
+        logger.info("Configuration summary:")
         logger.info(f"  - Tracking enabled: {config.enabled}")
         logger.info(f"  - Open tracking: {config.open_tracking_enabled}")
         logger.info(f"  - Click tracking: {config.click_tracking_enabled}")

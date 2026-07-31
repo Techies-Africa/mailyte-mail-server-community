@@ -6,7 +6,6 @@ and database schema for quota-related columns against
 the live Docker services.
 """
 
-import pytest
 import requests
 
 from .conftest import (

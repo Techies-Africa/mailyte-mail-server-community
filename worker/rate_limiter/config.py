@@ -14,11 +14,10 @@ The configuration is designed to be highly customizable while providing
 sensible defaults for production environments.
 """
 
-import os
 import logging
-from typing import Dict, Any, Optional
+import os
 from dataclasses import dataclass
-from pathlib import Path
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +44,7 @@ class RedisConfig:
     host: str
     port: int
     db: int
-    password: Optional[str] = None
+    password: str | None = None
     socket_timeout: int = 5
     socket_connect_timeout: int = 5
     retry_on_timeout: bool = True
@@ -116,7 +115,7 @@ class WebhookConfig:
     timeout: int = 10
     max_attempts: int = 3
     retry_delay: int = 5
-    rate_limit_per_minute: Optional[int] = None
+    rate_limit_per_minute: int | None = None
 
 
 @dataclass
@@ -302,7 +301,7 @@ class RateLimiterConfig:
 
         logger.info("Configuration validation completed successfully")
 
-    def get_default_limits(self, entity_type: str, direction: str) -> Dict[str, int]:
+    def get_default_limits(self, entity_type: str, direction: str) -> dict[str, int]:
         """
         Get default rate limits for a specific entity type and direction.
 
@@ -332,7 +331,7 @@ class RateLimiterConfig:
             f"?charset={self.database.charset}"
         )
 
-    def get_redis_connection_kwargs(self) -> Dict[str, Any]:
+    def get_redis_connection_kwargs(self) -> dict[str, Any]:
         """Get Redis connection parameters as kwargs"""
         kwargs = {
             "host": self.redis.host,
@@ -349,7 +348,7 @@ class RateLimiterConfig:
 
         return kwargs
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         """Convert configuration to dictionary (for logging/debugging)"""
         return {
             "service": {
