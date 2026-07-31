@@ -1,10 +1,9 @@
-
 import os
 import sys
 from logging.config import fileConfig
-from sqlalchemy import engine_from_config
-from sqlalchemy import pool
-from sqlalchemy import text
+
+from sqlalchemy import engine_from_config, pool, text
+
 from alembic import context
 
 # Add the project root to the Python path
@@ -25,20 +24,23 @@ if config.config_file_name is not None:
 # Add your model's MetaData object here for 'autogenerate' support
 target_metadata = Base.metadata
 
+
 # Get database URL from environment variables
 def get_database_url():
     """Get database URL from environment variables"""
     db_config = {
-        'host': os.getenv('DB_HOST', 'mysql'),
-        'port': int(os.getenv('DB_PORT', 3306)),
-        'database': os.getenv('DB_NAME', 'mailserver'),
-        'user': os.getenv('DB_USER', 'root'),
-        'password': os.getenv('DB_PASSWORD', 'password'),
+        "host": os.getenv("DB_HOST", "mysql"),
+        "port": int(os.getenv("DB_PORT", 3306)),
+        "database": os.getenv("DB_NAME", "mailserver"),
+        "user": os.getenv("DB_USER", "root"),
+        "password": os.getenv("DB_PASSWORD", "password"),
     }
     return f"mysql+pymysql://{db_config['user']}:{db_config['password']}@{db_config['host']}:{db_config['port']}/{db_config['database']}?charset=utf8mb4"
 
+
 # Set the sqlalchemy URL
-config.set_main_option('sqlalchemy.url', get_database_url())
+config.set_main_option("sqlalchemy.url", get_database_url())
+
 
 def run_migrations_offline() -> None:
     """Run migrations in 'offline' mode.

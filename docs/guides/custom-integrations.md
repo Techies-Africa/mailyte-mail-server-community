@@ -68,11 +68,10 @@ import hmac
 import hashlib
 import json
 
+
 def verify_webhook(payload: dict, signature: str, secret: str) -> bool:
     expected = hmac.new(
-        secret.encode("utf-8"),
-        json.dumps(payload, sort_keys=True).encode("utf-8"),
-        hashlib.sha256
+        secret.encode("utf-8"), json.dumps(payload, sort_keys=True).encode("utf-8"), hashlib.sha256
     ).hexdigest()
     return signature == f"sha256={expected}"
 ```
@@ -95,6 +94,7 @@ app = Flask(__name__)
 HUBSPOT_TOKEN = "pat-xxx"
 WEBHOOK_SECRET = "your-secret"
 
+
 @app.route("/webhooks/mailyte", methods=["POST"])
 def handle_mailyte_webhook():
     payload = request.get_json()
@@ -109,14 +109,9 @@ def handle_mailyte_webhook():
             "https://api.hubapi.com/crm/v3/objects/contacts",
             headers={
                 "Authorization": f"Bearer {HUBSPOT_TOKEN}",
-                "Content-Type": "application/json"
+                "Content-Type": "application/json",
             },
-            json={
-                "properties": {
-                    "email": sender,
-                    "last_email_subject": subject
-                }
-            }
+            json={"properties": {"email": sender, "last_email_subject": subject}},
         )
 
     return jsonify({"status": "ok"})
@@ -152,17 +147,16 @@ def handle_support_email():
                 "description": {
                     "type": "doc",
                     "version": 1,
-                    "content": [{
-                        "type": "paragraph",
-                        "content": [{
-                            "type": "text",
-                            "text": f"Email from {meta['from']}"
-                        }]
-                    }]
+                    "content": [
+                        {
+                            "type": "paragraph",
+                            "content": [{"type": "text", "text": f"Email from {meta['from']}"}],
+                        }
+                    ],
                 },
-                "issuetype": {"name": "Task"}
+                "issuetype": {"name": "Task"},
             }
-        }
+        },
     )
 
     return jsonify({"status": "created"})
@@ -176,6 +170,7 @@ Post to a Slack channel when specific events happen:
 import requests
 
 SLACK_WEBHOOK = "https://hooks.slack.com/services/T.../B.../xxx"
+
 
 @app.route("/webhooks/mailyte", methods=["POST"])
 def slack_notify():
@@ -205,52 +200,58 @@ Create domains and mailboxes for new customers automatically:
 import requests
 
 API = "http://mail.yourdomain.com:8083/api/v1"
-HEADERS = {
-    "X-API-Key": "YOUR_API_KEY",
-    "Content-Type": "application/json"
-}
+HEADERS = {"X-API-Key": "YOUR_API_KEY", "Content-Type": "application/json"}
+
 
 def provision_customer(org_id: str, org_name: str, domain: str, admin_email: str):
     """Set up everything a new customer needs."""
 
     # 1. Create organization
-    requests.post(f"{API}/add/organization", headers=HEADERS, json={
-        "id": org_id,
-        "name": org_name,
-        "admin_email": admin_email
-    })
+    requests.post(
+        f"{API}/add/organization",
+        headers=HEADERS,
+        json={"id": org_id, "name": org_name, "admin_email": admin_email},
+    )
 
     # 2. Add domain
-    requests.post(f"{API}/add/domain", headers=HEADERS, json={
-        "domain": domain,
-        "organization_id": org_id,
-        "mailboxes": 50,
-        "aliases": 200,
-    })
+    requests.post(
+        f"{API}/add/domain",
+        headers=HEADERS,
+        json={
+            "domain": domain,
+            "organization_id": org_id,
+            "mailboxes": 50,
+            "aliases": 200,
+        },
+    )
 
     # 3. Generate DKIM
-    requests.post(f"{API}/add/dkim", headers=HEADERS, json={
-        "domains": domain,
-        "dkim_selector": "default",
-        "key_size": "2048"
-    })
+    requests.post(
+        f"{API}/add/dkim",
+        headers=HEADERS,
+        json={"domains": domain, "dkim_selector": "default", "key_size": "2048"},
+    )
 
     # 4. Create admin mailbox
     local_part = admin_email.split("@")[0]
-    requests.post(f"{API}/add/mailbox", headers=HEADERS, json={
-        "local_part": local_part,
-        "domain": domain,
-        "password": generate_temp_password(),
-        "name": "Admin",
-        "force_pw_update": 1
-    })
+    requests.post(
+        f"{API}/add/mailbox",
+        headers=HEADERS,
+        json={
+            "local_part": local_part,
+            "domain": domain,
+            "password": generate_temp_password(),
+            "name": "Admin",
+            "force_pw_update": 1,
+        },
+    )
 
     # 5. Set up catch-all alias
-    requests.post(f"{API}/add/alias", headers=HEADERS, json={
-        "address": f"@{domain}",
-        "goto": admin_email,
-        "active": 1
-    })
+    requests.post(
+        f"{API}/add/alias",
+        headers=HEADERS,
+        json={"address": f"@{domain}", "goto": admin_email, "active": 1},
+    )
 
     # 6. Get DKIM public key for DNS instructions
     dkim = requests.get(f"{API}/get/dkim/{domain}", headers=HEADERS).json()
@@ -259,7 +260,7 @@ def provision_customer(org_id: str, org_name: str, domain: str, admin_email: str
         "org_id": org_id,
         "domain": domain,
         "dkim_record": dkim,
-        "instructions": f"Add these DNS records for {domain}..."
+        "instructions": f"Add these DNS records for {domain}...",
     }
 ```
 
@@ -272,15 +273,11 @@ def get_org_usage(org_id: str) -> dict:
     """Get usage stats for an organization."""
 
     stats = requests.get(
-        f"{API}/get/status/stats",
-        headers=HEADERS,
-        params={"organization_id": org_id}
+        f"{API}/get/status/stats", headers=HEADERS, params={"organization_id": org_id}
     ).json()
 
     domains = requests.get(
-        f"{API}/get/domain/all",
-        headers=HEADERS,
-        params={"organization_id": org_id}
+        f"{API}/get/domain/all", headers=HEADERS, params={"organization_id": org_id}
     ).json()
 
     total_storage = sum(d.get("total_storage_used", 0) for d in domains)
@@ -302,25 +299,25 @@ Automate common maintenance tasks:
 ```python
 def cleanup_old_tracking_data(days: int = 90):
     """Remove tracking data older than N days."""
-    requests.post(f"{API}/admin/cleanup", headers=HEADERS, json={
-        "target": "tracking_data",
-        "older_than_days": days
-    })
+    requests.post(
+        f"{API}/admin/cleanup",
+        headers=HEADERS,
+        json={"target": "tracking_data", "older_than_days": days},
+    )
+
 
 def rotate_dkim_keys(domain: str, new_selector: str):
     """Generate new DKIM keys with a new selector."""
-    requests.post(f"{API}/add/dkim", headers=HEADERS, json={
-        "domains": domain,
-        "dkim_selector": new_selector,
-        "key_size": "2048"
-    })
+    requests.post(
+        f"{API}/add/dkim",
+        headers=HEADERS,
+        json={"domains": domain, "dkim_selector": new_selector, "key_size": "2048"},
+    )
+
 
 def check_domain_health(domain: str) -> dict:
     """Verify DNS and authentication for a domain."""
-    return requests.get(
-        f"{API}/get/domain/health/{domain}",
-        headers=HEADERS
-    ).json()
+    return requests.get(f"{API}/get/domain/health/{domain}", headers=HEADERS).json()
 ```
 
 ## Webhook Reliability Tips

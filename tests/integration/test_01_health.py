@@ -4,6 +4,7 @@ Integration tests -- Infrastructure health checks.
 Verifies that all services (Redis, MySQL, HTTP microservices, mail ports)
 are reachable and responding before the heavier functional tests run.
 """
+
 import os
 import socket
 
@@ -12,25 +13,25 @@ import redis
 import requests
 
 from .conftest import (
-    API_BASE,
-    TRACKING_BASE,
-    WEBHOOKS_BASE,
-    RATE_LIMITER_BASE,
-    MONITORING_BASE,
     ANALYTICS_BASE,
+    API_BASE,
     DASHBOARD_BASE,
-    QUEUE_BASE,
-    STORAGE_BASE,
     DOCS_BASE,
-    SMTP_HOST,
-    SMTP_PORT,
-    SMTP_PORT_25,
     IMAP_HOST,
     IMAP_PORT,
     IMAP_SSL_PORT,
+    MONITORING_BASE,
     POP3_HOST,
     POP3_PORT,
     POP3_SSL_PORT,
+    QUEUE_BASE,
+    RATE_LIMITER_BASE,
+    SMTP_HOST,
+    SMTP_PORT,
+    SMTP_PORT_25,
+    STORAGE_BASE,
+    TRACKING_BASE,
+    WEBHOOKS_BASE,
 )
 
 TIMEOUT = 10  # seconds for HTTP / socket operations
@@ -39,6 +40,7 @@ TIMEOUT = 10  # seconds for HTTP / socket operations
 # ---------------------------------------------------------------------------
 # Infrastructure
 # ---------------------------------------------------------------------------
+
 
 class TestInfrastructure:
     """Redis and MySQL connectivity."""
@@ -62,6 +64,7 @@ class TestInfrastructure:
 # ---------------------------------------------------------------------------
 # HTTP service health endpoints
 # ---------------------------------------------------------------------------
+
 
 class TestHTTPHealth:
     """Every microservice exposes GET /health -> 200."""
@@ -123,6 +126,7 @@ class TestHTTPHealth:
 # Mail port checks
 # ---------------------------------------------------------------------------
 
+
 def _port_open(host: str, port: int, timeout: float = TIMEOUT) -> bool:
     """Return True if a TCP connection can be established."""
     with socket.create_connection((host, port), timeout=timeout):
@@ -161,6 +165,7 @@ class TestMailPorts:
 # SMTP banner / EHLO
 # ---------------------------------------------------------------------------
 
+
 class TestSMTPBanner:
     """Basic SMTP protocol checks on port 587."""
 
@@ -183,9 +188,7 @@ class TestSMTPBanner:
                 # Multi-line SMTP responses use "250-" for continuation;
                 # the final line starts with "250 ".
                 if b"\r\n" in chunk and any(
-                    line.startswith(b"250 ")
-                    for line in response.split(b"\r\n")
-                    if line
+                    line.startswith(b"250 ") for line in response.split(b"\r\n") if line
                 ):
                     break
             capabilities = response.decode("utf-8", errors="replace")

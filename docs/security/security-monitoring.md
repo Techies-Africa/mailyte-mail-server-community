@@ -133,7 +133,7 @@ def check_unusual_login(email: str, ip: str):
     known_ips = db.execute(
         "SELECT DISTINCT ip_address FROM user_sessions WHERE email_account_id = "
         "(SELECT id FROM email_accounts WHERE email = %s) AND created_at > NOW() - INTERVAL 30 DAY",
-        (email,)
+        (email,),
     )
 
     if ip not in [row["ip_address"] for row in known_ips]:

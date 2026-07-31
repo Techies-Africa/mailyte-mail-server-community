@@ -156,14 +156,11 @@ The tracking injector in Postfix calls the delivery optimizer before sending eac
 def _check_delivery_timing(self, recipient_domain, organization_id):
     response = requests.post(
         f"{delivery_optimizer_url}/api/delivery/check",
-        json={
-            'recipient_domain': recipient_domain,
-            'organization_id': organization_id
-        },
-        timeout=5
+        json={"recipient_domain": recipient_domain, "organization_id": organization_id},
+        timeout=5,
     )
     result = response.json()
-    return result.get('send_now', True)
+    return result.get("send_now", True)
 ```
 
 If the optimizer is unavailable, emails are sent immediately (fail-open design).

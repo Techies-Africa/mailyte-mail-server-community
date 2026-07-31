@@ -22,52 +22,56 @@ If an organization has NO ip_access_rules, all IPs are allowed (default open).
 If an organization HAS whitelist rules, ONLY those IPs are allowed.
 """
 
+import ipaddress
+import json
+import logging
 import os
 import sys
-import logging
-import ipaddress
+from pathlib import Path
+
 import mysql.connector
 import redis
-import json
-from pathlib import Path
 
 # Add project root for shared imports
 project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 try:
-    from shared.webhook_dispatcher import dispatch_event, Events
+    from shared.webhook_dispatcher import Events, dispatch_event
+
     _dispatcher_available = True
 except ImportError:
     _dispatcher_available = False
 
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     handlers=[
-        logging.FileHandler('/var/log/postfix/ip_access_policy.log'),
-        logging.StreamHandler(sys.stderr)
-    ]
+        logging.FileHandler("/var/log/postfix/ip_access_policy.log"),
+        logging.StreamHandler(sys.stderr),
+    ],
 )
-logger = logging.getLogger('ip_access_policy')
+logger = logging.getLogger("ip_access_policy")
 
 
 class IPAccessPolicy:
     def __init__(self):
         self.db_config = {
-            'host': os.environ.get('DB_HOST', 'mysql'),
-            'port': int(os.environ.get('DB_PORT', '3306')),
-            'database': os.environ.get('DB_NAME', 'mailserver'),
-            'user': os.environ.get('DB_USER', 'mailuser'),
-            'password': os.environ.get('DB_PASSWORD', 'mailpassword'),
+            "host": os.environ.get("DB_HOST", "mysql"),
+            "port": int(os.environ.get("DB_PORT", "3306")),
+            "database": os.environ.get("DB_NAME", "mailserver"),
+            "user": os.environ.get("DB_USER", "mailuser"),
+            "password": os.environ.get("DB_PASSWORD", "mailpassword"),
         }
         self._db_conn = None
 
         try:
             self._redis = redis.Redis(
-                host=os.environ.get('REDIS_HOST', 'redis'),
-                port=int(os.environ.get('REDIS_PORT', '6379')),
-                db=0, decode_responses=True, socket_timeout=2
+                host=os.environ.get("REDIS_HOST", "redis"),
+                port=int(os.environ.get("REDIS_PORT", "6379")),
+                db=0,
+                decode_responses=True,
+                socket_timeout=2,
             )
         except Exception:
             self._redis = None
@@ -104,76 +108,93 @@ class IPAccessPolicy:
     def check_access(self, sender_domain, client_ip):
         """Check if client_ip is allowed to send for sender_domain's organization."""
         if not sender_domain or not client_ip:
-            return 'DUNNO'
+            return "DUNNO"
 
         cache_key = f"ip_access:{sender_domain}:{client_ip}"
         cached = self._get_cached(cache_key)
         if cached is not None:
-            return cached['action']
+            return cached["action"]
 
         conn = self.db_connection
         if not conn:
-            return 'DUNNO'  # Fail open on DB error
+            return "DUNNO"  # Fail open on DB error
 
         try:
             cursor = conn.cursor(dictionary=True)
 
             # Look up organization for this domain
-            cursor.execute("""
+            cursor.execute(
+                """
                 SELECT o.id as org_id, o.settings
                 FROM organizations o
                 JOIN domains d ON d.organization_id = o.id
                 WHERE d.domain = %s AND d.active = 1 AND o.status = 'active'
                 LIMIT 1
-            """, (sender_domain,))
+            """,
+                (sender_domain,),
+            )
 
             org = cursor.fetchone()
             if not org:
                 cursor.close()
-                self._set_cached(cache_key, {'action': 'DUNNO'})
-                return 'DUNNO'
+                self._set_cached(cache_key, {"action": "DUNNO"})
+                return "DUNNO"
 
-            org_id = org['org_id']
+            org_id = org["org_id"]
 
             # Check if this org has IP restrictions
-            cursor.execute("""
+            cursor.execute(
+                """
                 SELECT rule_type, ip_address
                 FROM ip_access_rules
                 WHERE organization_id = %s AND active = 1
                 ORDER BY rule_type ASC
-            """, (org_id,))
+            """,
+                (org_id,),
+            )
 
             rules = cursor.fetchall()
             cursor.close()
 
             if not rules:
                 # No rules = all IPs allowed
-                self._set_cached(cache_key, {'action': 'DUNNO'})
-                return 'DUNNO'
+                self._set_cached(cache_key, {"action": "DUNNO"})
+                return "DUNNO"
 
             # Parse rules
-            whitelists = [r['ip_address'] for r in rules if r['rule_type'] == 'whitelist']
-            blacklists = [r['ip_address'] for r in rules if r['rule_type'] == 'blacklist']
+            whitelists = [r["ip_address"] for r in rules if r["rule_type"] == "whitelist"]
+            blacklists = [r["ip_address"] for r in rules if r["rule_type"] == "blacklist"]
 
             try:
                 client = ipaddress.ip_address(client_ip)
             except ValueError:
-                self._set_cached(cache_key, {'action': 'DUNNO'})
-                return 'DUNNO'
+                self._set_cached(cache_key, {"action": "DUNNO"})
+                return "DUNNO"
 
             # Check blacklist first
             for cidr in blacklists:
                 try:
                     if client in ipaddress.ip_network(cidr, strict=False):
-                        action = f'REJECT 5.7.1 Access denied: IP {client_ip} is blacklisted for this organization'
-                        logger.warning(f"Blacklisted IP {client_ip} for org {org_id} domain {sender_domain}")
-                        self._set_cached(cache_key, {'action': action})
+                        action = f"REJECT 5.7.1 Access denied: IP {client_ip} is blacklisted for this organization"
+                        logger.warning(
+                            f"Blacklisted IP {client_ip} for org {org_id} domain {sender_domain}"
+                        )
+                        self._set_cached(cache_key, {"action": action})
                         if _dispatcher_available:
                             try:
-                                dispatch_event(Events.SECURITY_IP_BLOCKED, data={
-                                    "ip_address": client_ip, "domain": sender_domain,
-                                    "rule_type": "blacklist", "cidr": cidr,
-                                }, org_id=org_id, domain=sender_domain, source_service="postfix", use_redis=True)
+                                dispatch_event(
+                                    Events.SECURITY_IP_BLOCKED,
+                                    data={
+                                        "ip_address": client_ip,
+                                        "domain": sender_domain,
+                                        "rule_type": "blacklist",
+                                        "cidr": cidr,
+                                    },
+                                    org_id=org_id,
+                                    domain=sender_domain,
+                                    source_service="postfix",
+                                    use_redis=True,
+                                )
                             except Exception:
                                 pass
                         return action
@@ -185,31 +206,41 @@ class IPAccessPolicy:
                 for cidr in whitelists:
                     try:
                         if client in ipaddress.ip_network(cidr, strict=False):
-                            self._set_cached(cache_key, {'action': 'DUNNO'})
-                            return 'DUNNO'
+                            self._set_cached(cache_key, {"action": "DUNNO"})
+                            return "DUNNO"
                     except ValueError:
                         continue
 
                 # IP not in any whitelist
-                action = f'REJECT 5.7.1 Access denied: IP {client_ip} is not whitelisted for this organization'
-                logger.warning(f"Non-whitelisted IP {client_ip} for org {org_id} domain {sender_domain}")
-                self._set_cached(cache_key, {'action': action})
+                action = f"REJECT 5.7.1 Access denied: IP {client_ip} is not whitelisted for this organization"
+                logger.warning(
+                    f"Non-whitelisted IP {client_ip} for org {org_id} domain {sender_domain}"
+                )
+                self._set_cached(cache_key, {"action": action})
                 if _dispatcher_available:
                     try:
-                        dispatch_event(Events.SECURITY_IP_BLOCKED, data={
-                            "ip_address": client_ip, "domain": sender_domain,
-                            "rule_type": "whitelist_miss",
-                        }, org_id=org_id, domain=sender_domain, source_service="postfix", use_redis=True)
+                        dispatch_event(
+                            Events.SECURITY_IP_BLOCKED,
+                            data={
+                                "ip_address": client_ip,
+                                "domain": sender_domain,
+                                "rule_type": "whitelist_miss",
+                            },
+                            org_id=org_id,
+                            domain=sender_domain,
+                            source_service="postfix",
+                            use_redis=True,
+                        )
                     except Exception:
                         pass
                 return action
 
-            self._set_cached(cache_key, {'action': 'DUNNO'})
-            return 'DUNNO'
+            self._set_cached(cache_key, {"action": "DUNNO"})
+            return "DUNNO"
 
         except Exception as e:
             logger.error(f"IP access check failed: {e}")
-            return 'DUNNO'  # Fail open
+            return "DUNNO"  # Fail open
 
 
 def main():
@@ -225,27 +256,27 @@ def main():
             line = line.strip()
             if not line:
                 break  # End of request
-            if '=' in line:
-                key, value = line.split('=', 1)
+            if "=" in line:
+                key, value = line.split("=", 1)
                 attrs[key] = value
 
         if not attrs:
             continue
 
-        sender = attrs.get('sender', '')
-        client_ip = attrs.get('client_address', '')
-        sasl_username = attrs.get('sasl_username', '')
+        sender = attrs.get("sender", "")
+        client_ip = attrs.get("client_address", "")
+        sasl_username = attrs.get("sasl_username", "")
 
         # Only enforce for authenticated senders (submission/smtps)
         if not sasl_username:
-            action = 'DUNNO'
+            action = "DUNNO"
         else:
-            sender_domain = sender.rsplit('@', 1)[-1] if '@' in sender else ''
+            sender_domain = sender.rsplit("@", 1)[-1] if "@" in sender else ""
             action = policy.check_access(sender_domain, client_ip)
 
-        sys.stdout.write(f'action={action}\n\n')
+        sys.stdout.write(f"action={action}\n\n")
         sys.stdout.flush()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

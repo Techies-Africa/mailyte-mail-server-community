@@ -6,19 +6,19 @@ A lightweight version of the tracking injector that works as a Postfix filter.
 This script injects tracking into emails by calling the tracking service API.
 """
 
-import sys
+import logging
 import os
 import subprocess
-import tempfile
-import logging
+import sys
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[logging.FileHandler('/var/log/postfix_tracking_simple.log')]
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    handlers=[logging.FileHandler("/var/log/postfix_tracking_simple.log")],
 )
-logger = logging.getLogger('postfix_tracking_simple')
+logger = logging.getLogger("postfix_tracking_simple")
+
 
 def main():
     """
@@ -38,22 +38,22 @@ def main():
             sys.exit(75)  # EX_TEMPFAIL
 
         # Call the main tracking injector
-        tracking_injector_path = '/usr/local/bin/tracking_injector.py'
+        tracking_injector_path = "/usr/local/bin/tracking_injector.py"
 
         if not os.path.exists(tracking_injector_path):
             logger.warning("Tracking injector not found, passing email through")
             # Forward to delivery without tracking
-            delivery_cmd = ['/usr/sbin/sendmail', '-G', '-i'] + sys.argv[1:]
+            delivery_cmd = ["/usr/sbin/sendmail", "-G", "-i"] + sys.argv[1:]
             proc = subprocess.Popen(delivery_cmd, stdin=subprocess.PIPE)
             proc.communicate(input=email_content)
             sys.exit(proc.returncode)
 
         # Process with tracking injector
         proc = subprocess.Popen(
-            ['/usr/bin/python3', tracking_injector_path],
+            ["/usr/bin/python3", tracking_injector_path],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
+            stderr=subprocess.PIPE,
         )
 
         modified_content, error_output = proc.communicate(input=email_content)
@@ -64,7 +64,7 @@ def main():
             modified_content = email_content
 
         # Forward the processed email for final delivery
-        delivery_cmd = ['/usr/sbin/sendmail', '-G', '-i'] + sys.argv[1:]
+        delivery_cmd = ["/usr/sbin/sendmail", "-G", "-i"] + sys.argv[1:]
         delivery_proc = subprocess.Popen(delivery_cmd, stdin=subprocess.PIPE)
         delivery_proc.communicate(input=modified_content)
 
@@ -75,5 +75,6 @@ def main():
         logger.error(f"Error in tracking filter: {e}")
         sys.exit(75)  # EX_TEMPFAIL
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()

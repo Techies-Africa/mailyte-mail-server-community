@@ -77,7 +77,7 @@ sequenceDiagram
     "recipient": "user@yourdomain.com",
     "recipient_count": "1",
     "queue_id": "A1B2C3D4E5",
-    "instance": "postfix/smtpd[1234]"
+    "instance": "postfix/smtpd[1234]",
 }
 ```
 

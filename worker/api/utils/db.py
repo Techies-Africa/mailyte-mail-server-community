@@ -7,20 +7,21 @@ Usage:
         ...
 """
 
-import os
 import logging
-import mysql.connector
+import os
 from contextlib import contextmanager
+
+import mysql.connector
 
 logger = logging.getLogger(__name__)
 
 DB_CONFIG = {
-    'host': os.getenv('DB_HOST', 'mysql'),
-    'port': int(os.getenv('DB_PORT', 3306)),
-    'database': os.getenv('DB_NAME', 'mailserver'),
-    'user': os.getenv('DB_USER', 'mailuser'),
-    'password': os.getenv('DB_PASSWORD', 'mailpassword'),
-    'charset': 'utf8mb4',
+    "host": os.getenv("DB_HOST", "mysql"),
+    "port": int(os.getenv("DB_PORT", 3306)),
+    "database": os.getenv("DB_NAME", "mailserver"),
+    "user": os.getenv("DB_USER", "mailuser"),
+    "password": os.getenv("DB_PASSWORD", "mailpassword"),
+    "charset": "utf8mb4",
 }
 
 

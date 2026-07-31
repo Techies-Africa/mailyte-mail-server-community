@@ -4,13 +4,12 @@ Integration tests for transport rules.
 Verifies the transport-rules API endpoints (list, create, delete)
 and database schema against the live Docker services.
 """
+
 import pytest
 import requests
 
 from .conftest import (
     API_BASE,
-    API_KEY,
-    TEST_DOMAIN,
 )
 
 TIMEOUT = 10
@@ -23,8 +22,8 @@ _created_rule_id = None
 # Transport rules API
 # ---------------------------------------------------------------------------
 
-class TestTransportRulesAPI:
 
+class TestTransportRulesAPI:
     def test_transport_rules_list(self, api_headers):
         """GET /transport-rules/ returns 200."""
         resp = requests.get(
@@ -62,9 +61,7 @@ class TestTransportRulesAPI:
         try:
             data = resp.json()
             _created_rule_id = (
-                data.get("id")
-                or data.get("rule_id")
-                or data.get("data", {}).get("id")
+                data.get("id") or data.get("rule_id") or data.get("data", {}).get("id")
             )
         except Exception:
             pass
@@ -74,8 +71,8 @@ class TestTransportRulesAPI:
 # Database schema
 # ---------------------------------------------------------------------------
 
-class TestTransportRulesDatabase:
 
+class TestTransportRulesDatabase:
     def test_transport_rules_table_exists(self, db_connection):
         """transport_rules table must exist and be queryable."""
         cursor = db_connection.cursor()
@@ -90,8 +87,8 @@ class TestTransportRulesDatabase:
 # Cleanup
 # ---------------------------------------------------------------------------
 
-class TestTransportRulesCleanup:
 
+class TestTransportRulesCleanup:
     def test_transport_rules_cleanup(self, api_headers):
         """Delete the test rule created earlier (if any)."""
         global _created_rule_id

@@ -101,11 +101,10 @@ All webhook deliveries include a signature header for verification:
 import hmac
 import hashlib
 
+
 def verify_webhook_signature(payload, signature, secret):
     expected_signature = hmac.new(
-        secret.encode('utf-8'),
-        payload.encode('utf-8'),
-        hashlib.sha256
+        secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256
     ).hexdigest()
     return hmac.compare_digest(signature, f"sha256={expected_signature}")
 ```

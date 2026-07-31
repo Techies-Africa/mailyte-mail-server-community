@@ -112,21 +112,19 @@ def erase_user_data(email: str, org_id: str):
 
     # 2. Delete tracking events
     db.execute(
-        "DELETE FROM email_tracking WHERE recipient = %s AND organization_id = %s",
-        (email, org_id)
+        "DELETE FROM email_tracking WHERE recipient = %s AND organization_id = %s", (email, org_id)
     )
 
     # 3. Anonymize mail logs (keep for operational needs, remove PII)
     db.execute(
         "UPDATE mail_logs SET sender = 'redacted', recipient = 'redacted', subject = NULL "
         "WHERE (sender = %s OR recipient = %s) AND organization_id = %s",
-        (email, email, org_id)
+        (email, email, org_id),
     )
 
     # 4. Delete suppression entries
     db.execute(
-        "DELETE FROM email_suppressions WHERE email = %s AND organization_id = %s",
-        (email, org_id)
+        "DELETE FROM email_suppressions WHERE email = %s AND organization_id = %s", (email, org_id)
     )
 
     # 5. Delete sessions
@@ -134,14 +132,14 @@ def erase_user_data(email: str, org_id: str):
         "DELETE s FROM user_sessions s "
         "JOIN email_accounts a ON s.email_account_id = a.id "
         "WHERE a.email = %s",
-        (email,)
+        (email,),
     )
 
     # 6. Log the erasure (for compliance records)
     db.execute(
         "INSERT INTO audit_log (action, entity_type, entity_id, performed_by, timestamp) "
         "VALUES ('erasure', 'email_account', %s, 'gdpr_request', NOW())",
-        (email,)
+        (email,),
     )
 ```
 
@@ -156,7 +154,7 @@ def export_user_data(email: str) -> dict:
     tracking = db.execute("SELECT * FROM email_tracking WHERE recipient = %s", (email,))
     sessions = db.execute(
         "SELECT s.* FROM user_sessions s JOIN email_accounts a ON s.email_account_id = a.id WHERE a.email = %s",
-        (email,)
+        (email,),
     )
 
     return {

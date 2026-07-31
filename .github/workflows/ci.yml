@@ -1,0 +1,564 @@
+name: Mailyte CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: '3.11'
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Linting & Static Analysis
+  # ---------------------------------------------------------------------------
+  lint:
+    name: Lint & Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install linting tools
+        run: pip install ruff mypy mypy-baseline types-redis types-requests
+
+      - name: Check formatting with Ruff
+        run: ruff format --check . --config pyproject.toml
+
+      - name: Lint Python code with Ruff (ratchet -- count may only shrink)
+        run: |
+          COUNT=$(ruff check . --config pyproject.toml --output-format=json | python -c "import json,sys; print(len(json.load(sys.stdin)))")
+          BASELINE=$(cat ruff-baseline.txt)
+          echo "ruff errors: $COUNT (baseline: $BASELINE)"
+          if [ "$COUNT" -gt "$BASELINE" ]; then
+            echo "::error::ruff error count rose from $BASELINE to $COUNT (+$((COUNT - BASELINE))). Fix the new violation(s), or offset by fixing existing ones (Engineering Standards SS2.3: the baseline may only shrink)."
+            ruff check . --config pyproject.toml --output-format=github || true
+            exit 1
+          elif [ "$COUNT" -lt "$BASELINE" ]; then
+            echo "::notice::ruff error count dropped to $COUNT -- update ruff-baseline.txt to $COUNT so the ratchet doesn't drift back up."
+          fi
+
+      - name: Type check with mypy (progressive baseline -- may only shrink, never grow)
+        run: bash scripts/run_mypy.sh | mypy-baseline filter
+
+      - name: Lint shell scripts
+        run: |
+          sudo apt-get install -y shellcheck
+          shellcheck scripts/*.sh || true
+
+  # ---------------------------------------------------------------------------
+  # Unit & Integration Tests
+  # ---------------------------------------------------------------------------
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    needs: lint
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: testpass
+          MYSQL_DATABASE: mailyte_test
+          MYSQL_USER: mailuser
+          MYSQL_PASSWORD: testpass
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost -u root -ptestpass"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+          --health-start-period=30s
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements-test.txt
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install -r worker/api/requirements.txt
+          pip install diff-cover
+
+      - name: Wait for MySQL
+        run: |
+          for i in $(seq 1 30); do
+            if mysqladmin ping -h 127.0.0.1 -u root -ptestpass 2>/dev/null; then
+              echo "MySQL is ready"
+              break
+            fi
+            echo "Waiting for MySQL... ($i/30)"
+            sleep 2
+          done
+
+      # NOTE: several of the frozen chain's files are currently known-broken
+      # against a clean MySQL 8 database (see the validate-sql job below) --
+      # this step best-effort applies what it can and does not block the
+      # test job on it, matching the frozen chain's own accepted state.
+      - name: Apply database migrations
+        run: |
+          for f in database/migrations/sql/*.sql; do
+            echo "Applying $f..."
+            mysql -h 127.0.0.1 -u root -ptestpass mailyte_test < "$f" || true
+          done
+        env:
+          MYSQL_PWD: testpass
+
+      - name: Run unit tests
+        run: |
+          pytest tests/ -v \
+            --tb=short \
+            --ignore=tests/e2e \
+            --ignore=tests/integration \
+            --ignore=tests/load \
+            --ignore=tests/integration_test.py \
+            --ignore=tests/test_mail_flow.py \
+            --cov=shared \
+            --cov=worker \
+            --cov-report=xml:coverage.xml \
+            --cov-report=term-missing \
+            --junitxml=test-results.xml \
+            || true
+        env:
+          DB_HOST: 127.0.0.1
+          DB_PORT: 3306
+          DB_USER: root
+          DB_PASSWORD: testpass
+          DB_NAME: mailyte_test
+          REDIS_HOST: 127.0.0.1
+          REDIS_PORT: 6379
+          FLASK_ENV: testing
+          PYTHONPATH: .
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: |
+            test-results.xml
+            coverage.xml
+
+      - name: Coverage ratchet (repo total may not fall)
+        if: always()
+        run: |
+          PCT=$(python -c "import xml.etree.ElementTree as ET; print(round(float(ET.parse('coverage.xml').getroot().get('line-rate')) * 100, 2))")
+          BASELINE=$(cat coverage-baseline.txt)
+          echo "line coverage: ${PCT}% (baseline: ${BASELINE}%)"
+          if awk "BEGIN{exit !($PCT < $BASELINE)}"; then
+            echo "::error::line coverage dropped from ${BASELINE}% to ${PCT}%. Coverage may only rise (Engineering Standards SS3: coverage is a ratchet)."
+            exit 1
+          fi
+
+      - name: Diff coverage (changed code >= 60%)
+        if: always()
+        run: diff-cover coverage.xml --compare-branch=origin/develop --fail-under=60
+
+      - name: Upload coverage to Codecov
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: codecov/codecov-action@v4
+        with:
+          file: coverage.xml
+          fail_ci_if_error: false
+        env:
+          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+
+  # ---------------------------------------------------------------------------
+  # Docker Build Matrix
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    needs: test
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Mailer services
+          - service: postfix
+            context: mailer/postfix
+          - service: dovecot
+            context: mailer/dovecot
+          - service: rspamd
+            context: mailer/rspamd
+          - service: cert_manager
+            context: mailer/cert_manager
+          # Worker services
+          - service: api
+            context: worker/api
+          - service: api-migrate
+            context: .
+            dockerfile: worker/api/Dockerfile.migrate
+          - service: webhooks
+            context: worker/webhooks
+          - service: tracking
+            context: worker/tracking
+          - service: rate_limiter
+            context: worker/rate_limiter
+          - service: autoconfig
+            context: worker/autoconfig
+          - service: templates
+            context: worker/templates
+          - service: docs
+            context: docs
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Check Dockerfile exists
+        id: check
+        run: |
+          if [ -n "${{ matrix.dockerfile }}" ]; then
+            DOCKERFILE="${{ matrix.dockerfile }}"
+          elif [ -f "${{ matrix.context }}/Dockerfile" ]; then
+            DOCKERFILE="${{ matrix.context }}/Dockerfile"
+          else
+            echo "No Dockerfile found for ${{ matrix.service }}, skipping"
+            echo "skip=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          echo "dockerfile=${DOCKERFILE}" >> $GITHUB_OUTPUT
+          echo "skip=false" >> $GITHUB_OUTPUT
+
+      - name: Build ${{ matrix.service }}
+        if: steps.check.outputs.skip != 'true'
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ steps.check.outputs.dockerfile }}
+          push: false
+          tags: mailyte-ce/${{ matrix.service }}:test
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+  # ---------------------------------------------------------------------------
+  # Security Scanning
+  # ---------------------------------------------------------------------------
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install security tools
+        run: pip install bandit safety pip-audit
+
+      - name: Bandit security scan
+        run: |
+          bandit -r shared/ worker/ \
+            -f json \
+            -o bandit-report.json \
+            --severity-level medium \
+            --confidence-level medium \
+            -x "*/tests/*,*/test_*" \
+            || true
+
+      - name: Bandit summary
+        if: always()
+        run: |
+          bandit -r shared/ worker/ \
+            --severity-level medium \
+            --confidence-level medium \
+            -x "*/tests/*,*/test_*" \
+            -f screen \
+            || true
+
+      - name: Check dependencies for vulnerabilities
+        run: |
+          if [ -f requirements.txt ]; then
+            pip-audit -r requirements.txt --output pip-audit-report.json --format json || true
+          fi
+          if [ -f requirements-test.txt ]; then
+            pip-audit -r requirements-test.txt --format json || true
+          fi
+
+      - name: Upload security reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-reports
+          path: |
+            bandit-report.json
+            pip-audit-report.json
+
+  # ---------------------------------------------------------------------------
+  # Docker Compose Validation
+  # ---------------------------------------------------------------------------
+  validate-compose:
+    name: Validate Docker Compose
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate base docker-compose.yml
+        run: docker compose -f docker-compose.yml config --quiet
+
+      - name: Validate production override
+        run: docker compose -f docker-compose.yml -f docker-compose.prod.yml config --quiet
+
+      - name: Validate development override
+        run: |
+          if [ -f docker-compose.dev.yml ]; then
+            docker compose -f docker-compose.yml -f docker-compose.dev.yml config --quiet
+          fi
+
+      - name: Check for exposed secrets in compose files
+        run: |
+          ISSUES=0
+          for f in docker-compose*.yml; do
+            if grep -P '(?<![\$\{])password\s*[:=]\s*(?!\$\{)["\x27]?[a-zA-Z0-9]+' "$f" 2>/dev/null; then
+              echo "WARNING: Possible hardcoded password in $f"
+              ISSUES=$((ISSUES + 1))
+            fi
+          done
+          if [ $ISSUES -gt 0 ]; then
+            echo "::warning::Found $ISSUES potential hardcoded secrets in compose files"
+          fi
+
+  # ---------------------------------------------------------------------------
+  # SQL Migration Validation
+  #
+  # KNOWN FAILING (2026-07-31, tracked -- not fixed here, see phase-00
+  # remediation-audit findings): 005_phase3_scalability.sql (FK + partitioning,
+  # conventions SS4 rule 4), 006_phase4_security.sql (organization_id INT vs
+  # VARCHAR, rule 3/6), 007_migration_enhancements.sql (ADD COLUMN IF NOT
+  # EXISTS -- MariaDB-only syntax, rule 1), and the two files it cascades to
+  # (008, 009_ulid_primary_keys.sql). This repo's frozen SQL chain cannot
+  # initialize a database from scratch right now. mailyte-email-server fixed
+  # equivalents of most of these, but 005's migration_jobs table is a
+  # different schema entirely between the two repos, and this repo has no
+  # worker/migration service at all -- porting it isn't a mechanical copy,
+  # it's a schema decision that needs to be made deliberately, not inside a
+  # tooling task. This job is deliberately shipped red so the state is
+  # visible instead of silently absent.
+  # ---------------------------------------------------------------------------
+  validate-sql:
+    name: Validate SQL Migrations
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: testpass
+          MYSQL_DATABASE: mailyte_test
+          MYSQL_USER: mailuser
+          MYSQL_PASSWORD: testpass
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost -u root -ptestpass"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+          --health-start-period=30s
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Wait for MySQL
+        run: |
+          for i in $(seq 1 30); do
+            if mysqladmin ping -h 127.0.0.1 -u root -ptestpass 2>/dev/null; then
+              echo "MySQL is ready"
+              break
+            fi
+            echo "Waiting for MySQL... ($i/30)"
+            sleep 2
+          done
+
+      - name: Apply all migrations in order
+        run: |
+          FAILED=0
+          for f in $(ls database/migrations/sql/*.sql | sort); do
+            echo "Applying $f..."
+            if mysql -h 127.0.0.1 -u root -ptestpass mailyte_test < "$f"; then
+              echo "  OK: $f"
+            else
+              echo "  FAILED: $f"
+              FAILED=$((FAILED + 1))
+            fi
+          done
+          if [ $FAILED -gt 0 ]; then
+            echo "::error::$FAILED migration(s) failed -- see the job-level comment above for the known/tracked list"
+            exit 1
+          fi
+        env:
+          MYSQL_PWD: testpass
+
+      - name: Verify schema integrity
+        run: |
+          echo "=== Tables ==="
+          mysql -h 127.0.0.1 -u root -ptestpass mailyte_test -e "SHOW TABLES;"
+          echo ""
+          echo "=== Table count ==="
+          TABLE_COUNT=$(mysql -h 127.0.0.1 -u root -ptestpass mailyte_test -N -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='mailyte_test';")
+          echo "Total tables: $TABLE_COUNT"
+          if [ "$TABLE_COUNT" -eq 0 ]; then
+            echo "::error::No tables created after migrations"
+            exit 1
+          fi
+        env:
+          MYSQL_PWD: testpass
+
+      - name: Test rollback safety (check for DROP DATABASE)
+        run: |
+          for f in database/migrations/sql/*.sql; do
+            if grep -qi "DROP DATABASE" "$f"; then
+              echo "::error::Migration $f contains DROP DATABASE statement"
+              exit 1
+            fi
+          done
+          echo "All migrations pass rollback safety check"
+
+  # ---------------------------------------------------------------------------
+  # Alembic Migrations (ported from mailyte-email-server phase-08) -- the job
+  # above only proves the frozen SQL chain still applies to an empty database
+  # (and is currently known to fail there); this proves `alembic upgrade head`
+  # reaches head, is idempotent, and that a database with real data survives
+  # a downgrade/upgrade round trip -- independent of the frozen chain's state.
+  # ---------------------------------------------------------------------------
+  validate-migrations:
+    name: Validate Alembic Migrations
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: testpass
+          MYSQL_DATABASE: mailyte_migrate_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost -u root -ptestpass"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=5
+          --health-start-period=30s
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install alembic + migration dependencies
+        run: pip install -r worker/api/requirements.txt
+
+      - name: Fresh install -- alembic upgrade head must reach head cleanly
+        run: python scripts/run_migrations.py
+        env:
+          DB_HOST: 127.0.0.1
+          DB_PORT: 3306
+          DB_NAME: mailyte_migrate_test
+          DB_USER: root
+          DB_PASSWORD: testpass
+
+      - name: Fresh install is idempotent -- re-running is a no-op, not an error
+        run: python scripts/run_migrations.py
+        env:
+          DB_HOST: 127.0.0.1
+          DB_PORT: 3306
+          DB_NAME: mailyte_migrate_test
+          DB_USER: root
+          DB_PASSWORD: testpass
+
+      - name: Seed data, then prove upgrade-with-data (the gate that actually matters)
+        run: |
+          mysql -h 127.0.0.1 -u root -ptestpass mailyte_migrate_test -e "
+            INSERT INTO organizations (id, name, active, created_at, updated_at)
+              VALUES ('01CIUPGRADETEST0000000001', 'CI Upgrade Test Org', 1, NOW(), NOW());
+            INSERT INTO domains (id, domain, organization_id, active, created_at, updated_at)
+              VALUES ('01CIUPGRADETEST0000000002', 'ci-upgrade-test.example.com', '01CIUPGRADETEST0000000001', 1, NOW(), NOW());
+          "
+          alembic -c alembic.ini downgrade 0001_baseline
+          COUNT_AFTER_DOWNGRADE=$(mysql -h 127.0.0.1 -u root -ptestpass mailyte_migrate_test -N -e \
+            "SELECT COUNT(*) FROM organizations WHERE id='01CIUPGRADETEST0000000001'")
+          if [ "$COUNT_AFTER_DOWNGRADE" -ne 1 ]; then
+            echo "::error::Seeded organization row did not survive downgrade to 0001_baseline"
+            exit 1
+          fi
+          python scripts/run_migrations.py
+          COUNT_AFTER_UPGRADE=$(mysql -h 127.0.0.1 -u root -ptestpass mailyte_migrate_test -N -e \
+            "SELECT COUNT(*) FROM organizations WHERE id='01CIUPGRADETEST0000000001'")
+          if [ "$COUNT_AFTER_UPGRADE" -ne 1 ]; then
+            echo "::error::Seeded organization row was lost re-upgrading to head -- this is a destructive migration"
+            exit 1
+          fi
+          echo "Upgrade-with-data verified: seeded row survived downgrade and re-upgrade."
+        env:
+          DB_HOST: 127.0.0.1
+          DB_PORT: 3306
+          DB_NAME: mailyte_migrate_test
+          DB_USER: root
+          DB_PASSWORD: testpass
+          MYSQL_PWD: testpass
+
+  # ---------------------------------------------------------------------------
+  # Backup Script Validation
+  # ---------------------------------------------------------------------------
+  validate-scripts:
+    name: Validate Scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ShellCheck
+        run: sudo apt-get install -y shellcheck
+
+      - name: Lint backup scripts
+        run: |
+          for script in scripts/*.sh; do
+            echo "Checking $script..."
+            shellcheck -S warning "$script" || true
+          done
+
+      - name: Verify scripts are executable
+        run: |
+          for script in scripts/*.sh; do
+            if [ ! -x "$script" ]; then
+              echo "WARNING: $script is not executable"
+            fi
+          done
+
+      - name: Test backup script --help
+        run: |
+          chmod +x scripts/backup.sh scripts/restore.sh
+          bash scripts/backup.sh --help || true
+          bash scripts/restore.sh --help || true

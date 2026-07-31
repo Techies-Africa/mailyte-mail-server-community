@@ -1,4 +1,3 @@
-
 """
 Email Tracking Service - API Package
 

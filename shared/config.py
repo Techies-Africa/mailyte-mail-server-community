@@ -11,13 +11,13 @@ Production:  AWS RDS, ElastiCache, S3
 """
 
 import os
-from dataclasses import dataclass, field
-from typing import Optional
+from dataclasses import dataclass
 
 
 @dataclass
 class DatabaseConfig:
     """MySQL database configuration."""
+
     host: str = ""
     port: int = 3306
     name: str = "mailserver"
@@ -53,6 +53,7 @@ class DatabaseConfig:
 @dataclass
 class RedisConfig:
     """Redis configuration. Local Redis in dev, AWS ElastiCache in prod."""
+
     url: str = ""
     host: str = ""
     port: int = 6379
@@ -81,6 +82,7 @@ class RedisConfig:
 @dataclass
 class S3Config:
     """AWS S3 object storage for email files, attachments, and backups."""
+
     bucket: str = "development-local-1"
     prefix: str = "mailyte"
     access_key: str = ""
@@ -112,6 +114,7 @@ class S3Config:
 @dataclass
 class MailServerConfig:
     """General mail server configuration."""
+
     hostname: str = ""
     domain: str = ""
     admin_email: str = ""
@@ -125,6 +128,7 @@ class MailServerConfig:
 @dataclass
 class ServiceConfig:
     """Configuration for a specific worker service."""
+
     name: str = ""
     host: str = "0.0.0.0"
     port: int = 8080
@@ -173,7 +177,7 @@ class AppConfig:
 
 
 # Singleton instance
-_config: Optional[AppConfig] = None
+_config: AppConfig | None = None
 
 
 def get_config() -> AppConfig:

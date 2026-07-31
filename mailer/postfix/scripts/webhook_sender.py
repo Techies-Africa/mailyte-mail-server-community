@@ -18,16 +18,16 @@ master.cf usage:
       argv=/usr/local/bin/webhook_sender.py inbound -f ${sender} -- ${recipient}
 """
 
-import sys
-import os
 import email
 import email.policy
 import email.utils
-import smtplib
 import logging
+import os
 import signal
-from datetime import datetime, timezone
-from typing import Dict, Any, List
+import smtplib
+import sys
+from datetime import UTC, datetime
+from typing import Any
 
 # ---------------------------------------------------------------------------
 # Logging — write to file + stderr so Postfix can capture output
@@ -56,6 +56,7 @@ REINJECT_TIMEOUT = 30
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _clean_email_address(raw: str) -> str:
     """Extract a bare email address from a header value like 'Name <a@b.com>'."""
     if not raw:
@@ -67,7 +68,7 @@ def _clean_email_address(raw: str) -> str:
         return raw.strip().lower()
 
 
-def _parse_recipient_list(header_value: str) -> List[str]:
+def _parse_recipient_list(header_value: str) -> list[str]:
     """Split a To/Cc/Bcc header into individual clean addresses."""
     if not header_value:
         return []
@@ -79,14 +80,14 @@ def _parse_recipient_list(header_value: str) -> List[str]:
     return addresses
 
 
-def extract_metadata(msg: email.message.EmailMessage) -> Dict[str, Any]:
+def extract_metadata(msg: email.message.EmailMessage) -> dict[str, Any]:
     """
     Pull the fields we need out of a parsed email message.
     Returns a dict suitable for inclusion in the webhook JSON payload.
     """
     sender = _clean_email_address(msg.get("From", ""))
 
-    recipients: List[str] = []
+    recipients: list[str] = []
     for hdr in ("To", "Cc", "Bcc"):
         recipients.extend(_parse_recipient_list(msg.get(hdr, "")))
 
@@ -108,7 +109,7 @@ def extract_metadata(msg: email.message.EmailMessage) -> Dict[str, Any]:
     }
 
 
-def post_webhook(direction: str, metadata: Dict[str, Any]) -> bool:
+def post_webhook(direction: str, metadata: dict[str, Any]) -> bool:
     """
     POST the webhook event to the webhooks HTTP service.
 
@@ -130,7 +131,7 @@ def post_webhook(direction: str, metadata: Dict[str, Any]) -> bool:
 
     payload = {
         "event": event_name,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "data": {
             "sender": metadata.get("sender", ""),
             "recipients": metadata.get("recipients", []),
@@ -153,13 +154,18 @@ def post_webhook(direction: str, metadata: Dict[str, Any]) -> bool:
         if resp.status_code < 300:
             logger.info(
                 "Webhook delivered: %s -> %s (HTTP %d)",
-                event_name, url, resp.status_code,
+                event_name,
+                url,
+                resp.status_code,
             )
             return True
 
         logger.warning(
             "Webhook HTTP error: %s -> %s (HTTP %d): %s",
-            event_name, url, resp.status_code, resp.text[:300],
+            event_name,
+            url,
+            resp.status_code,
+            resp.text[:300],
         )
         return False
 
@@ -177,7 +183,7 @@ def post_webhook(direction: str, metadata: Dict[str, Any]) -> bool:
 def reinject_email(
     email_bytes: bytes,
     sender: str,
-    recipients: List[str],
+    recipients: list[str],
 ) -> None:
     """
     Reinject the email into Postfix via SMTP on 127.0.0.1:10026.
@@ -192,7 +198,10 @@ def reinject_email(
 
     logger.info(
         "Reinjecting to %s:%d  sender=%s  recipients=%s",
-        REINJECT_HOST, REINJECT_PORT, sender, recipients,
+        REINJECT_HOST,
+        REINJECT_PORT,
+        sender,
+        recipients,
     )
 
     try:
@@ -208,6 +217,7 @@ def reinject_email(
 # ---------------------------------------------------------------------------
 # CLI argument parsing
 # ---------------------------------------------------------------------------
+
 
 def parse_args():
     """
@@ -238,13 +248,13 @@ def parse_args():
         if idx + 1 < len(remaining):
             cli_sender = remaining[idx + 1]
         # Remove -f and its argument from the list
-        remaining = remaining[:idx] + remaining[idx + 2:]
+        remaining = remaining[:idx] + remaining[idx + 2 :]
 
     # Everything after "--" is recipient addresses
-    cli_recipients: List[str] = []
+    cli_recipients: list[str] = []
     if "--" in remaining:
         idx = remaining.index("--")
-        cli_recipients = remaining[idx + 1:]
+        cli_recipients = remaining[idx + 1 :]
 
     return direction, cli_sender, cli_recipients
 
@@ -252,6 +262,7 @@ def parse_args():
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 def main():
     """

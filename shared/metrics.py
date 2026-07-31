@@ -17,7 +17,7 @@ class _NoOpMetrics:
         pass
 
     def get_prometheus_metrics(self) -> str:
-        return f"# Prometheus metrics available in Mailyte Enterprise Edition\n"
+        return "# Prometheus metrics available in Mailyte Enterprise Edition\n"
 
     def increment(self, name: str, value: int = 1, **kwargs):
         pass

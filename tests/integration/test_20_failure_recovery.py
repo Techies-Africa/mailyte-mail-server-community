@@ -5,20 +5,22 @@ Non-destructive tests that verify each service handles errors gracefully,
 returns proper HTTP status codes, and operates independently of sibling
 services.
 """
+
 import socket
+
 import pytest
 import requests
 
 from .conftest import (
     API_BASE,
     API_KEY,
-    SMTP_HOST,
-    SMTP_PORT,
     IMAP_HOST,
     IMAP_PORT,
+    RATE_LIMITER_BASE,
+    SMTP_HOST,
+    SMTP_PORT,
     TRACKING_BASE,
     WEBHOOKS_BASE,
-    RATE_LIMITER_BASE,
 )
 
 TIMEOUT = 10  # seconds for HTTP / socket operations
@@ -28,6 +30,7 @@ TIMEOUT = 10  # seconds for HTTP / socket operations
 # Service degradation — independence checks
 # ---------------------------------------------------------------------------
 
+
 class TestServiceDegradation:
     """Each micro-service should keep running even if siblings are slow."""
 
@@ -36,15 +39,11 @@ class TestServiceDegradation:
         """API should return a proper error (not hang) if database queries
         are slow."""
         try:
-            resp = requests.get(
-                f"{API_BASE}/health", timeout=TIMEOUT
-            )
+            resp = requests.get(f"{API_BASE}/health", timeout=TIMEOUT)
         except requests.ConnectionError:
             pytest.skip("API unreachable")
         except requests.Timeout:
-            pytest.fail(
-                "API did not respond within the timeout — possible DB hang"
-            )
+            pytest.fail("API did not respond within the timeout — possible DB hang")
         # Any status code is acceptable; the point is it responded promptly.
         assert resp.status_code in (200, 500, 503)
 
@@ -52,9 +51,7 @@ class TestServiceDegradation:
         """Tracking service must function even if the API is slow. They are
         separate containers."""
         try:
-            resp = requests.get(
-                f"{TRACKING_BASE}/health", timeout=TIMEOUT
-            )
+            resp = requests.get(f"{TRACKING_BASE}/health", timeout=TIMEOUT)
         except requests.ConnectionError:
             pytest.skip("Tracking service unreachable")
         assert resp.status_code in (200, 204, 503), (
@@ -65,9 +62,7 @@ class TestServiceDegradation:
         """Webhook service must not depend on tracking service
         availability."""
         try:
-            resp = requests.get(
-                f"{WEBHOOKS_BASE}/health", timeout=TIMEOUT
-            )
+            resp = requests.get(f"{WEBHOOKS_BASE}/health", timeout=TIMEOUT)
         except requests.ConnectionError:
             pytest.skip("Webhooks service unreachable")
         assert resp.status_code in (200, 204, 503), (
@@ -78,9 +73,7 @@ class TestServiceDegradation:
         """Rate limiter must function even during API degradation to protect
         the SMTP server."""
         try:
-            resp = requests.get(
-                f"{RATE_LIMITER_BASE}/health", timeout=TIMEOUT
-            )
+            resp = requests.get(f"{RATE_LIMITER_BASE}/health", timeout=TIMEOUT)
         except requests.ConnectionError:
             pytest.skip("Rate limiter service unreachable")
         assert resp.status_code in (200, 204, 503), (
@@ -91,6 +84,7 @@ class TestServiceDegradation:
 # ---------------------------------------------------------------------------
 # Graceful error responses
 # ---------------------------------------------------------------------------
+
 
 class TestGracefulErrors:
     """Services must return meaningful HTTP errors, never crash or hang."""
@@ -162,10 +156,8 @@ class TestGracefulErrors:
         """Sending an extremely long EHLO hostname must not crash
         postfix."""
         try:
-            sock = socket.create_connection(
-                (SMTP_HOST, SMTP_PORT), timeout=TIMEOUT
-            )
-        except (socket.timeout, ConnectionRefusedError, OSError):
+            sock = socket.create_connection((SMTP_HOST, SMTP_PORT), timeout=TIMEOUT)
+        except (TimeoutError, ConnectionRefusedError, OSError):
             pytest.skip(f"Cannot connect to SMTP at {SMTP_HOST}:{SMTP_PORT}")
 
         try:
@@ -180,9 +172,7 @@ class TestGracefulErrors:
 
             # Any response (250, 501, 421) is fine — the key assertion is
             # that the server did not drop the connection silently.
-            assert len(response) > 0, (
-                "Server returned empty response to oversized EHLO"
-            )
+            assert len(response) > 0, "Server returned empty response to oversized EHLO"
         finally:
             sock.close()
 
@@ -190,10 +180,8 @@ class TestGracefulErrors:
         """Invalid IMAP commands must return BAD response, not crash
         dovecot."""
         try:
-            sock = socket.create_connection(
-                (IMAP_HOST, IMAP_PORT), timeout=TIMEOUT
-            )
-        except (socket.timeout, ConnectionRefusedError, OSError):
+            sock = socket.create_connection((IMAP_HOST, IMAP_PORT), timeout=TIMEOUT)
+        except (TimeoutError, ConnectionRefusedError, OSError):
             pytest.skip(f"Cannot connect to IMAP at {IMAP_HOST}:{IMAP_PORT}")
 
         try:
@@ -208,9 +196,7 @@ class TestGracefulErrors:
             sock.sendall(f"{tag} XYZZY invalid command\r\n".encode())
             response = sock.recv(4096).decode(errors="replace")
 
-            assert "BAD" in response, (
-                f"Expected BAD response for invalid command, got: {response}"
-            )
+            assert "BAD" in response, f"Expected BAD response for invalid command, got: {response}"
         finally:
             sock.close()
 
@@ -218,6 +204,7 @@ class TestGracefulErrors:
 # ---------------------------------------------------------------------------
 # Data integrity checks (read-only)
 # ---------------------------------------------------------------------------
+
 
 class TestDataIntegrity:
     """Non-destructive queries to detect data corruption or orphaned rows."""
@@ -233,9 +220,7 @@ class TestDataIntegrity:
         )
         orphans = cursor.fetchone()[0]
         cursor.close()
-        assert orphans == 0, (
-            f"Found {orphans} email_accounts with invalid domain_id"
-        )
+        assert orphans == 0, f"Found {orphans} email_accounts with invalid domain_id"
 
     def test_no_orphaned_aliases(self, db_connection):
         """Aliases must reference valid domains. Orphans cause delivery
@@ -248,19 +233,13 @@ class TestDataIntegrity:
         )
         orphans = cursor.fetchone()[0]
         cursor.close()
-        assert orphans == 0, (
-            f"Found {orphans} aliases with invalid domain_id"
-        )
+        assert orphans == 0, f"Found {orphans} aliases with invalid domain_id"
 
     def test_api_keys_have_valid_structure(self, db_connection):
         """API keys must have key_id and active status. Invalid keys could
         cause auth failures."""
         cursor = db_connection.cursor()
-        cursor.execute(
-            "SELECT COUNT(*) FROM api_keys WHERE key_id IS NULL"
-        )
+        cursor.execute("SELECT COUNT(*) FROM api_keys WHERE key_id IS NULL")
         null_keys = cursor.fetchone()[0]
         cursor.close()
-        assert null_keys == 0, (
-            f"Found {null_keys} api_keys rows with NULL key_id"
-        )
+        assert null_keys == 0, f"Found {null_keys} api_keys rows with NULL key_id"

@@ -6,18 +6,18 @@ run on managed services (e.g. AWS RDS, ElastiCache) rather than local Docker
 containers.  These tests verify that configuration is environment-driven and
 that the remote database is properly initialised.
 """
+
 import os
+
 import pytest
 import redis
 
-from .conftest import DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASS
+from .conftest import DB_HOST, DB_NAME
 
 TIMEOUT = 10  # seconds for network operations
 
 # Path to the project root (two levels above tests/integration/)
-PROJECT_ROOT = os.path.abspath(
-    os.path.join(os.path.dirname(__file__), os.pardir, os.pardir)
-)
+PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir))
 
 REDIS_HOST = os.getenv("TEST_REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("TEST_REDIS_PORT", "6379"))
@@ -26,6 +26,7 @@ REDIS_PORT = int(os.getenv("TEST_REDIS_PORT", "6379"))
 # ---------------------------------------------------------------------------
 # Cloud mode configuration
 # ---------------------------------------------------------------------------
+
 
 class TestCloudModeConfig:
     """Verify configuration files and env-driven settings for cloud mode."""
@@ -47,7 +48,7 @@ class TestCloudModeConfig:
         env_example = os.path.join(PROJECT_ROOT, ".env.example")
         if not os.path.exists(env_example):
             pytest.skip(".env.example not found at project root")
-        with open(env_example, "r") as fh:
+        with open(env_example) as fh:
             contents = fh.read()
         assert "DB_HOST" in contents, (
             ".env.example does not mention DB_HOST — operators won't know "
@@ -70,14 +71,10 @@ class TestCloudModeConfig:
         """Redis host must be configurable via environment for
         ElastiCache/cloud Redis."""
         try:
-            r = redis.Redis(
-                host=REDIS_HOST, port=REDIS_PORT, socket_timeout=TIMEOUT
-            )
+            r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, socket_timeout=TIMEOUT)
             pong = r.ping()
         except redis.ConnectionError:
-            pytest.skip(
-                f"Cannot connect to Redis at {REDIS_HOST}:{REDIS_PORT}"
-            )
+            pytest.skip(f"Cannot connect to Redis at {REDIS_HOST}:{REDIS_PORT}")
         except ImportError:
             pytest.skip("redis-py not installed")
         assert pong is True, "Redis PING did not return PONG"
@@ -86,6 +83,7 @@ class TestCloudModeConfig:
 # ---------------------------------------------------------------------------
 # Cloud mode database
 # ---------------------------------------------------------------------------
+
 
 class TestCloudModeDatabase:
     """Verify the remote (or local) database is correctly set up."""
@@ -107,8 +105,7 @@ class TestCloudModeDatabase:
         tables = [row[0] for row in cursor.fetchall()]
         cursor.close()
         assert len(tables) >= 40, (
-            f"Expected at least 40 tables in '{DB_NAME}', found {len(tables)}: "
-            f"{tables}"
+            f"Expected at least 40 tables in '{DB_NAME}', found {len(tables)}: {tables}"
         )
 
     def test_remote_db_has_seed_data(self, db_connection):

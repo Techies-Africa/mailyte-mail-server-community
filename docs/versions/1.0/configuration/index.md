@@ -270,17 +270,23 @@ ENABLE_DMARC_CHECK=true
 import os
 from typing import Optional
 
+
 def validate_config():
     required_vars = [
-        'DB_HOST', 'DB_NAME', 'DB_USER', 'DB_PASSWORD',
-        'HOSTNAME', 'DOMAIN', 'WEBHOOK_SECRET'
+        "DB_HOST",
+        "DB_NAME",
+        "DB_USER",
+        "DB_PASSWORD",
+        "HOSTNAME",
+        "DOMAIN",
+        "WEBHOOK_SECRET",
     ]
-    
+
     missing_vars = []
     for var in required_vars:
         if not os.getenv(var):
             missing_vars.append(var)
-    
+
     if missing_vars:
         raise ValueError(f"Missing required environment variables: {missing_vars}")
 ```
@@ -365,12 +371,8 @@ DB_PASSWORD=$(openssl rand -base64 32)
 ### 4. Dynamic Configuration
 ```python
 # Runtime configuration updates via API
-PUT /api/v1/config/webhook
-{
-    "webhook_urls": ["https://new-webhook.com/endpoint"],
-    "retry_attempts": 5,
-    "timeout": 45
-}
+PUT / api / v1 / config / webhook
+{"webhook_urls": ["https://new-webhook.com/endpoint"], "retry_attempts": 5, "timeout": 45}
 ```
 
 ## Troubleshooting Configuration Issues

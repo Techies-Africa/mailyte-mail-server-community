@@ -21,29 +21,27 @@ Supports multi-tenant architecture with per-organization data isolation.
 
 import json
 import logging
-import time
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any
 
-from sqlalchemy import create_engine, func, and_, or_, desc
-from sqlalchemy.orm import sessionmaker, Session
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy import and_, create_engine, desc, func
+from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import QueuePool
 from user_agents import parse
 
 from config import config_manager
-from database.models.core import Domain
-import sys
-from pathlib import Path
 
 # Add project root to Python path for database models
 sys.path.insert(0, str(Path(__file__).parent.parent.parent.parent))
 
-from database.models import Base, EmailTracking, TrackingStatistics
+from database.models import EmailTracking
 
 logger = logging.getLogger(__name__)
+
 
 class DatabaseService:
     """
@@ -70,9 +68,9 @@ class DatabaseService:
                 pool_size=self.config.connection_pool_size,
                 max_overflow=self.config.connection_pool_size * 2,
                 pool_pre_ping=True,  # Validate connections before use
-                pool_recycle=3600,   # Recycle connections every hour
+                pool_recycle=3600,  # Recycle connections every hour
                 echo=False,  # Set to True for SQL logging during development
-                echo_pool=False
+                echo_pool=False,
             )
 
             # Create session factory
@@ -81,7 +79,9 @@ class DatabaseService:
             # Note: Tables are now managed by Alembic migrations
             # Use 'python migrate.py upgrade' to create/update tables
 
-            logger.info(f"SQLAlchemy engine created with pool size {self.config.connection_pool_size}")
+            logger.info(
+                f"SQLAlchemy engine created with pool size {self.config.connection_pool_size}"
+            )
         except Exception as e:
             logger.error(f"Failed to create SQLAlchemy engine: {e}")
             raise
@@ -120,14 +120,20 @@ class DatabaseService:
         try:
             with self.get_session() as session:
                 from sqlalchemy import text
+
                 session.execute(text("SELECT 1"))
             return True
         except Exception as e:
             logger.error(f"Database connection test failed: {e}")
             return False
 
-    def log_tracking_event(self, event_type: str, tracking_data: Dict[str, str], 
-                          request_info: Dict[str, Any], additional_data: Dict[str, Any] = None) -> bool:
+    def log_tracking_event(
+        self,
+        event_type: str,
+        tracking_data: dict[str, str],
+        request_info: dict[str, Any],
+        additional_data: dict[str, Any] = None,
+    ) -> bool:
         """
         Log a tracking event to the database using SQLAlchemy ORM with organization hierarchy.
 
@@ -152,13 +158,26 @@ class DatabaseService:
         """
         if self.config.async_logging:
             # Submit to thread pool for async processing
-            self.executor.submit(self._log_tracking_event_sync, event_type, tracking_data, request_info, additional_data)
+            self.executor.submit(
+                self._log_tracking_event_sync,
+                event_type,
+                tracking_data,
+                request_info,
+                additional_data,
+            )
             return True
         else:
-            return self._log_tracking_event_sync(event_type, tracking_data, request_info, additional_data)
+            return self._log_tracking_event_sync(
+                event_type, tracking_data, request_info, additional_data
+            )
 
-    def _log_tracking_event_sync(self, event_type: str, tracking_data: Dict[str, str], 
-                                request_info: Dict[str, Any], additional_data: Dict[str, Any] = None) -> bool:
+    def _log_tracking_event_sync(
+        self,
+        event_type: str,
+        tracking_data: dict[str, str],
+        request_info: dict[str, Any],
+        additional_data: dict[str, Any] = None,
+    ) -> bool:
         """
         Synchronously log a tracking event to the database using SQLAlchemy ORM.
 
@@ -175,56 +194,71 @@ class DatabaseService:
             with self.get_session() as session:
                 # Parse user agent if device tracking is enabled
                 device_info = {}
-                if self.config.track_device_info and request_info.get('user_agent'):
+                if self.config.track_device_info and request_info.get("user_agent"):
                     try:
-                        user_agent = parse(request_info['user_agent'])
+                        user_agent = parse(request_info["user_agent"])
                         device_info = {
-                            'device_type': f"{user_agent.device.family} {user_agent.device.model}".strip() or 'Unknown',
-                            'browser': f"{user_agent.browser.family} {user_agent.browser.version_string}".strip() or 'Unknown',
-                            'operating_system': f"{user_agent.os.family} {user_agent.os.version_string}".strip() or 'Unknown'
+                            "device_type": f"{user_agent.device.family} {user_agent.device.model}".strip()
+                            or "Unknown",
+                            "browser": f"{user_agent.browser.family} {user_agent.browser.version_string}".strip()
+                            or "Unknown",
+                            "operating_system": f"{user_agent.os.family} {user_agent.os.version_string}".strip()
+                            or "Unknown",
                         }
                     except Exception as e:
                         logger.warning(f"Failed to parse user agent: {e}")
                         device_info = {
-                            'device_type': 'Unknown',
-                            'browser': 'Unknown',
-                            'operating_system': 'Unknown'
+                            "device_type": "Unknown",
+                            "browser": "Unknown",
+                            "operating_system": "Unknown",
                         }
 
                 # Create tracking event record using the new organization structure
                 # Note: tenant_id from tracking_data maps to organization_id in the new structure
                 # This maintains backward compatibility with existing tracking URLs
                 tracking_event = EmailTracking(
-                    email_id=tracking_data['email_id'],
-                    recipient=tracking_data['recipient'],
-                    tenant_id=tracking_data['tenant_id'],  # Maps to organization_id internally
-                    domain_id=tracking_data['domain_id'],  # References domains table
+                    email_id=tracking_data["email_id"],
+                    recipient=tracking_data["recipient"],
+                    tenant_id=tracking_data["tenant_id"],  # Maps to organization_id internally
+                    domain_id=tracking_data["domain_id"],  # References domains table
                     event_type=event_type,
-                    timestamp=request_info['timestamp'],
-                    user_agent=request_info.get('user_agent', '') if self.config.track_user_agent else '',
-                    ip_address=request_info.get('ip_address', '') if self.config.track_ip_address else '',
-                    device_type=device_info.get('device_type', '') if self.config.track_device_info else '',
-                    browser=device_info.get('browser', '') if self.config.track_device_info else '',
-                    operating_system=device_info.get('operating_system', '') if self.config.track_device_info else '',
-                    country=request_info.get('country', '') if self.config.track_geolocation else '',
-                    region=request_info.get('region', '') if self.config.track_geolocation else '',
-                    city=request_info.get('city', '') if self.config.track_geolocation else '',
-                    referer=request_info.get('referer', '') if self.config.track_referrer else '',
-                    accept_language=request_info.get('accept_language', ''),
-                    additional_data=json.dumps(additional_data) if additional_data else None
+                    timestamp=request_info["timestamp"],
+                    user_agent=request_info.get("user_agent", "")
+                    if self.config.track_user_agent
+                    else "",
+                    ip_address=request_info.get("ip_address", "")
+                    if self.config.track_ip_address
+                    else "",
+                    device_type=device_info.get("device_type", "")
+                    if self.config.track_device_info
+                    else "",
+                    browser=device_info.get("browser", "") if self.config.track_device_info else "",
+                    operating_system=device_info.get("operating_system", "")
+                    if self.config.track_device_info
+                    else "",
+                    country=request_info.get("country", "")
+                    if self.config.track_geolocation
+                    else "",
+                    region=request_info.get("region", "") if self.config.track_geolocation else "",
+                    city=request_info.get("city", "") if self.config.track_geolocation else "",
+                    referer=request_info.get("referer", "") if self.config.track_referrer else "",
+                    accept_language=request_info.get("accept_language", ""),
+                    additional_data=json.dumps(additional_data) if additional_data else None,
                 )
 
                 session.add(tracking_event)
                 session.commit()
 
-                logger.debug(f"Tracking event logged: {event_type} for email {tracking_data['email_id']}")
+                logger.debug(
+                    f"Tracking event logged: {event_type} for email {tracking_data['email_id']}"
+                )
                 return True
 
         except Exception as e:
             logger.error(f"Failed to log tracking event: {e}")
             return False
 
-    def get_tracking_stats(self, email_id: str) -> Dict[str, Any]:
+    def get_tracking_stats(self, email_id: str) -> dict[str, Any]:
         """
         Get comprehensive tracking statistics for a specific email using SQLAlchemy queries.
 
@@ -237,89 +271,112 @@ class DatabaseService:
         try:
             with self.get_session() as session:
                 # Get event type statistics
-                stats_query = session.query(
-                    EmailTracking.event_type,
-                    func.count(EmailTracking.id).label('total_count'),
-                    func.count(func.distinct(EmailTracking.recipient)).label('unique_count'),
-                    func.count(func.distinct(EmailTracking.ip_address)).label('unique_ips'),
-                    func.min(EmailTracking.timestamp).label('first_event'),
-                    func.max(EmailTracking.timestamp).label('last_event')
-                ).filter(EmailTracking.email_id == email_id).group_by(EmailTracking.event_type)
+                stats_query = (
+                    session.query(
+                        EmailTracking.event_type,
+                        func.count(EmailTracking.id).label("total_count"),
+                        func.count(func.distinct(EmailTracking.recipient)).label("unique_count"),
+                        func.count(func.distinct(EmailTracking.ip_address)).label("unique_ips"),
+                        func.min(EmailTracking.timestamp).label("first_event"),
+                        func.max(EmailTracking.timestamp).label("last_event"),
+                    )
+                    .filter(EmailTracking.email_id == email_id)
+                    .group_by(EmailTracking.event_type)
+                )
 
                 stats = {}
                 for row in stats_query.all():
                     stats[row.event_type] = {
-                        'total': row.total_count,
-                        'unique': row.unique_count,
-                        'unique_ips': row.unique_ips,
-                        'first_event': row.first_event.isoformat() if row.first_event else None,
-                        'last_event': row.last_event.isoformat() if row.last_event else None
+                        "total": row.total_count,
+                        "unique": row.unique_count,
+                        "unique_ips": row.unique_ips,
+                        "first_event": row.first_event.isoformat() if row.first_event else None,
+                        "last_event": row.last_event.isoformat() if row.last_event else None,
                     }
 
                 # Get device and browser breakdown
-                device_query = session.query(
-                    EmailTracking.device_type,
-                    EmailTracking.browser,
-                    EmailTracking.operating_system,
-                    func.count().label('count')
-                ).filter(
-                    and_(EmailTracking.email_id == email_id, EmailTracking.event_type == 'opened')
-                ).group_by(
-                    EmailTracking.device_type, EmailTracking.browser, EmailTracking.operating_system
-                ).order_by(desc('count')).limit(10)
+                device_query = (
+                    session.query(
+                        EmailTracking.device_type,
+                        EmailTracking.browser,
+                        EmailTracking.operating_system,
+                        func.count().label("count"),
+                    )
+                    .filter(
+                        and_(
+                            EmailTracking.email_id == email_id, EmailTracking.event_type == "opened"
+                        )
+                    )
+                    .group_by(
+                        EmailTracking.device_type,
+                        EmailTracking.browser,
+                        EmailTracking.operating_system,
+                    )
+                    .order_by(desc("count"))
+                    .limit(10)
+                )
 
                 device_breakdown = [
                     {
-                        'device_type': row.device_type,
-                        'browser': row.browser,
-                        'operating_system': row.operating_system,
-                        'count': row.count
+                        "device_type": row.device_type,
+                        "browser": row.browser,
+                        "operating_system": row.operating_system,
+                        "count": row.count,
                     }
                     for row in device_query.all()
                 ]
 
                 # Get geographic breakdown
-                geo_query = session.query(
-                    EmailTracking.country,
-                    EmailTracking.region,
-                    EmailTracking.city,
-                    func.count().label('count')
-                ).filter(EmailTracking.email_id == email_id).group_by(
-                    EmailTracking.country, EmailTracking.region, EmailTracking.city
-                ).order_by(desc('count')).limit(20)
+                geo_query = (
+                    session.query(
+                        EmailTracking.country,
+                        EmailTracking.region,
+                        EmailTracking.city,
+                        func.count().label("count"),
+                    )
+                    .filter(EmailTracking.email_id == email_id)
+                    .group_by(EmailTracking.country, EmailTracking.region, EmailTracking.city)
+                    .order_by(desc("count"))
+                    .limit(20)
+                )
 
                 geographic_breakdown = [
                     {
-                        'country': row.country,
-                        'region': row.region,
-                        'city': row.city,
-                        'count': row.count
+                        "country": row.country,
+                        "region": row.region,
+                        "city": row.city,
+                        "count": row.count,
                     }
                     for row in geo_query.all()
                 ]
 
                 # Get recent event timeline
-                timeline_query = session.query(EmailTracking).filter(
-                    EmailTracking.email_id == email_id
-                ).order_by(desc(EmailTracking.timestamp)).limit(100)
+                timeline_query = (
+                    session.query(EmailTracking)
+                    .filter(EmailTracking.email_id == email_id)
+                    .order_by(desc(EmailTracking.timestamp))
+                    .limit(100)
+                )
 
                 timeline = []
                 for event in timeline_query.all():
                     event_dict = event.to_dict()
-                    if event_dict['additional_data']:
+                    if event_dict["additional_data"]:
                         try:
-                            event_dict['additional_data'] = json.loads(event_dict['additional_data'])
+                            event_dict["additional_data"] = json.loads(
+                                event_dict["additional_data"]
+                            )
                         except:
                             pass
                     timeline.append(event_dict)
 
                 return {
-                    'email_id': email_id,
-                    'statistics': stats,
-                    'device_breakdown': device_breakdown,
-                    'geographic_breakdown': geographic_breakdown,
-                    'timeline': timeline,
-                    'generated_at': datetime.utcnow().isoformat() + 'Z'
+                    "email_id": email_id,
+                    "statistics": stats,
+                    "device_breakdown": device_breakdown,
+                    "geographic_breakdown": geographic_breakdown,
+                    "timeline": timeline,
+                    "generated_at": datetime.utcnow().isoformat() + "Z",
                 }
 
         except Exception as e:
@@ -337,12 +394,16 @@ class DatabaseService:
         try:
             with self.get_session() as session:
                 # Calculate cutoff date
-                cutoff_date = datetime.utcnow() - timedelta(days=self.config.tracking_data_retention_days)
+                cutoff_date = datetime.utcnow() - timedelta(
+                    days=self.config.tracking_data_retention_days
+                )
 
                 # Delete old tracking events
-                deleted_count = session.query(EmailTracking).filter(
-                    EmailTracking.timestamp < cutoff_date
-                ).delete(synchronize_session=False)
+                deleted_count = (
+                    session.query(EmailTracking)
+                    .filter(EmailTracking.timestamp < cutoff_date)
+                    .delete(synchronize_session=False)
+                )
 
                 session.commit()
 
@@ -352,7 +413,7 @@ class DatabaseService:
         except Exception as e:
             logger.error(f"Failed to cleanup old data: {e}")
 
-    def get_tenant_stats(self, tenant_id: str, days: int = 30) -> Dict[str, Any]:
+    def get_tenant_stats(self, tenant_id: str, days: int = 30) -> dict[str, Any]:
         """
         Get tracking statistics for a specific tenant.
 
@@ -370,34 +431,40 @@ class DatabaseService:
                 start_date = end_date - timedelta(days=days)
 
                 # Get event statistics by type
-                events_query = session.query(
-                    EmailTracking.event_type,
-                    func.count(EmailTracking.id).label('total'),
-                    func.count(func.distinct(EmailTracking.email_id)).label('unique_emails'),
-                    func.count(func.distinct(EmailTracking.recipient)).label('unique_recipients')
-                ).filter(
-                    and_(
-                        EmailTracking.tenant_id == tenant_id,
-                        EmailTracking.timestamp >= start_date,
-                        EmailTracking.timestamp <= end_date
+                events_query = (
+                    session.query(
+                        EmailTracking.event_type,
+                        func.count(EmailTracking.id).label("total"),
+                        func.count(func.distinct(EmailTracking.email_id)).label("unique_emails"),
+                        func.count(func.distinct(EmailTracking.recipient)).label(
+                            "unique_recipients"
+                        ),
                     )
-                ).group_by(EmailTracking.event_type)
+                    .filter(
+                        and_(
+                            EmailTracking.tenant_id == tenant_id,
+                            EmailTracking.timestamp >= start_date,
+                            EmailTracking.timestamp <= end_date,
+                        )
+                    )
+                    .group_by(EmailTracking.event_type)
+                )
 
                 event_stats = {}
                 for row in events_query.all():
                     event_stats[row.event_type] = {
-                        'total': row.total,
-                        'unique_emails': row.unique_emails,
-                        'unique_recipients': row.unique_recipients
+                        "total": row.total,
+                        "unique_emails": row.unique_emails,
+                        "unique_recipients": row.unique_recipients,
                     }
 
                 return {
-                    'tenant_id': tenant_id,
-                    'period_days': days,
-                    'start_date': start_date.isoformat(),
-                    'end_date': end_date.isoformat(),
-                    'event_statistics': event_stats,
-                    'generated_at': datetime.utcnow().isoformat() + 'Z'
+                    "tenant_id": tenant_id,
+                    "period_days": days,
+                    "start_date": start_date.isoformat(),
+                    "end_date": end_date.isoformat(),
+                    "event_statistics": event_stats,
+                    "generated_at": datetime.utcnow().isoformat() + "Z",
                 }
 
         except Exception as e:

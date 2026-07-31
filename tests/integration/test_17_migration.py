@@ -4,6 +4,7 @@ Integration tests -- Migration service.
 Validates that the migration service is healthy, its API endpoints respond,
 and the migration_jobs table exists in the database.
 """
+
 import pytest
 import requests
 
@@ -15,6 +16,7 @@ TIMEOUT = 10  # seconds for HTTP operations
 # ---------------------------------------------------------------------------
 # Migration service health
 # ---------------------------------------------------------------------------
+
 
 class TestMigrationService:
     """Direct health check against the migration container."""
@@ -35,6 +37,7 @@ class TestMigrationService:
 # API endpoints
 # ---------------------------------------------------------------------------
 
+
 class TestMigrationAPI:
     """Migration endpoints exposed through the main API."""
 
@@ -46,9 +49,7 @@ class TestMigrationAPI:
             headers=api_headers,
             timeout=TIMEOUT,
         )
-        assert resp.status_code in (200, 401, 403), (
-            f"Unexpected status code: {resp.status_code}"
-        )
+        assert resp.status_code in (200, 401, 403), f"Unexpected status code: {resp.status_code}"
 
     @pytest.mark.xfail(reason="migration auth requires request param")
     def test_migration_summary(self, api_headers):
@@ -58,14 +59,13 @@ class TestMigrationAPI:
             headers=api_headers,
             timeout=TIMEOUT,
         )
-        assert resp.status_code in (200, 401, 403), (
-            f"Unexpected status code: {resp.status_code}"
-        )
+        assert resp.status_code in (200, 401, 403), f"Unexpected status code: {resp.status_code}"
 
 
 # ---------------------------------------------------------------------------
 # Database
 # ---------------------------------------------------------------------------
+
 
 class TestMigrationDatabase:
     """Verify the migration_jobs table is accessible."""

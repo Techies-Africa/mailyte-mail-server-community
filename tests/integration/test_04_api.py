@@ -4,11 +4,11 @@ Integration tests for the REST API.
 Verifies authentication, domain CRUD, organization listing, alias listing,
 Swagger docs, and the OpenAPI schema against the live API service.
 """
+
 import pytest
 import requests
 
-from .conftest import API_BASE, API_KEY, ADMIN_TOKEN, TEST_DOMAIN, TEST_ORG
-
+from .conftest import API_BASE, TEST_DOMAIN
 
 # Route prefixes — the app registers routers with /api/v1/{module} prefix
 # and routes define their own sub-paths (e.g. "/" or "/stats/{domain}").
@@ -35,7 +35,6 @@ class TestAPIAuth:
 
 
 class TestDomains:
-
     def test_list_domains(self, api_headers):
         resp = requests.get(DOMAINS, headers=api_headers, timeout=10)
         assert resp.status_code == 200
@@ -62,21 +61,18 @@ class TestDomains:
 
 
 class TestOrganizations:
-
     def test_list_organizations(self, api_headers):
         resp = requests.get(ORGS, headers=api_headers, timeout=10)
         assert resp.status_code == 200
 
 
 class TestAliases:
-
     def test_list_aliases(self, api_headers):
         resp = requests.get(ALIASES, headers=api_headers, timeout=10)
         assert resp.status_code in (200, 404, 500)
 
 
 class TestAPIDocs:
-
     def test_api_swagger_docs(self):
         resp = requests.get(f"{API_BASE}/api-docs", timeout=10)
         assert resp.status_code == 200
@@ -91,7 +87,6 @@ class TestAPIDocs:
 
 
 class TestHealth:
-
     def test_health_endpoint(self):
         resp = requests.get(f"{API_BASE}/health", timeout=10)
         assert resp.status_code == 200
@@ -129,9 +124,7 @@ class TestEmailAccountsCRUD:
             "password": "SecureP@ss123!",
             "domain_id": 1,
         }
-        resp = requests.post(
-            EMAIL_ACCOUNTS, headers=api_headers, json=payload, timeout=10
-        )
+        resp = requests.post(EMAIL_ACCOUNTS, headers=api_headers, json=payload, timeout=10)
         # 200/201 = created, 409 = already exists, 422 = validation, 500 = server error
         assert resp.status_code in (200, 201, 409, 422, 500), (
             f"Unexpected status {resp.status_code}: {resp.text[:300]}"
@@ -168,7 +161,11 @@ class TestEmailAccountsCRUD:
         # Try to extract an account ID from the response
         items = []
         if isinstance(body, dict):
-            items = body.get("data", {}).get("items", []) if isinstance(body.get("data"), dict) else body.get("items", [])
+            items = (
+                body.get("data", {}).get("items", [])
+                if isinstance(body.get("data"), dict)
+                else body.get("items", [])
+            )
         elif isinstance(body, list):
             items = body
         if not items:
@@ -201,7 +198,11 @@ class TestEmailAccountsCRUD:
         body = resp.json()
         items = []
         if isinstance(body, dict):
-            items = body.get("data", {}).get("items", []) if isinstance(body.get("data"), dict) else body.get("items", [])
+            items = (
+                body.get("data", {}).get("items", [])
+                if isinstance(body.get("data"), dict)
+                else body.get("items", [])
+            )
         elif isinstance(body, list):
             items = body
         if not items:
@@ -254,9 +255,7 @@ class TestAPIAnalytics:
         The endpoint should return rates and counts, or an empty data set
         for domains with no outbound mail history.
         """
-        resp = requests.get(
-            ANALYTICS_DELIVERABILITY, headers=api_headers, timeout=10
-        )
+        resp = requests.get(ANALYTICS_DELIVERABILITY, headers=api_headers, timeout=10)
         assert resp.status_code in (200, 401, 403, 404, 405, 422, 500, 503), (
             f"Unexpected status {resp.status_code}: {resp.text[:300]}"
         )

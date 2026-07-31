@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 """
 Mailyte Mail Server Community Edition - Database Models Package
@@ -13,36 +12,56 @@ from sqlalchemy.ext.declarative import declarative_base
 Base = declarative_base()
 
 # Import all models to make them available
-from .core import Organization, Domain, EmailAccount, Alias
-from .mail import MailQueue, MailLog
-from .tracking import EmailTracking, TrackingStatistics
-from .webhooks import WebhookURL, WebhookDeliveryLog
-from .certificates import SSLCertificate, DKIMKey
 from .authentication import APIKey, UserSession
-from .system import SystemConfig, HealthCheck, ServiceMetrics
+from .certificates import DKIMKey, SSLCertificate
+from .core import Alias, Domain, EmailAccount, Organization
 from .enums import (
-    AccountStatus, CertificateStatus, MailStatus, EventType,
-    WebhookDeliveryStatus, AlertLevel, LimitType
+    AccountStatus,
+    AlertLevel,
+    CertificateStatus,
+    EventType,
+    LimitType,
+    MailStatus,
+    WebhookDeliveryStatus,
 )
+from .mail import MailLog, MailQueue
+from .system import HealthCheck, ServiceMetrics, SystemConfig
+from .tracking import EmailTracking, TrackingStatistics
+from .webhooks import WebhookDeliveryLog, WebhookURL
 
 # Export all models
 __all__ = [
-    'Base',
+    "Base",
     # Core models
-    'Organization', 'Domain', 'EmailAccount', 'Alias',
+    "Organization",
+    "Domain",
+    "EmailAccount",
+    "Alias",
     # Mail processing models
-    'MailQueue', 'MailLog',
+    "MailQueue",
+    "MailLog",
     # Tracking models
-    'EmailTracking', 'TrackingStatistics',
+    "EmailTracking",
+    "TrackingStatistics",
     # Webhook models
-    'WebhookURL', 'WebhookDeliveryLog',
+    "WebhookURL",
+    "WebhookDeliveryLog",
     # Certificate models
-    'SSLCertificate', 'DKIMKey',
+    "SSLCertificate",
+    "DKIMKey",
     # Authentication models
-    'APIKey', 'UserSession',
+    "APIKey",
+    "UserSession",
     # System models
-    'SystemConfig', 'HealthCheck', 'ServiceMetrics',
+    "SystemConfig",
+    "HealthCheck",
+    "ServiceMetrics",
     # Enums
-    'AccountStatus', 'CertificateStatus', 'MailStatus', 'EventType',
-    'WebhookDeliveryStatus', 'AlertLevel', 'LimitType',
+    "AccountStatus",
+    "CertificateStatus",
+    "MailStatus",
+    "EventType",
+    "WebhookDeliveryStatus",
+    "AlertLevel",
+    "LimitType",
 ]

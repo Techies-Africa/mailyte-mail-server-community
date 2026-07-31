@@ -19,34 +19,34 @@ Usage:
     python3 sync_rspamd_settings.py --org <id>    # Sync specific org
 """
 
+import argparse
 import json
+import logging
 import os
 import sys
 import time
-import argparse
-import logging
 
-import redis
 import mysql.connector
+import redis
 
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s [rspamd-sync] %(levelname)s %(message)s',
-    stream=sys.stderr
+    format="%(asctime)s [rspamd-sync] %(levelname)s %(message)s",
+    stream=sys.stderr,
 )
-logger = logging.getLogger('rspamd-sync')
+logger = logging.getLogger("rspamd-sync")
 
 # Configuration
-REDIS_HOST = os.getenv('REDIS_HOST', 'redis')
-REDIS_PORT = int(os.getenv('REDIS_PORT', 6379))
+REDIS_HOST = os.getenv("REDIS_HOST", "redis")
+REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
 
-DB_HOST = os.getenv('DB_HOST', 'mysql')
-DB_PORT = int(os.getenv('DB_PORT', 3306))
-DB_NAME = os.getenv('DB_NAME', 'mailserver')
-DB_USER = os.getenv('DB_USER', 'mailuser')
-DB_PASSWORD = os.getenv('DB_PASSWORD', 'mailpassword')
+DB_HOST = os.getenv("DB_HOST", "mysql")
+DB_PORT = int(os.getenv("DB_PORT", 3306))
+DB_NAME = os.getenv("DB_NAME", "mailserver")
+DB_USER = os.getenv("DB_USER", "mailuser")
+DB_PASSWORD = os.getenv("DB_PASSWORD", "mailpassword")
 
-SYNC_INTERVAL = int(os.getenv('RSPAMD_SYNC_INTERVAL', 60))
+SYNC_INTERVAL = int(os.getenv("RSPAMD_SYNC_INTERVAL", 60))
 
 # Default thresholds (used when org has no custom settings)
 DEFAULT_SPAM_THRESHOLD = 6
@@ -61,8 +61,7 @@ def get_redis():
 
 def get_db():
     return mysql.connector.connect(
-        host=DB_HOST, port=DB_PORT, database=DB_NAME,
-        user=DB_USER, password=DB_PASSWORD
+        host=DB_HOST, port=DB_PORT, database=DB_NAME, user=DB_USER, password=DB_PASSWORD
     )
 
 
@@ -87,23 +86,27 @@ def sync_all_orgs(r, conn):
     active_keys = set()
 
     for org in orgs:
-        org_id = org['org_id']
-        domains = org['domains'].split(',') if org['domains'] else []
+        org_id = org["org_id"]
+        domains = org["domains"].split(",") if org["domains"] else []
         org_settings = {}
 
-        if org['org_settings']:
+        if org["org_settings"]:
             try:
-                org_settings = json.loads(org['org_settings']) if isinstance(org['org_settings'], str) else org['org_settings']
+                org_settings = (
+                    json.loads(org["org_settings"])
+                    if isinstance(org["org_settings"], str)
+                    else org["org_settings"]
+                )
             except (json.JSONDecodeError, TypeError):
                 org_settings = {}
 
         # Extract spam policy settings
-        spam_settings = org_settings.get('spam_policy', {})
-        spam_threshold = spam_settings.get('spam_threshold', DEFAULT_SPAM_THRESHOLD)
-        reject_threshold = spam_settings.get('reject_threshold', DEFAULT_REJECT_THRESHOLD)
-        greylist_threshold = spam_settings.get('greylist_threshold', DEFAULT_GREYLIST_THRESHOLD)
-        rewrite_threshold = spam_settings.get('rewrite_threshold', DEFAULT_REWRITE_THRESHOLD)
-        quarantine_enabled = spam_settings.get('quarantine_enabled', False)
+        spam_settings = org_settings.get("spam_policy", {})
+        spam_threshold = spam_settings.get("spam_threshold", DEFAULT_SPAM_THRESHOLD)
+        reject_threshold = spam_settings.get("reject_threshold", DEFAULT_REJECT_THRESHOLD)
+        greylist_threshold = spam_settings.get("greylist_threshold", DEFAULT_GREYLIST_THRESHOLD)
+        rewrite_threshold = spam_settings.get("rewrite_threshold", DEFAULT_REWRITE_THRESHOLD)
+        quarantine_enabled = spam_settings.get("quarantine_enabled", False)
 
         # Build Rspamd settings object for this org
         for domain in domains:
@@ -120,7 +123,7 @@ def sync_all_orgs(r, conn):
                         "greylist": greylist_threshold,
                         "rewrite subject": rewrite_threshold,
                     }
-                }
+                },
             }
 
             # If quarantine is enabled, rewrite subject instead of just adding header
@@ -134,9 +137,9 @@ def sync_all_orgs(r, conn):
             synced += 1
 
         # Sync sender whitelists/blacklists to Redis multimap keys
-        sender_whitelist = spam_settings.get('sender_whitelist', [])
-        sender_blacklist = spam_settings.get('sender_blacklist', [])
-        domain_whitelist = spam_settings.get('domain_whitelist', [])
+        sender_whitelist = spam_settings.get("sender_whitelist", [])
+        sender_blacklist = spam_settings.get("sender_blacklist", [])
+        domain_whitelist = spam_settings.get("domain_whitelist", [])
 
         for domain in domains:
             # Sender whitelist
@@ -173,14 +176,17 @@ def sync_all_orgs(r, conn):
 def sync_single_org(r, conn, org_id):
     """Sync settings for a single organization."""
     cursor = conn.cursor(dictionary=True)
-    cursor.execute("""
+    cursor.execute(
+        """
         SELECT o.id AS org_id, o.name AS org_name, o.settings AS org_settings,
                GROUP_CONCAT(d.domain) AS domains
         FROM organizations o
         JOIN domains d ON d.organization_id = o.id AND d.active = 1
         WHERE o.id = %s AND o.status = 'active'
         GROUP BY o.id
-    """, (org_id,))
+    """,
+        (org_id,),
+    )
 
     org = cursor.fetchone()
     cursor.close()
@@ -194,13 +200,19 @@ def sync_single_org(r, conn, org_id):
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Sync organization spam policies to Rspamd via Redis')
-    parser.add_argument('--watch', action='store_true', help='Continuously sync every N seconds')
-    parser.add_argument('--org', type=str, help='Sync specific organization by ID')
-    parser.add_argument('--interval', type=int, default=SYNC_INTERVAL, help='Sync interval in seconds (default: 60)')
+    parser = argparse.ArgumentParser(
+        description="Sync organization spam policies to Rspamd via Redis"
+    )
+    parser.add_argument("--watch", action="store_true", help="Continuously sync every N seconds")
+    parser.add_argument("--org", type=str, help="Sync specific organization by ID")
+    parser.add_argument(
+        "--interval", type=int, default=SYNC_INTERVAL, help="Sync interval in seconds (default: 60)"
+    )
     args = parser.parse_args()
 
-    logger.info(f"Connecting to Redis {REDIS_HOST}:{REDIS_PORT} and MySQL {DB_HOST}:{DB_PORT}/{DB_NAME}")
+    logger.info(
+        f"Connecting to Redis {REDIS_HOST}:{REDIS_PORT} and MySQL {DB_HOST}:{DB_PORT}/{DB_NAME}"
+    )
 
     if args.watch:
         logger.info(f"Starting continuous sync every {args.interval}s")
@@ -225,5 +237,5 @@ def main():
         logger.info(f"Synced {count} organization settings to Rspamd")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

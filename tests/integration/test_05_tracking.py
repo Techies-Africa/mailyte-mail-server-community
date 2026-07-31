@@ -5,24 +5,23 @@ These tests verify the tracking pixel endpoints, click tracking,
 webhook delivery health, and rate limiter functionality against
 the live Docker services.
 """
+
 import pytest
 import requests
 
 from .conftest import (
+    API_BASE,
+    RATE_LIMITER_BASE,
     TRACKING_BASE,
     WEBHOOKS_BASE,
-    RATE_LIMITER_BASE,
-    API_BASE,
-    API_KEY,
 )
-
 
 # ---------------------------------------------------------------------------
 # Tracking service
 # ---------------------------------------------------------------------------
 
-class TestTrackingService:
 
+class TestTrackingService:
     def test_tracking_health(self):
         """Tracking service health endpoint returns healthy."""
         resp = requests.get(f"{TRACKING_BASE}/health", timeout=10)
@@ -64,8 +63,8 @@ class TestTrackingService:
 # Webhooks service
 # ---------------------------------------------------------------------------
 
-class TestWebhooksService:
 
+class TestWebhooksService:
     def test_webhooks_health(self):
         """Webhooks service health endpoint returns 200."""
         resp = requests.get(f"{WEBHOOKS_BASE}/health", timeout=10)
@@ -82,8 +81,8 @@ class TestWebhooksService:
 # Rate limiter service
 # ---------------------------------------------------------------------------
 
-class TestRateLimiterService:
 
+class TestRateLimiterService:
     def test_rate_limiter_health(self):
         """Rate limiter health endpoint returns 200."""
         resp = requests.get(f"{RATE_LIMITER_BASE}/health", timeout=10)
@@ -115,8 +114,8 @@ class TestRateLimiterService:
 # Tracking injection
 # ---------------------------------------------------------------------------
 
-class TestTrackingInjection:
 
+class TestTrackingInjection:
     def test_tracking_inject_endpoint(self):
         """The inject endpoint adds tracking pixels and rewrites links in HTML content.
         This is the core tracking feature."""
@@ -131,11 +130,13 @@ class TestTrackingInjection:
             timeout=10,
         )
         # The endpoint should return modified HTML or at least not crash.
-        assert resp.status_code < 500, (
-            f"Inject endpoint returned server error: {resp.status_code}"
-        )
+        assert resp.status_code < 500, f"Inject endpoint returned server error: {resp.status_code}"
         if resp.status_code == 200:
-            data = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
+            data = (
+                resp.json()
+                if resp.headers.get("content-type", "").startswith("application/json")
+                else {}
+            )
             # If the response contains HTML, verify it was modified
             if "html" in data:
                 assert len(data["html"]) > 0, "Returned HTML is empty"
@@ -157,8 +158,8 @@ class TestTrackingInjection:
 # Tracking suppression
 # ---------------------------------------------------------------------------
 
-class TestTrackingSuppression:
 
+class TestTrackingSuppression:
     def test_suppression_list_check(self, api_headers):
         """Checking suppression status for an email that isn't suppressed
         should return not-suppressed."""
@@ -200,8 +201,8 @@ class TestTrackingSuppression:
 # Tracking database tables
 # ---------------------------------------------------------------------------
 
-class TestTrackingDatabase:
 
+class TestTrackingDatabase:
     def test_email_tracking_table(self, db_connection):
         """The email_tracking table stores all open/click events.
         Must exist and be queryable."""

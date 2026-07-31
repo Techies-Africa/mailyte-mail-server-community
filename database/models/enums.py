@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 """
 Database Enums - Type safety enums for all models
@@ -6,16 +5,19 @@ Database Enums - Type safety enums for all models
 
 from enum import Enum
 
+
 class AccountStatus(Enum):
     ACTIVE = "active"
     INACTIVE = "inactive"
     SUSPENDED = "suspended"
+
 
 class CertificateStatus(Enum):
     ACTIVE = "active"
     EXPIRED = "expired"
     REVOKED = "revoked"
     PENDING = "pending"
+
 
 class MailStatus(Enum):
     QUEUED = "queued"
@@ -26,6 +28,7 @@ class MailStatus(Enum):
     REJECTED = "rejected"
     DEFERRED = "deferred"
 
+
 class EventType(Enum):
     DELIVERED = "delivered"
     OPENED = "opened"
@@ -34,6 +37,7 @@ class EventType(Enum):
     COMPLAINED = "complained"
     UNSUBSCRIBED = "unsubscribed"
 
+
 class WebhookDeliveryStatus(Enum):
     PENDING = "pending"
     DELIVERED = "delivered"
@@ -41,10 +45,12 @@ class WebhookDeliveryStatus(Enum):
     RETRYING = "retrying"
     ABANDONED = "abandoned"
 
+
 class AlertLevel(Enum):
     WARNING = "warning"
     CRITICAL = "critical"
     EXCEEDED = "exceeded"
+
 
 class LimitType(Enum):
     RATE_LIMIT = "rate_limit"

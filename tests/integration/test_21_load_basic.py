@@ -5,8 +5,9 @@ Lightweight concurrency tests that verify the server can handle a small
 number of simultaneous connections without errors.  These are NOT full
 load/stress tests — they exercise the happy path under mild parallelism.
 """
-import smtplib
+
 import imaplib
+import smtplib
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -16,17 +17,17 @@ import requests
 from .conftest import (
     API_BASE,
     API_KEY,
-    SMTP_HOST,
-    SMTP_PORT,
+    DB_HOST,
+    DB_NAME,
+    DB_PASS,
+    DB_PORT,
+    DB_USER,
     IMAP_HOST,
     IMAP_PORT,
-    TEST_USER,
+    SMTP_HOST,
+    SMTP_PORT,
     TEST_PASS,
-    DB_HOST,
-    DB_PORT,
-    DB_NAME,
-    DB_USER,
-    DB_PASS,
+    TEST_USER,
 )
 
 TIMEOUT = 15  # seconds for individual operations
@@ -35,6 +36,7 @@ TIMEOUT = 15  # seconds for individual operations
 # ---------------------------------------------------------------------------
 # SMTP concurrency
 # ---------------------------------------------------------------------------
+
 
 class TestSMTPConcurrency:
     """Verify SMTP can handle several connections at the same time."""
@@ -61,17 +63,10 @@ class TestSMTPConcurrency:
             t.join(timeout=TIMEOUT + 5)
 
         if not results and errors:
-            pytest.skip(
-                f"Could not connect to SMTP at {SMTP_HOST}:{SMTP_PORT}: "
-                f"{errors[0]}"
-            )
+            pytest.skip(f"Could not connect to SMTP at {SMTP_HOST}:{SMTP_PORT}: {errors[0]}")
 
-        assert len(errors) == 0, (
-            f"{len(errors)}/5 SMTP connections failed: {errors}"
-        )
-        assert all(code == 250 for code in results), (
-            f"Not all EHLO responses were 250: {results}"
-        )
+        assert len(errors) == 0, f"{len(errors)}/5 SMTP connections failed: {errors}"
+        assert all(code == 250 for code in results), f"Not all EHLO responses were 250: {results}"
 
     def test_rapid_ehlo_commands(self):
         """Sending 10 EHLO commands in quick succession tests connection
@@ -90,14 +85,13 @@ class TestSMTPConcurrency:
         except smtplib.SMTPServerDisconnected:
             pytest.fail("Server disconnected during rapid EHLO sequence")
 
-        assert all(c == 250 for c in codes), (
-            f"Expected all 250 responses, got: {codes}"
-        )
+        assert all(c == 250 for c in codes), f"Expected all 250 responses, got: {codes}"
 
 
 # ---------------------------------------------------------------------------
 # IMAP concurrency
 # ---------------------------------------------------------------------------
+
 
 class TestIMAPConcurrency:
     """Verify IMAP handles several simultaneous authenticated sessions."""
@@ -125,17 +119,10 @@ class TestIMAPConcurrency:
             t.join(timeout=TIMEOUT + 5)
 
         if not results and errors:
-            pytest.skip(
-                f"Could not connect to IMAP at {IMAP_HOST}:{IMAP_PORT}: "
-                f"{errors[0]}"
-            )
+            pytest.skip(f"Could not connect to IMAP at {IMAP_HOST}:{IMAP_PORT}: {errors[0]}")
 
-        assert len(errors) == 0, (
-            f"{len(errors)}/3 IMAP logins failed: {errors}"
-        )
-        assert len(results) == 3, (
-            f"Expected 3 successful logins, got {len(results)}"
-        )
+        assert len(errors) == 0, f"{len(errors)}/3 IMAP logins failed: {errors}"
+        assert len(results) == 3, f"Expected 3 successful logins, got {len(results)}"
 
     def test_imap_rapid_folder_operations(self):
         """Rapid LIST/SELECT operations test Dovecot's index
@@ -165,16 +152,16 @@ class TestIMAPConcurrency:
 # API concurrency
 # ---------------------------------------------------------------------------
 
+
 class TestAPIConcurrency:
     """Verify the REST API handles parallel requests."""
 
     def test_api_parallel_requests(self):
         """API must handle 10 concurrent requests without errors. Load
         balancers send parallel traffic."""
+
         def _health_check(_):
-            return requests.get(
-                f"{API_BASE}/health", timeout=TIMEOUT
-            )
+            return requests.get(f"{API_BASE}/health", timeout=TIMEOUT)
 
         try:
             requests.get(f"{API_BASE}/health", timeout=TIMEOUT)
@@ -217,14 +204,13 @@ class TestAPIConcurrency:
             status_codes.append(resp.status_code)
 
         success = sum(1 for code in status_codes if code in (200, 422))
-        assert success >= 8, (
-            f"Too many failures in 10 rapid auth checks: {status_codes}"
-        )
+        assert success >= 8, f"Too many failures in 10 rapid auth checks: {status_codes}"
 
 
 # ---------------------------------------------------------------------------
 # Database concurrency
 # ---------------------------------------------------------------------------
+
 
 class TestDatabaseConcurrency:
     """Verify the database connection pool handles parallel queries."""
@@ -267,9 +253,7 @@ class TestDatabaseConcurrency:
         if not results and errors:
             pytest.skip(f"Cannot connect to MySQL: {errors[0]}")
 
-        assert len(errors) == 0, (
-            f"{len(errors)}/5 DB queries failed: {errors}"
-        )
+        assert len(errors) == 0, f"{len(errors)}/5 DB queries failed: {errors}"
         assert all(row == (1,) for row in results), (
             f"Not all SELECT 1 queries returned (1,): {results}"
         )

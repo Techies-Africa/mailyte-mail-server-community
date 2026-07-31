@@ -4,29 +4,24 @@ Integration tests for security controls.
 Verifies authentication enforcement, TLS requirements,
 brute-force protection, input sanitisation, and credential storage.
 """
+
+import imaplib
 import os
 import socket
 import ssl
 import time
 
 import pytest
-import imaplib
 import requests
 
 from .conftest import (
-    SMTP_HOST,
-    SMTP_PORT,
-    SMTP_PORT_25,
+    API_BASE,
     IMAP_HOST,
     IMAP_PORT,
-    TEST_USER,
+    SMTP_HOST,
+    SMTP_PORT,
     TEST_PASS,
-    API_BASE,
-    DB_HOST,
-    DB_PORT,
-    DB_NAME,
-    DB_USER,
-    DB_PASS,
+    TEST_USER,
 )
 
 TIMEOUT = 10
@@ -55,8 +50,8 @@ def _smtp_command(sock, command):
 # SMTP auth enforcement
 # ---------------------------------------------------------------------------
 
-class TestSMTPAuthEnforcement:
 
+class TestSMTPAuthEnforcement:
     def test_tls_enforced_on_submission(self):
         """AUTH before STARTTLS on port 587 must be rejected."""
         sock, banner = _connect_smtp_raw(SMTP_HOST, SMTP_PORT)
@@ -65,14 +60,11 @@ class TestSMTPAuthEnforcement:
             assert "250" in resp
 
             import base64
-            auth_string = base64.b64encode(
-                f"\0{TEST_USER}\0{TEST_PASS}".encode()
-            ).decode()
+
+            auth_string = base64.b64encode(f"\0{TEST_USER}\0{TEST_PASS}".encode()).decode()
             resp = _smtp_command(sock, f"AUTH PLAIN {auth_string}")
             first_code = resp.strip().split()[0] if resp.strip() else ""
-            assert first_code.startswith("5"), (
-                f"Expected 5xx when AUTH before TLS, got: {resp!r}"
-            )
+            assert first_code.startswith("5"), f"Expected 5xx when AUTH before TLS, got: {resp!r}"
         finally:
             sock.close()
 
@@ -96,8 +88,8 @@ class TestSMTPAuthEnforcement:
 # IMAP brute-force protection
 # ---------------------------------------------------------------------------
 
-class TestBruteForceProtection:
 
+class TestBruteForceProtection:
     def test_imap_failed_logins(self):
         """Multiple failed IMAP logins should all be rejected (not crash)."""
         for i in range(3):
@@ -124,8 +116,8 @@ class TestBruteForceProtection:
 # API security
 # ---------------------------------------------------------------------------
 
-class TestAPISecurity:
 
+class TestAPISecurity:
     def test_api_sql_injection_rejected(self):
         """SQL injection payload must not cause a 500."""
         payload = "' OR 1=1; DROP TABLE users; --"
@@ -155,8 +147,8 @@ class TestAPISecurity:
 # Credential storage
 # ---------------------------------------------------------------------------
 
-class TestCredentialStorage:
 
+class TestCredentialStorage:
     def test_passwords_stored_as_bcrypt(self, db_connection):
         """Passwords in email_accounts must be bcrypt hashed ($2b$ prefix)."""
         cursor = db_connection.cursor()
@@ -166,17 +158,15 @@ class TestCredentialStorage:
 
         assert len(rows) > 0, "No email_accounts found"
         for (password_hash,) in rows:
-            assert password_hash.startswith("$2b$"), (
-                f"Password not bcrypt: {password_hash[:10]}..."
-            )
+            assert password_hash.startswith("$2b$"), f"Password not bcrypt: {password_hash[:10]}..."
 
 
 # ---------------------------------------------------------------------------
 # Git hygiene
 # ---------------------------------------------------------------------------
 
-class TestGitHygiene:
 
+class TestGitHygiene:
     def test_ssl_certs_not_in_gitignore(self):
         """.gitignore must exclude SSL certificate directories."""
         if not os.path.isfile(GITIGNORE_PATH):

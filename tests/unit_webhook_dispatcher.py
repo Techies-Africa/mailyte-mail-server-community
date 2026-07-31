@@ -9,21 +9,22 @@ Tests the new features added in the latest revision:
 - Events class constants (tracking.* names, no email.opened/clicked aliases)
 - dispatch_event / dispatch_event_sync signatures
 """
-import json
-import hmac
+
 import hashlib
-import time
-import threading
-from unittest.mock import patch, MagicMock, call
-import sys
+import hmac
 import os
+import sys
+import time
+from unittest.mock import MagicMock, patch
 
 # Make shared/ importable from the repo root
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import importlib
+
 # Reload to clear cached env-based module state
 import shared.webhook_dispatcher as wd
+
 importlib.reload(wd)
 
 
@@ -47,13 +48,23 @@ def _reset_secret():
 # Envelope structure
 # ---------------------------------------------------------------------------
 
-class TestBuildEnvelope:
 
+class TestBuildEnvelope:
     def test_required_top_level_fields(self):
         env = wd._build_envelope("email.delivered", {"msg": "1"})
-        for field in ("id", "event", "timestamp", "source", "org_id",
-                      "domain", "tags", "user_variables", "data",
-                      "metadata", "signature"):
+        for field in (
+            "id",
+            "event",
+            "timestamp",
+            "source",
+            "org_id",
+            "domain",
+            "tags",
+            "user_variables",
+            "data",
+            "metadata",
+            "signature",
+        ):
             assert field in env, f"Missing field: {field}"
 
     def test_event_name_preserved(self):
@@ -62,6 +73,7 @@ class TestBuildEnvelope:
 
     def test_id_is_uuid4(self):
         import re
+
         env = wd._build_envelope("email.inbound", {})
         uuid_pattern = re.compile(
             r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
@@ -103,8 +115,8 @@ class TestBuildEnvelope:
 # Signature block
 # ---------------------------------------------------------------------------
 
-class TestSignatureBlock:
 
+class TestSignatureBlock:
     def setup_method(self):
         _set_secret(SECRET)
 
@@ -156,8 +168,8 @@ class TestSignatureBlock:
 # Full-body HMAC signing
 # ---------------------------------------------------------------------------
 
-class TestSignPayload:
 
+class TestSignPayload:
     def setup_method(self):
         _set_secret(SECRET)
 
@@ -187,8 +199,8 @@ class TestSignPayload:
 # Delivery — _deliver return values and 406 handling
 # ---------------------------------------------------------------------------
 
-class TestDeliver:
 
+class TestDeliver:
     def _make_response(self, status_code, text="OK"):
         r = MagicMock()
         r.status_code = status_code
@@ -229,6 +241,7 @@ class TestDeliver:
 
     def test_timeout_returns_false(self):
         import requests as req
+
         env = wd._build_envelope("email.delivered", {})
         with patch("requests.post", side_effect=req.Timeout()):
             with patch.object(wd, "_log_delivery"):
@@ -281,8 +294,8 @@ class TestDeliver:
 # Retry schedule
 # ---------------------------------------------------------------------------
 
-class TestRetrySchedule:
 
+class TestRetrySchedule:
     def test_schedule_has_7_entries(self):
         assert len(wd._RETRY_SCHEDULE) == 7
 
@@ -293,9 +306,11 @@ class TestRetrySchedule:
         # The env default — actual module value depends on env, but default string is 7
         # We reload with controlled env to verify
         import importlib
+
         orig = os.environ.get("WEBHOOK_MAX_RETRIES")
         os.environ.pop("WEBHOOK_MAX_RETRIES", None)
         import shared.webhook_dispatcher as fresh
+
         importlib.reload(fresh)
         assert fresh.WEBHOOK_MAX_RETRIES == 7
         if orig is not None:
@@ -375,8 +390,8 @@ class TestRetrySchedule:
 # Events class — our naming convention, no email.opened/clicked aliases
 # ---------------------------------------------------------------------------
 
-class TestEventsClass:
 
+class TestEventsClass:
     def test_tracking_open_exists(self):
         assert wd.Events.TRACKING_OPEN == "tracking.open"
 
@@ -416,6 +431,7 @@ class TestEventsClass:
 
     def test_all_event_values_are_dotted_strings(self):
         import inspect
+
         for name, value in inspect.getmembers(wd.Events):
             if name.startswith("_") or callable(value):
                 continue
@@ -427,8 +443,8 @@ class TestEventsClass:
 # dispatch_event public API
 # ---------------------------------------------------------------------------
 
-class TestDispatchEvent:
 
+class TestDispatchEvent:
     def setup_method(self):
         wd.WEBHOOK_URL = "http://example.com/hook"
 

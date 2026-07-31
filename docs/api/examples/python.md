@@ -15,14 +15,12 @@ Create a reusable client:
 ```python
 import requests
 
+
 class MailyteClient:
     def __init__(self, base_url, api_key):
         self.base_url = base_url.rstrip("/")
         self.session = requests.Session()
-        self.session.headers.update({
-            "X-API-Key": api_key,
-            "Content-Type": "application/json"
-        })
+        self.session.headers.update({"X-API-Key": api_key, "Content-Type": "application/json"})
 
     def _url(self, path):
         return f"{self.base_url}/api/v1{path}"
@@ -36,7 +34,9 @@ class MailyteClient:
 
     # Organizations
     def list_organizations(self, page=1, per_page=50):
-        resp = self.session.get(self._url("/organizations"), params={"page": page, "per_page": per_page})
+        resp = self.session.get(
+            self._url("/organizations"), params={"page": page, "per_page": per_page}
+        )
         return self._check(resp)
 
     def get_organization(self, org_id):
@@ -121,40 +121,36 @@ class MailyteClient:
 ### Initialize the Client
 
 ```python
-client = MailyteClient(
-    base_url="http://your-server:5000",
-    api_key="mk_live_your_api_key_here"
-)
+client = MailyteClient(base_url="http://your-server:5000", api_key="mk_live_your_api_key_here")
 ```
 
 ### Create an Organization
 
 ```python
-org = client.create_organization({
-    "id": "acme",
-    "name": "Acme Corp",
-    "admin_email": "admin@acme.com",
-    "rate_limits": {
-        "inbound_hourly": 5000,
-        "outbound_hourly": 2000
-    },
-    "storage_quotas": {
-        "storage_quota_mb": 51200
+org = client.create_organization(
+    {
+        "id": "acme",
+        "name": "Acme Corp",
+        "admin_email": "admin@acme.com",
+        "rate_limits": {"inbound_hourly": 5000, "outbound_hourly": 2000},
+        "storage_quotas": {"storage_quota_mb": 51200},
     }
-})
+)
 print(f"Created org: {org['data']['id']}")
 ```
 
 ### Add a Domain
 
 ```python
-domain = client.create_domain({
-    "domain": "acme.com",
-    "organization_id": "acme",
-    "max_quota": 10737418240,
-    "max_users": 500,
-    "dkim_enabled": True
-})
+domain = client.create_domain(
+    {
+        "domain": "acme.com",
+        "organization_id": "acme",
+        "max_quota": 10737418240,
+        "max_users": 500,
+        "dkim_enabled": True,
+    }
+)
 print(f"Created domain: {domain['data']['domain']} (ID: {domain['data']['id']})")
 ```
 
@@ -195,11 +191,13 @@ while True:
 ### Set Up a Webhook
 
 ```python
-webhook = client.create_webhook({
-    "url": "https://hooks.acme.com/mailyte",
-    "description": "Production events",
-    "event_types": ["email.sent", "email.delivered", "email.bounced"]
-})
+webhook = client.create_webhook(
+    {
+        "url": "https://hooks.acme.com/mailyte",
+        "description": "Production events",
+        "event_types": ["email.sent", "email.delivered", "email.bounced"],
+    }
+)
 
 # Save this secret securely
 secret = webhook["data"]["secret"]
@@ -214,9 +212,7 @@ print("Test event sent.")
 
 ```python
 results = client.search_emails(
-    query="contract renewal documents from January",
-    organization_id="acme",
-    limit=5
+    query="contract renewal documents from January", organization_id="acme", limit=5
 )
 
 for result in results.get("results", []):
@@ -236,10 +232,7 @@ print(f"Status: {health['status']}, DB: {health['database']}")
 import requests
 
 try:
-    result = client.create_organization({
-        "id": "acme",
-        "name": "Acme Corp"
-    })
+    result = client.create_organization({"id": "acme", "name": "Acme Corp"})
 except requests.exceptions.HTTPError as e:
     body = e.response.json()
     if e.response.status_code == 409:
@@ -264,40 +257,32 @@ from mailyte_client import MailyteClient  # Save the class above as mailyte_clie
 client = MailyteClient("http://your-server:5000", "mk_live_your_api_key_here")
 
 # 1. Create organization
-client.create_organization({
-    "id": "acme",
-    "name": "Acme Corp",
-    "admin_email": "admin@acme.com"
-})
+client.create_organization({"id": "acme", "name": "Acme Corp", "admin_email": "admin@acme.com"})
 print("Organization created.")
 
 # 2. Add domain
-domain = client.create_domain({
-    "domain": "acme.com",
-    "organization_id": "acme"
-})
+domain = client.create_domain({"domain": "acme.com", "organization_id": "acme"})
 print(f"Domain created (ID: {domain['data']['id']}).")
 
 # 3. Create accounts
 for name in ["john", "jane", "admin"]:
-    client.create_email_account({
-        "email": f"{name}@acme.com",
-        "password": "SecurePass123",
-        "name": name.capitalize()
-    })
+    client.create_email_account(
+        {"email": f"{name}@acme.com", "password": "SecurePass123", "name": name.capitalize()}
+    )
     print(f"Account {name}@acme.com created.")
 
 # 4. Create aliases
 import requests
+
 resp = requests.post(
     "http://your-server:5000/api/v1/add/alias/bulk",
     headers={"X-API-Key": "mk_live_your_api_key_here", "Content-Type": "application/json"},
     json={
         "aliases": [
             {"address": "info@acme.com", "goto": "admin@acme.com"},
-            {"address": "support@acme.com", "goto": "jane@acme.com"}
+            {"address": "support@acme.com", "goto": "jane@acme.com"},
         ]
-    }
+    },
 )
 print(f"Aliases created: {resp.json()['data']['summary']}")
 

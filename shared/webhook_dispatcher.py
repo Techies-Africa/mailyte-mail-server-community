@@ -62,18 +62,18 @@ Webhook Verification:
      Use timestamp to reject replays older than 15 minutes.
 """
 
-import os
-import json
-import time
-import hmac
 import hashlib
+import hmac
+import json
 import logging
+import os
 import secrets
 import threading
+import time
 import uuid
-from queue import Queue, Empty
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from datetime import UTC, datetime
+from queue import Empty, Queue
+from typing import Any
 
 logger = logging.getLogger("webhook_dispatcher")
 
@@ -90,7 +90,7 @@ WEBHOOK_QUEUE_SIZE = int(os.getenv("WEBHOOK_QUEUE_SIZE", "10000"))
 
 # Retry delay schedule in seconds (Mailgun-inspired: 7 retries over ~8 hours).
 # Index i = delay before attempt i+2 (i.e. before the first retry, second retry, ...).
-_RETRY_SCHEDULE: List[int] = [600, 600, 900, 1800, 3600, 7200, 14400]
+_RETRY_SCHEDULE: list[int] = [600, 600, 900, 1800, 3600, 7200, 14400]
 
 # Redis for cross-container pub/sub (optional — falls back to in-process queue)
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
@@ -111,6 +111,7 @@ SERVICE_NAME = os.getenv("SERVICE_NAME", "unknown")
 # ---------------------------------------------------------------------------
 # HMAC Signatures
 # ---------------------------------------------------------------------------
+
 
 def _sign_payload(payload_bytes: bytes) -> str:
     """
@@ -149,15 +150,16 @@ def _build_signature_block(ts: int, token: str) -> dict:
 # Event Envelope
 # ---------------------------------------------------------------------------
 
+
 def _build_envelope(
     event_type: str,
-    data: Dict[str, Any],
-    org_id: Optional[int] = None,
-    domain: Optional[str] = None,
-    source_service: Optional[str] = None,
-    metadata: Optional[Dict[str, Any]] = None,
-    tags: Optional[List[str]] = None,
-    user_variables: Optional[Dict[str, Any]] = None,
+    data: dict[str, Any],
+    org_id: int | None = None,
+    domain: str | None = None,
+    source_service: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    tags: list[str] | None = None,
+    user_variables: dict[str, Any] | None = None,
 ) -> dict:
     """
     Build a standardized webhook event envelope.
@@ -166,7 +168,7 @@ def _build_envelope(
     ``signature`` block for replay-attack prevention, and optional ``tags``
     and ``user_variables`` that pass through to the receiving endpoint unchanged.
     """
-    now_utc = datetime.now(timezone.utc)
+    now_utc = datetime.now(UTC)
     ts_int = int(now_utc.timestamp())
     token = secrets.token_hex(32)
     return {
@@ -188,7 +190,8 @@ def _build_envelope(
 # Delivery
 # ---------------------------------------------------------------------------
 
-def _deliver(envelope: dict, attempt: int = 1) -> Optional[bool]:
+
+def _deliver(envelope: dict, attempt: int = 1) -> bool | None:
     """
     Deliver a webhook event to the global URL.
 
@@ -232,16 +235,26 @@ def _deliver(envelope: dict, attempt: int = 1) -> Optional[bool]:
                 f"Webhook endpoint returned 406 No-Retry for {envelope.get('event')} "
                 f"(attempt {attempt}) — delivery permanently stopped"
             )
-            _log_delivery(envelope, resp.status_code, attempt, success=False,
-                          error="HTTP 406: Endpoint requested permanent no-retry")
+            _log_delivery(
+                envelope,
+                resp.status_code,
+                attempt,
+                success=False,
+                error="HTTP 406: Endpoint requested permanent no-retry",
+            )
             return None
 
         logger.warning(
             f"Webhook delivery failed: HTTP {resp.status_code} for "
             f"{envelope.get('event')} (attempt {attempt}/{WEBHOOK_MAX_RETRIES})"
         )
-        _log_delivery(envelope, resp.status_code, attempt, success=False,
-                      error=f"HTTP {resp.status_code}: {resp.text[:500]}")
+        _log_delivery(
+            envelope,
+            resp.status_code,
+            attempt,
+            success=False,
+            error=f"HTTP {resp.status_code}: {resp.text[:500]}",
+        )
         return False
 
     except requests.Timeout:
@@ -262,25 +275,32 @@ def _write_to_dlq(envelope: dict):
     """Write a permanently failed webhook event to the dead letter queue table."""
     try:
         import mysql.connector
+
         conn = mysql.connector.connect(
-            host=DB_HOST, port=DB_PORT, database=DB_NAME,
-            user=DB_USER, password=DB_PASSWORD,
+            host=DB_HOST,
+            port=DB_PORT,
+            database=DB_NAME,
+            user=DB_USER,
+            password=DB_PASSWORD,
             connect_timeout=3,
         )
         cursor = conn.cursor()
-        cursor.execute("""
+        cursor.execute(
+            """
             INSERT INTO webhook_dead_letters
                 (event_type, payload, webhook_url, error_message,
                  organization_id, retry_count, created_at)
             VALUES (%s, %s, %s, %s, %s, %s, NOW())
-        """, (
-            envelope.get("event", ""),
-            json.dumps(envelope, default=str)[:50000],
-            WEBHOOK_URL,
-            f"Failed after {WEBHOOK_MAX_RETRIES} delivery attempts",
-            envelope.get("org_id"),
-            WEBHOOK_MAX_RETRIES,
-        ))
+        """,
+            (
+                envelope.get("event", ""),
+                json.dumps(envelope, default=str)[:50000],
+                WEBHOOK_URL,
+                f"Failed after {WEBHOOK_MAX_RETRIES} delivery attempts",
+                envelope.get("org_id"),
+                WEBHOOK_MAX_RETRIES,
+            ),
+        )
         conn.commit()
         cursor.close()
         conn.close()
@@ -334,34 +354,43 @@ def _deliver_with_retries(envelope: dict):
 # Delivery Log (MySQL — best-effort, never blocks event dispatch)
 # ---------------------------------------------------------------------------
 
-def _log_delivery(envelope: dict, status_code: int, attempt: int,
-                  success: bool, error: str = ""):
+
+def _log_delivery(envelope: dict, status_code: int, attempt: int, success: bool, error: str = ""):
     """Log webhook delivery to database. Non-blocking, best-effort."""
     try:
         import mysql.connector
+
         conn = mysql.connector.connect(
-            host=DB_HOST, port=DB_PORT, database=DB_NAME,
-            user=DB_USER, password=DB_PASSWORD,
+            host=DB_HOST,
+            port=DB_PORT,
+            database=DB_NAME,
+            user=DB_USER,
+            password=DB_PASSWORD,
             connect_timeout=3,
         )
         cursor = conn.cursor()
-        cursor.execute("""
+        cursor.execute(
+            """
             INSERT INTO webhook_delivery_log
                 (event_type, event_data, webhook_url, delivery_status,
                  http_status_code, attempts, error_message,
                  organization_id, created_at, delivered_at)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW(), %s)
-        """, (
-            envelope.get("event", ""),
-            json.dumps(envelope.get("data", {}), default=str)[:10000],
-            WEBHOOK_URL,
-            "DELIVERED" if success else ("FAILED" if attempt >= WEBHOOK_MAX_RETRIES else "RETRYING"),
-            status_code,
-            attempt,
-            error[:2000] if error else None,
-            envelope.get("org_id"),
-            datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S") if success else None,
-        ))
+        """,
+            (
+                envelope.get("event", ""),
+                json.dumps(envelope.get("data", {}), default=str)[:10000],
+                WEBHOOK_URL,
+                "DELIVERED"
+                if success
+                else ("FAILED" if attempt >= WEBHOOK_MAX_RETRIES else "RETRYING"),
+                status_code,
+                attempt,
+                error[:2000] if error else None,
+                envelope.get("org_id"),
+                datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S") if success else None,
+            ),
+        )
         conn.commit()
         cursor.close()
         conn.close()
@@ -436,6 +465,7 @@ def _start_redis_subscriber():
     def _redis_listener():
         try:
             import redis
+
             r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
             pubsub = r.pubsub()
             pubsub.subscribe(REDIS_CHANNEL)
@@ -458,6 +488,7 @@ def _publish_to_redis(envelope: dict):
     """Publish event to Redis for cross-container dispatch."""
     try:
         import redis
+
         r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
         r.publish(REDIS_CHANNEL, json.dumps(envelope, default=str))
         return True
@@ -468,6 +499,7 @@ def _publish_to_redis(envelope: dict):
 # ---------------------------------------------------------------------------
 # Enqueue
 # ---------------------------------------------------------------------------
+
 
 def _enqueue(envelope: dict):
     """Put an event on the dispatch queue."""
@@ -482,15 +514,16 @@ def _enqueue(envelope: dict):
 # Public API — this is what all services call
 # ---------------------------------------------------------------------------
 
+
 def dispatch_event(
     event_type: str,
-    data: Dict[str, Any],
-    org_id: Optional[int] = None,
-    domain: Optional[str] = None,
-    source_service: Optional[str] = None,
-    metadata: Optional[Dict[str, Any]] = None,
-    tags: Optional[List[str]] = None,
-    user_variables: Optional[Dict[str, Any]] = None,
+    data: dict[str, Any],
+    org_id: int | None = None,
+    domain: str | None = None,
+    source_service: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    tags: list[str] | None = None,
+    user_variables: dict[str, Any] | None = None,
     use_redis: bool = False,
 ):
     """
@@ -541,12 +574,12 @@ def dispatch_event(
 
 def dispatch_event_sync(
     event_type: str,
-    data: Dict[str, Any],
-    org_id: Optional[int] = None,
-    domain: Optional[str] = None,
-    source_service: Optional[str] = None,
-    tags: Optional[List[str]] = None,
-    user_variables: Optional[Dict[str, Any]] = None,
+    data: dict[str, Any],
+    org_id: int | None = None,
+    domain: str | None = None,
+    source_service: str | None = None,
+    tags: list[str] | None = None,
+    user_variables: dict[str, Any] | None = None,
 ) -> bool:
     """
     Synchronous version — blocks until delivery completes (or all retries fail).
@@ -556,8 +589,13 @@ def dispatch_event_sync(
         return False
 
     envelope = _build_envelope(
-        event_type, data, org_id, domain, source_service,
-        tags=tags, user_variables=user_variables,
+        event_type,
+        data,
+        org_id,
+        domain,
+        source_service,
+        tags=tags,
+        user_variables=user_variables,
     )
     _stats["dispatched"] += 1
     _deliver_with_retries(envelope)
@@ -579,6 +617,7 @@ def get_dispatcher_stats() -> dict:
 # Event Type Constants
 # ---------------------------------------------------------------------------
 
+
 class Events:
     """
     All event types in the Mailyte system.
@@ -591,28 +630,28 @@ class Events:
     """
 
     # ── Email — SMTP Lifecycle ───────────────────────────────────────────
-    EMAIL_ACCEPTED = "email.accepted"          # Accepted by MTA for delivery
-    EMAIL_INBOUND = "email.inbound"            # Inbound message received
-    EMAIL_OUTBOUND = "email.outbound"          # Outbound message sent
-    EMAIL_DELIVERED = "email.delivered"        # Successfully delivered to recipient MTA
-    EMAIL_BOUNCED = "email.bounced"            # Bounced (hard or soft)
-    EMAIL_DEFERRED = "email.deferred"          # Temporarily deferred, will retry
-    EMAIL_REJECTED = "email.rejected"          # Rejected by policy/filter
-    EMAIL_DROPPED = "email.dropped"            # Dropped (suppression list, duplicate, etc.)
-    EMAIL_STORED = "email.stored"              # Stored in mailbox (LMTP delivery)
-    EMAIL_QUEUED = "email.queued"              # Placed in outbound queue
+    EMAIL_ACCEPTED = "email.accepted"  # Accepted by MTA for delivery
+    EMAIL_INBOUND = "email.inbound"  # Inbound message received
+    EMAIL_OUTBOUND = "email.outbound"  # Outbound message sent
+    EMAIL_DELIVERED = "email.delivered"  # Successfully delivered to recipient MTA
+    EMAIL_BOUNCED = "email.bounced"  # Bounced (hard or soft)
+    EMAIL_DEFERRED = "email.deferred"  # Temporarily deferred, will retry
+    EMAIL_REJECTED = "email.rejected"  # Rejected by policy/filter
+    EMAIL_DROPPED = "email.dropped"  # Dropped (suppression list, duplicate, etc.)
+    EMAIL_STORED = "email.stored"  # Stored in mailbox (LMTP delivery)
+    EMAIL_QUEUED = "email.queued"  # Placed in outbound queue
 
     # ── Email — IMAP/POP3 User Actions ──────────────────────────────────
-    EMAIL_READ = "email.read"                  # Message marked as read
-    EMAIL_UNREAD = "email.unread"              # Message marked as unread
-    EMAIL_DELETED = "email.deleted"            # Message deleted
-    EMAIL_MOVED = "email.moved"                # Message moved between folders
-    EMAIL_COPIED = "email.copied"              # Message copied to folder
-    EMAIL_FLAGGED = "email.flagged"            # Message flagged/starred
-    EMAIL_UNFLAGGED = "email.unflagged"        # Message unflagged
-    EMAIL_REPLIED = "email.replied"            # Reply sent
-    EMAIL_FORWARDED = "email.forwarded"        # Message forwarded
-    EMAIL_DRAFTED = "email.drafted"            # Draft saved
+    EMAIL_READ = "email.read"  # Message marked as read
+    EMAIL_UNREAD = "email.unread"  # Message marked as unread
+    EMAIL_DELETED = "email.deleted"  # Message deleted
+    EMAIL_MOVED = "email.moved"  # Message moved between folders
+    EMAIL_COPIED = "email.copied"  # Message copied to folder
+    EMAIL_FLAGGED = "email.flagged"  # Message flagged/starred
+    EMAIL_UNFLAGGED = "email.unflagged"  # Message unflagged
+    EMAIL_REPLIED = "email.replied"  # Reply sent
+    EMAIL_FORWARDED = "email.forwarded"  # Message forwarded
+    EMAIL_DRAFTED = "email.drafted"  # Draft saved
     EMAIL_DRAFT_DELETED = "email.draft.deleted"  # Draft deleted
     EMAIL_ATTACHMENT_DOWNLOADED = "email.attachment.downloaded"
 
@@ -629,20 +668,20 @@ class Events:
     FOLDER_UNSUBSCRIBED = "folder.unsubscribed"
 
     # ── Tracking ────────────────────────────────────────────────────────
-    TRACKING_OPEN = "tracking.open"            # Email opened (pixel loaded)
-    TRACKING_CLICK = "tracking.click"          # Link clicked
+    TRACKING_OPEN = "tracking.open"  # Email opened (pixel loaded)
+    TRACKING_CLICK = "tracking.click"  # Link clicked
     TRACKING_UNSUBSCRIBE = "tracking.unsubscribe"  # Unsubscribe action
 
     # ── Delivery Status ─────────────────────────────────────────────────
     DELIVERY_SUCCESS = "delivery.success"
-    DELIVERY_BOUNCE_HARD = "delivery.bounce.hard"    # Permanent failure
-    DELIVERY_BOUNCE_SOFT = "delivery.bounce.soft"    # Temporary failure
-    DELIVERY_COMPLAINT = "delivery.complaint"        # Spam complaint (FBL)
-    DELIVERY_DELAYED = "delivery.delayed"            # Delayed delivery notification
+    DELIVERY_BOUNCE_HARD = "delivery.bounce.hard"  # Permanent failure
+    DELIVERY_BOUNCE_SOFT = "delivery.bounce.soft"  # Temporary failure
+    DELIVERY_COMPLAINT = "delivery.complaint"  # Spam complaint (FBL)
+    DELIVERY_DELAYED = "delivery.delayed"  # Delayed delivery notification
 
     # ── Authentication Events ───────────────────────────────────────────
-    AUTH_LOGIN_SUCCESS = "auth.login.success"     # Successful IMAP/POP3/SMTP login
-    AUTH_LOGIN_FAILURE = "auth.login.failure"     # Failed login attempt
+    AUTH_LOGIN_SUCCESS = "auth.login.success"  # Successful IMAP/POP3/SMTP login
+    AUTH_LOGIN_FAILURE = "auth.login.failure"  # Failed login attempt
     AUTH_PASSWORD_CHANGED = "auth.password.changed"
     AUTH_TOTP_ENABLED = "auth.totp.enabled"
     AUTH_TOTP_DISABLED = "auth.totp.disabled"

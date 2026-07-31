@@ -42,36 +42,33 @@ Created: 2024
 License: MIT
 """
 
-import sys
-import os
-import json
-import re
 import email
 import email.policy
-import requests
-import logging
 import hashlib
-import time
+import json
+import logging
+import os
 import signal
+import sys
+import time
 from datetime import datetime
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from email.mime.base import MIMEBase
-from email import encoders
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Any
+
+import requests
 
 # Configure comprehensive logging for debugging and monitoring
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - [PID:%(process)d] %(message)s',
+    format="%(asctime)s - %(name)s - %(levelname)s - [PID:%(process)d] %(message)s",
     handlers=[
         # Log to file for permanent record
-        logging.FileHandler('/var/log/postfix_tracking.log'),
+        logging.FileHandler("/var/log/postfix_tracking.log"),
         # Also log to stderr for Postfix logging integration
-        logging.StreamHandler(sys.stderr)
-    ]
+        logging.StreamHandler(sys.stderr),
+    ],
 )
-logger = logging.getLogger('postfix_tracking')
+logger = logging.getLogger("postfix_tracking")
+
 
 class PostfixTrackingInjector:
     """
@@ -94,32 +91,32 @@ class PostfixTrackingInjector:
         Docker containerization and different deployment environments.
         """
         # Core tracking service configuration
-        self.tracking_service_url = os.getenv('TRACKING_SERVICE_URL', 'http://tracking:8086')
-        self.tracking_enabled = os.getenv('TRACKING_ENABLED', 'true').lower() == 'true'
+        self.tracking_service_url = os.getenv("TRACKING_SERVICE_URL", "http://tracking:8086")
+        self.tracking_enabled = os.getenv("TRACKING_ENABLED", "true").lower() == "true"
 
         # Default identifiers for tenant/domain mapping
-        self.default_organization_id = os.getenv('DEFAULT_ORGANIZATION_ID', 'default')
-        self.default_domain_id = os.getenv('DEFAULT_DOMAIN_ID', 'default')
+        self.default_organization_id = os.getenv("DEFAULT_ORGANIZATION_ID", "default")
+        self.default_domain_id = os.getenv("DEFAULT_DOMAIN_ID", "default")
 
         # Database configuration for domain/tenant lookup
         # This allows proper multi-tenant tracking data separation
-        self.db_host = os.getenv('DB_HOST', 'mysql')
-        self.db_port = int(os.getenv('DB_PORT', 3306))
-        self.db_name = os.getenv('DB_NAME', 'mailserver')
-        self.db_user = os.getenv('DB_USER', 'root')
-        self.db_password = os.getenv('DB_PASSWORD', 'password')
+        self.db_host = os.getenv("DB_HOST", "mysql")
+        self.db_port = int(os.getenv("DB_PORT", 3306))
+        self.db_name = os.getenv("DB_NAME", "mailserver")
+        self.db_user = os.getenv("DB_USER", "root")
+        self.db_password = os.getenv("DB_PASSWORD", "password")
 
         # Performance optimization features
         self._connection_pool = None  # Future: implement connection pooling
-        self._tenant_cache = {}       # Simple in-memory cache for tenant lookups
-        self._cache_ttl = 300         # Cache entries valid for 5 minutes
+        self._tenant_cache = {}  # Simple in-memory cache for tenant lookups
+        self._cache_ttl = 300  # Cache entries valid for 5 minutes
 
         # Timeout configuration for external service calls
-        self.api_timeout = int(os.getenv('TRACKING_API_TIMEOUT', '10'))
-        self.db_timeout = int(os.getenv('DB_TIMEOUT', '5'))
+        self.api_timeout = int(os.getenv("TRACKING_API_TIMEOUT", "10"))
+        self.db_timeout = int(os.getenv("DB_TIMEOUT", "5"))
 
         # Log initialization with current configuration
-        logger.info(f"Tracking injector initialized:")
+        logger.info("Tracking injector initialized:")
         logger.info(f"  - Tracking enabled: {self.tracking_enabled}")
         logger.info(f"  - Service URL: {self.tracking_service_url}")
         logger.info(f"  - Database: {self.db_host}:{self.db_port}/{self.db_name}")
@@ -132,6 +129,7 @@ class PostfixTrackingInjector:
         This ensures that the process can be cleanly terminated by Postfix
         without leaving emails in an inconsistent state.
         """
+
         def signal_handler(signum, frame):
             logger.warning(f"Received signal {signum}, shutting down gracefully")
             sys.exit(1)
@@ -139,7 +137,7 @@ class PostfixTrackingInjector:
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
 
-    def extract_email_metadata(self, message: email.message.EmailMessage) -> Optional[Dict[str, Any]]:
+    def extract_email_metadata(self, message: email.message.EmailMessage) -> dict[str, Any] | None:
         """
         Extract comprehensive metadata from email message for tracking.
 
@@ -156,20 +154,19 @@ class PostfixTrackingInjector:
         """
         try:
             # Extract sender information
-            sender = self._clean_email_address(message.get('From', ''))
+            sender = self._clean_email_address(message.get("From", ""))
             if not sender:
                 logger.warning("No valid sender found in email")
                 return None
 
             # Extract all recipient types (To, Cc, Bcc)
             recipients = []
-            for header in ['To', 'Cc', 'Bcc']:
-                header_value = message.get(header, '')
+            for header in ["To", "Cc", "Bcc"]:
+                header_value = message.get(header, "")
                 if header_value:
                     # Handle comma-separated recipient lists
                     header_recipients = [
-                        self._clean_email_address(addr.strip()) 
-                        for addr in header_value.split(',')
+                        self._clean_email_address(addr.strip()) for addr in header_value.split(",")
                     ]
                     recipients.extend([addr for addr in header_recipients if addr])
 
@@ -178,33 +175,33 @@ class PostfixTrackingInjector:
                 return None
 
             # Generate or extract unique email identifier
-            message_id = message.get('Message-ID', '').strip('<>')
+            message_id = message.get("Message-ID", "").strip("<>")
             if not message_id:
                 # Generate deterministic message ID if not present
                 timestamp = str(int(datetime.now().timestamp()))
                 sender_hash = hashlib.md5(sender.encode()).hexdigest()[:8]
-                hostname = os.getenv('HOSTNAME', 'mail.local')
+                hostname = os.getenv("HOSTNAME", "mail.local")
                 message_id = f"{timestamp}.{sender_hash}@{hostname}"
                 logger.debug(f"Generated message ID: {message_id}")
 
             # Extract domain information for tenant resolution
-            sender_domain = sender.split('@')[-1] if '@' in sender else self.default_domain_id
+            sender_domain = sender.split("@")[-1] if "@" in sender else self.default_domain_id
 
             # Build comprehensive metadata dictionary
             metadata = {
-                'email_id': message_id,
-                'sender': sender,
-                'recipients': recipients,
-                'recipient_count': len(recipients),
-                'subject': message.get('Subject', ''),
-                'sender_domain': sender_domain,
-                'date': message.get('Date', ''),
-                'content_type': message.get_content_type(),
-                'has_attachments': self._check_attachments(message),
-                'email_size': len(str(message)),
-                'priority': message.get('X-Priority', 'normal'),
-                'user_agent': message.get('User-Agent', ''),
-                'x_mailer': message.get('X-Mailer', '')
+                "email_id": message_id,
+                "sender": sender,
+                "recipients": recipients,
+                "recipient_count": len(recipients),
+                "subject": message.get("Subject", ""),
+                "sender_domain": sender_domain,
+                "date": message.get("Date", ""),
+                "content_type": message.get_content_type(),
+                "has_attachments": self._check_attachments(message),
+                "email_size": len(str(message)),
+                "priority": message.get("X-Priority", "normal"),
+                "user_agent": message.get("User-Agent", ""),
+                "x_mailer": message.get("X-Mailer", ""),
             }
 
             logger.debug(f"Extracted email metadata: {json.dumps(metadata, indent=2)}")
@@ -228,21 +225,22 @@ class PostfixTrackingInjector:
             str: Clean email address or empty string if invalid
         """
         if not address:
-            return ''
+            return ""
 
         # Remove display name and extract email from "Name <email>" format
         import email.utils
+
         try:
             parsed = email.utils.parseaddr(address)
             email_addr = parsed[1].lower().strip()
 
             # Basic email validation
-            if '@' in email_addr and '.' in email_addr.split('@')[1]:
+            if "@" in email_addr and "." in email_addr.split("@")[1]:
                 return email_addr
         except Exception:
             pass
 
-        return ''
+        return ""
 
     def _check_attachments(self, message: email.message.EmailMessage) -> bool:
         """
@@ -258,13 +256,13 @@ class PostfixTrackingInjector:
             return False
 
         for part in message.walk():
-            disposition = part.get('Content-Disposition', '')
-            if 'attachment' in disposition.lower():
+            disposition = part.get("Content-Disposition", "")
+            if "attachment" in disposition.lower():
                 return True
 
         return False
 
-    def get_tenant_domain_ids(self, sender_domain: str, sender_email: str) -> Tuple[str, str]:
+    def get_tenant_domain_ids(self, sender_domain: str, sender_email: str) -> tuple[str, str]:
         """
         Resolve tenant and domain IDs from database based on sender information.
 
@@ -290,9 +288,9 @@ class PostfixTrackingInjector:
         # Check cache first for performance
         if cache_key in self._tenant_cache:
             cached_entry = self._tenant_cache[cache_key]
-            if current_time - cached_entry['timestamp'] < self._cache_ttl:
+            if current_time - cached_entry["timestamp"] < self._cache_ttl:
                 logger.debug(f"Using cached tenant/domain for {sender_email}")
-                return cached_entry['tenant_id'], cached_entry['domain_id']
+                return cached_entry["tenant_id"], cached_entry["domain_id"]
             else:
                 # Remove expired cache entry
                 del self._tenant_cache[cache_key]
@@ -312,60 +310,76 @@ class PostfixTrackingInjector:
                 user=self.db_user,
                 password=self.db_password,
                 database=self.db_name,
-                charset='utf8mb4',
+                charset="utf8mb4",
                 connect_timeout=self.db_timeout,
                 read_timeout=self.db_timeout,
-                write_timeout=self.db_timeout
+                write_timeout=self.db_timeout,
             )
 
             try:
                 with connection.cursor() as cursor:
                     # Primary lookup: domain configuration table
-                    cursor.execute("""
+                    cursor.execute(
+                        """
                         SELECT id, organization_id, tracking_enabled 
                         FROM domains 
                         WHERE domain = %s AND active = 1
-                    """, (sender_domain,))
+                    """,
+                        (sender_domain,),
+                    )
                     domain_result = cursor.fetchone()
 
                     if domain_result:
                         domain_id = str(domain_result[0])
                         tenant_id = domain_result[1] or self.default_tenant_id
-                        tracking_enabled = bool(domain_result[2]) if domain_result[2] is not None else True
+                        tracking_enabled = (
+                            bool(domain_result[2]) if domain_result[2] is not None else True
+                        )
 
-                        logger.debug(f"Found domain config: domain_id={domain_id}, "
-                                   f"tenant_id={tenant_id}, tracking_enabled={tracking_enabled}")
+                        logger.debug(
+                            f"Found domain config: domain_id={domain_id}, "
+                            f"tenant_id={tenant_id}, tracking_enabled={tracking_enabled}"
+                        )
                     else:
                         # Secondary lookup: user-specific configuration
-                        cursor.execute("""
+                        cursor.execute(
+                            """
                             SELECT u.domain_id, d.tenant_id 
                             FROM users u 
                             LEFT JOIN domains d ON u.domain_id = d.id 
                             WHERE u.email = %s AND u.active = 1
-                        """, (sender_email,))
+                        """,
+                            (sender_email,),
+                        )
                         user_result = cursor.fetchone()
 
                         if user_result and user_result[0]:
                             domain_id = str(user_result[0])
                             tenant_id = user_result[1] or self.default_tenant_id
-                            logger.debug(f"Found user config: domain_id={domain_id}, tenant_id={tenant_id}")
+                            logger.debug(
+                                f"Found user config: domain_id={domain_id}, tenant_id={tenant_id}"
+                            )
                         else:
                             # Use default values
                             domain_id = self.default_domain_id
                             tenant_id = self.default_tenant_id
-                            logger.debug(f"Using defaults: domain_id={domain_id}, tenant_id={tenant_id}")
+                            logger.debug(
+                                f"Using defaults: domain_id={domain_id}, tenant_id={tenant_id}"
+                            )
 
             finally:
                 connection.close()
 
             # Cache the result for future lookups
             self._tenant_cache[cache_key] = {
-                'tenant_id': tenant_id,
-                'domain_id': domain_id,
-                'timestamp': current_time
+                "tenant_id": tenant_id,
+                "domain_id": domain_id,
+                "timestamp": current_time,
             }
 
-            logger.debug(f"Resolved tenant_id: {tenant_id}, domain_id: {domain_id} for {sender_email}")
+            logger.debug(
+                f"Resolved tenant_id: {tenant_id}, domain_id: {domain_id} for {sender_email}"
+            )
             return tenant_id, domain_id
 
         except Exception as e:
@@ -373,8 +387,9 @@ class PostfixTrackingInjector:
             # Always fall back to defaults to ensure email delivery
             return self.default_tenant_id, self.default_domain_id
 
-    def inject_tracking_for_recipient(self, html_content: str, email_id: str, 
-                                    recipient: str, organization_id: str, domain_id: str) -> str:
+    def inject_tracking_for_recipient(
+        self, html_content: str, email_id: str, recipient: str, organization_id: str, domain_id: str
+    ) -> str:
         """
         Inject tracking for a specific recipient using the tracking service API.
 
@@ -399,15 +414,15 @@ class PostfixTrackingInjector:
         try:
             # Prepare API payload with all tracking parameters
             payload = {
-                'html_content': html_content,
-                'email_id': email_id,
-                'recipient': recipient,
-                'tenant_id': organization_id,
-                'domain_id': domain_id,
-                'enable_open_tracking': True,
-                'enable_click_tracking': True,
-                'timestamp': datetime.utcnow().isoformat() + 'Z',
-                'source': 'postfix_injector'
+                "html_content": html_content,
+                "email_id": email_id,
+                "recipient": recipient,
+                "tenant_id": organization_id,
+                "domain_id": domain_id,
+                "enable_open_tracking": True,
+                "enable_click_tracking": True,
+                "timestamp": datetime.utcnow().isoformat() + "Z",
+                "source": "postfix_injector",
             }
 
             # Make API call to tracking service with timeout protection
@@ -417,29 +432,33 @@ class PostfixTrackingInjector:
                 json=payload,
                 timeout=self.api_timeout,
                 headers={
-                    'Content-Type': 'application/json',
-                    'User-Agent': 'Postfix-Tracking-Injector/1.0'
-                }
+                    "Content-Type": "application/json",
+                    "User-Agent": "Postfix-Tracking-Injector/1.0",
+                },
             )
 
             # Process successful response
             if response.status_code == 200:
                 result = response.json()
-                if result.get('success'):
-                    tracking_stats = result.get('tracking_injected', {})
+                if result.get("success"):
+                    tracking_stats = result.get("tracking_injected", {})
                     logger.info(f"Tracking injected successfully for {recipient}:")
                     logger.info(f"  - Open tracking: {tracking_stats.get('open_tracking', False)}")
-                    logger.info(f"  - Click tracking: {tracking_stats.get('click_tracking', False)}")
+                    logger.info(
+                        f"  - Click tracking: {tracking_stats.get('click_tracking', False)}"
+                    )
                     logger.info(f"  - Links rewritten: {tracking_stats.get('links_rewritten', 0)}")
                     logger.info(f"  - Tracking ID: {result.get('tracking_id', 'N/A')}")
 
-                    return result['modified_content']
+                    return result["modified_content"]
                 else:
-                    error_msg = result.get('error', 'Unknown error')
+                    error_msg = result.get("error", "Unknown error")
                     logger.warning(f"Tracking injection failed for {recipient}: {error_msg}")
             else:
-                logger.error(f"Tracking service HTTP error for {recipient}: "
-                           f"{response.status_code} - {response.text[:200]}")
+                logger.error(
+                    f"Tracking service HTTP error for {recipient}: "
+                    f"{response.status_code} - {response.text[:200]}"
+                )
 
         except requests.exceptions.Timeout:
             logger.error(f"Tracking service timeout for {recipient} (>{self.api_timeout}s)")
@@ -455,8 +474,9 @@ class PostfixTrackingInjector:
         logger.info(f"Returning original content for {recipient} due to tracking failure")
         return html_content
 
-    def process_message_content(self, message: email.message.EmailMessage, 
-                              metadata: Dict[str, Any]) -> email.message.EmailMessage:
+    def process_message_content(
+        self, message: email.message.EmailMessage, metadata: dict[str, Any]
+    ) -> email.message.EmailMessage:
         """
         Process email message content to inject tracking for all recipients.
 
@@ -475,16 +495,16 @@ class PostfixTrackingInjector:
             email.message.EmailMessage: Modified message with tracking injected
         """
         try:
-            email_id = metadata['email_id']
-            sender_domain = metadata['sender_domain']
-            sender_email = metadata['sender']
-            recipients = metadata['recipients']
+            email_id = metadata["email_id"]
+            sender_domain = metadata["sender_domain"]
+            sender_email = metadata["sender"]
+            recipients = metadata["recipients"]
 
             logger.info(f"Processing message content for {len(recipients)} recipients")
 
             # Get tenant and domain IDs for this sender
             tenant_id, domain_id = self.get_tenant_domain_ids(sender_domain, sender_email)
-            organization_id = tenant_id #Using tenant_id as organization_id for now
+            organization_id = tenant_id  # Using tenant_id as organization_id for now
 
             # Track processing statistics
             processed_parts = 0
@@ -495,7 +515,7 @@ class PostfixTrackingInjector:
                 logger.debug("Processing multipart message")
 
                 for part in message.walk():
-                    if part.get_content_type() == 'text/html':
+                    if part.get_content_type() == "text/html":
                         processed_parts += 1
                         logger.debug(f"Found HTML part {processed_parts}")
 
@@ -512,12 +532,16 @@ class PostfixTrackingInjector:
                             primary_recipient = recipients[0] if recipients else None
                             if primary_recipient:
                                 modified_content = self.inject_tracking_for_recipient(
-                                    html_content, email_id, primary_recipient, organization_id, domain_id
+                                    html_content,
+                                    email_id,
+                                    primary_recipient,
+                                    organization_id,
+                                    domain_id,
                                 )
 
                                 # Only update if content was actually modified
                                 if modified_content != html_content:
-                                    part.set_content(modified_content, subtype='html')
+                                    part.set_content(modified_content, subtype="html")
                                     modified_parts += 1
                                     logger.debug(f"Modified HTML part {processed_parts}")
 
@@ -532,7 +556,7 @@ class PostfixTrackingInjector:
 
             else:
                 # Handle single-part HTML messages
-                if message.get_content_type() == 'text/html':
+                if message.get_content_type() == "text/html":
                     processed_parts += 1
                     logger.debug("Processing single-part HTML message")
 
@@ -543,22 +567,28 @@ class PostfixTrackingInjector:
                             primary_recipient = recipients[0] if recipients else None
                             if primary_recipient:
                                 modified_content = self.inject_tracking_for_recipient(
-                                    html_content, email_id, primary_recipient, organization_id, domain_id
+                                    html_content,
+                                    email_id,
+                                    primary_recipient,
+                                    organization_id,
+                                    domain_id,
                                 )
 
                                 if modified_content != html_content:
-                                    message.set_content(modified_content, subtype='html')
+                                    message.set_content(modified_content, subtype="html")
                                     modified_parts += 1
                                     logger.debug("Modified single-part HTML content")
                             else:
-                                logger.warning("No recipients found for single-part HTML processing")
+                                logger.warning(
+                                    "No recipients found for single-part HTML processing"
+                                )
                         else:
                             logger.debug("Skipping empty HTML content")
                     except Exception as e:
                         logger.error(f"Error processing single-part HTML: {e}")
 
             # Log processing summary
-            logger.info(f"Content processing completed:")
+            logger.info("Content processing completed:")
             logger.info(f"  - HTML parts found: {processed_parts}")
             logger.info(f"  - Parts modified: {modified_parts}")
             logger.info(f"  - Email ID: {email_id}")
@@ -613,25 +643,25 @@ class PostfixTrackingInjector:
             except Exception as e:
                 logger.error(f"Failed to parse email: {e}")
                 # Pass through unparseable emails unchanged
-                self._reinject_email(raw_email, {'sender': '', 'recipients': sys.argv[1:]})
+                self._reinject_email(raw_email, {"sender": "", "recipients": sys.argv[1:]})
                 return
 
             # Stamp every email with a unique Mailyte ID (ULID)
             # This ID ties the email across all systems: tracking, webhooks,
             # message trace, analytics, and IMAP delivery
             mailyte_id = self._generate_mailyte_id()
-            if 'X-Mailyte-ID' not in message:
-                message['X-Mailyte-ID'] = mailyte_id
+            if "X-Mailyte-ID" not in message:
+                message["X-Mailyte-ID"] = mailyte_id
                 logger.info(f"Stamped X-Mailyte-ID: {mailyte_id}")
             else:
-                mailyte_id = message['X-Mailyte-ID']
+                mailyte_id = message["X-Mailyte-ID"]
                 logger.info(f"Existing X-Mailyte-ID: {mailyte_id}")
 
             # Check if tracking is globally enabled
             # Note: even with tracking disabled, the X-Mailyte-ID header is still stamped
             if not self.tracking_enabled:
                 logger.info("Tracking disabled globally, passing email with Mailyte ID only")
-                self._reinject_email(message.as_bytes(), {'sender': '', 'recipients': sys.argv[1:]})
+                self._reinject_email(message.as_bytes(), {"sender": "", "recipients": sys.argv[1:]})
                 return
 
             # Extract and validate email metadata
@@ -639,11 +669,11 @@ class PostfixTrackingInjector:
             metadata = self.extract_email_metadata(message)
             if not metadata:
                 logger.warning("Failed to extract valid metadata, passing through unchanged")
-                self._reinject_email(message.as_bytes(), {'sender': '', 'recipients': sys.argv[1:]})
+                self._reinject_email(message.as_bytes(), {"sender": "", "recipients": sys.argv[1:]})
                 return
 
             # Attach Mailyte ID to metadata for downstream use (webhooks, tracking, logs)
-            metadata['mailyte_id'] = mailyte_id
+            metadata["mailyte_id"] = mailyte_id
 
             # Log email processing details
             logger.info(f"Processing email: {metadata['email_id']} (mailyte_id={mailyte_id})")
@@ -672,7 +702,7 @@ class PostfixTrackingInjector:
                 modified_email = modified_message.as_bytes(policy=email.policy.default)
                 output_size = len(modified_email)
 
-                logger.info(f"Email processing completed successfully:")
+                logger.info("Email processing completed successfully:")
                 logger.info(f"  - Original size: {email_size} bytes")
                 logger.info(f"  - Modified size: {output_size} bytes")
                 logger.info(f"  - Size change: {output_size - email_size:+d} bytes")
@@ -693,7 +723,10 @@ class PostfixTrackingInjector:
             try:
                 if raw_email:
                     logger.info("Delivering original email due to processing error")
-                    self._reinject_email(raw_email, metadata if metadata else {'sender': '', 'recipients': sys.argv[1:]})
+                    self._reinject_email(
+                        raw_email,
+                        metadata if metadata else {"sender": "", "recipients": sys.argv[1:]},
+                    )
                 else:
                     logger.error("No original email available for fallback delivery")
                     sys.exit(75)  # EX_TEMPFAIL
@@ -710,11 +743,13 @@ class PostfixTrackingInjector:
         """
         try:
             from ulid import ULID
+
             return str(ULID())
         except ImportError:
             # Fallback: timestamp-based unique ID (not a true ULID but
             # globally unique and sortable — works without extra packages)
             import uuid
+
             ts = int(time.time() * 1000)
             rand = uuid.uuid4().hex[:16]
             return f"ML{ts:013d}{rand}".upper()[:26]
@@ -729,8 +764,8 @@ class PostfixTrackingInjector:
         """
         import smtplib
 
-        sender = metadata.get('sender', '') or getattr(self, 'cli_sender', '') or ''
-        recipients = metadata.get('recipients', []) or getattr(self, 'cli_recipients', []) or []
+        sender = metadata.get("sender", "") or getattr(self, "cli_sender", "") or ""
+        recipients = metadata.get("recipients", []) or getattr(self, "cli_recipients", []) or []
 
         if not recipients:
             logger.error("No recipients for reinjection — cannot deliver")
@@ -739,7 +774,7 @@ class PostfixTrackingInjector:
         logger.info(f"Reinjecting to 127.0.0.1:10026: sender={sender}, recipients={recipients}")
 
         try:
-            smtp = smtplib.SMTP('127.0.0.1', 10026, timeout=30)
+            smtp = smtplib.SMTP("127.0.0.1", 10026, timeout=30)
             smtp.sendmail(sender, recipients, email_bytes)
             smtp.quit()
             logger.info("Email reinjected successfully via 10026")
@@ -759,12 +794,12 @@ class PostfixTrackingInjector:
         """
         if message.is_multipart():
             for part in message.walk():
-                if part.get_content_type() == 'text/html':
+                if part.get_content_type() == "text/html":
                     content = part.get_content()
                     if content and len(content.strip()) > 0:
                         return True
         else:
-            if message.get_content_type() == 'text/html':
+            if message.get_content_type() == "text/html":
                 content = message.get_content()
                 if content and len(content.strip()) > 0:
                     return True
@@ -800,10 +835,10 @@ class PostfixTrackingInjector:
                 user=self.db_user,
                 password=self.db_password,
                 database=self.db_name,
-                charset='utf8mb4',
+                charset="utf8mb4",
                 connect_timeout=self.db_timeout,
                 read_timeout=self.db_timeout,
-                write_timeout=self.db_timeout
+                write_timeout=self.db_timeout,
             )
             try:
                 cursor = db_connection.cursor()
@@ -839,25 +874,23 @@ class PostfixTrackingInjector:
     def _check_delivery_timing(self, recipient_domain, organization_id):
         """Check if email should be sent now using delivery optimizer"""
         try:
-            delivery_optimizer_url = os.getenv('DELIVERY_OPTIMIZER_URL', 'http://localhost:8088')
+            delivery_optimizer_url = os.getenv("DELIVERY_OPTIMIZER_URL", "http://localhost:8088")
 
             response = requests.post(
                 f"{delivery_optimizer_url}/api/delivery/check",
-                json={
-                    'recipient_domain': recipient_domain,
-                    'organization_id': organization_id
-                },
-                timeout=5
+                json={"recipient_domain": recipient_domain, "organization_id": organization_id},
+                timeout=5,
             )
 
             if response.status_code == 200:
                 result = response.json()
-                should_send = result.get('send_now', True)
+                should_send = result.get("send_now", True)
 
-                if should_send and 'delay_seconds' in result:
+                if should_send and "delay_seconds" in result:
                     # Add small delay if recommended
                     import time
-                    time.sleep(result['delay_seconds'])
+
+                    time.sleep(result["delay_seconds"])
 
                 return should_send
             else:
@@ -871,15 +904,12 @@ class PostfixTrackingInjector:
     def _record_delivery_attempt(self, recipient_domain, organization_id):
         """Record delivery attempt with optimizer"""
         try:
-            delivery_optimizer_url = os.getenv('DELIVERY_OPTIMIZER_URL', 'http://localhost:8088')
+            delivery_optimizer_url = os.getenv("DELIVERY_OPTIMIZER_URL", "http://localhost:8088")
 
             requests.post(
                 f"{delivery_optimizer_url}/api/delivery/record",
-                json={
-                    'recipient_domain': recipient_domain,
-                    'organization_id': organization_id
-                },
-                timeout=5
+                json={"recipient_domain": recipient_domain, "organization_id": organization_id},
+                timeout=5,
             )
 
         except Exception as e:
@@ -888,32 +918,27 @@ class PostfixTrackingInjector:
     def _send_webhook_notification(self, event_data):
         """Send webhook notification asynchronously"""
         try:
-            webhook_url = os.getenv('TRACKING_WEBHOOK_URL')
+            webhook_url = os.getenv("TRACKING_WEBHOOK_URL")
             if not webhook_url:
                 return
 
-            webhook_secret = os.getenv('WEBHOOK_SECRET', '')
+            webhook_secret = os.getenv("WEBHOOK_SECRET", "")
 
             payload = json.dumps(event_data)
             signature = self._generate_webhook_signature(payload, webhook_secret)
 
             headers = {
-                'Content-Type': 'application/json',
-                'X-Webhook-Signature': signature,
-                'User-Agent': 'EmailTracker/1.0'
+                "Content-Type": "application/json",
+                "X-Webhook-Signature": signature,
+                "User-Agent": "EmailTracker/1.0",
             }
 
-            timeout = int(os.getenv('TRACKING_WEBHOOK_TIMEOUT', '10'))
+            timeout = int(os.getenv("TRACKING_WEBHOOK_TIMEOUT", "10"))
 
-            response = requests.post(
-                webhook_url,
-                data=payload,
-                headers=headers,
-                timeout=timeout
-            )
+            response = requests.post(webhook_url, data=payload, headers=headers, timeout=timeout)
 
             if response.status_code == 200:
-                logger.debug(f"Webhook sent successfully for tracking event")
+                logger.debug("Webhook sent successfully for tracking event")
             else:
                 logger.warning(f"Webhook failed with status: {response.status_code}")
 
@@ -935,16 +960,16 @@ def main():
 
         # Parse command-line args: -f sender -- recipient1 recipient2 ...
         # Postfix pipe transport passes: argv -f ${sender} -- ${recipient}
-        cli_sender = ''
+        cli_sender = ""
         cli_recipients = []
         args = sys.argv[1:]
-        if '-f' in args:
-            idx = args.index('-f')
+        if "-f" in args:
+            idx = args.index("-f")
             if idx + 1 < len(args):
                 cli_sender = args[idx + 1]
-        if '--' in args:
-            idx = args.index('--')
-            cli_recipients = args[idx + 1:]
+        if "--" in args:
+            idx = args.index("--")
+            cli_recipients = args[idx + 1 :]
 
         logger.info(f"CLI sender: {cli_sender}, recipients: {cli_recipients}")
 
@@ -965,6 +990,7 @@ def main():
     except Exception as e:
         logger.error(f"Fatal error in tracking injector main: {e}", exc_info=True)
         sys.exit(75)  # EX_TEMPFAIL
+
 
 if __name__ == "__main__":
     main()

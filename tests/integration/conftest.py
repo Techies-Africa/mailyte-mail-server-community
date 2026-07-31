@@ -4,12 +4,13 @@ Shared fixtures for integration tests.
 These tests run against LIVE Docker services — they are NOT unit tests.
 Ensure the dev environment is running: ./start.sh dev
 """
-import os
-import time
-import pytest
-import requests
-import smtplib
+
 import imaplib
+import os
+import smtplib
+import time
+
+import pytest
 
 # ---------------------------------------------------------------------------
 # Configuration — read from env or use defaults matching docker-compose
@@ -55,6 +56,7 @@ DB_PASS = os.getenv("TEST_DB_PASS", "mailpassword123")
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture(scope="session")
 def api_headers():
     """API headers with valid test key."""
@@ -78,9 +80,9 @@ def db_connection():
     """Direct MySQL connection for verification queries."""
     try:
         import mysql.connector
+
         conn = mysql.connector.connect(
-            host=DB_HOST, port=DB_PORT,
-            database=DB_NAME, user=DB_USER, password=DB_PASS
+            host=DB_HOST, port=DB_PORT, database=DB_NAME, user=DB_USER, password=DB_PASS
         )
         yield conn
         conn.close()

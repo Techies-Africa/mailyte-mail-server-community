@@ -143,7 +143,7 @@ Some errors include a `data` field with additional detail:
     resp = requests.post(
         "http://your-server:5000/api/v1/organizations",
         headers={"X-API-Key": "YOUR_KEY"},
-        json={"id": "acme", "name": "Acme Corp"}
+        json={"id": "acme", "name": "Acme Corp"},
     )
 
     body = resp.json()

@@ -82,6 +82,7 @@ Common fixtures are in `tests/conftest.py`:
 import pytest
 from fastapi.testclient import TestClient
 
+
 @pytest.fixture(scope="session")
 def db():
     """Create and tear down the test database."""
@@ -91,11 +92,14 @@ def db():
     # Drop test database
     teardown_test_database()
 
+
 @pytest.fixture
 def client(db):
     """FastAPI test client."""
     from worker.api.main import app
+
     return TestClient(app)
+
 
 @pytest.fixture
 def api_key_header(db):
@@ -103,22 +107,24 @@ def api_key_header(db):
     key = create_test_api_key(db)
     return {"X-API-Key": key}
 
+
 @pytest.fixture
 def sample_org(db):
     """Create a sample organization for testing."""
     org_id = "test-org"
     db.execute(
         "INSERT IGNORE INTO organizations (id, name, active) VALUES (%s, %s, %s)",
-        (org_id, "Test Organization", True)
+        (org_id, "Test Organization", True),
     )
     return org_id
+
 
 @pytest.fixture
 def sample_domain(db, sample_org):
     """Create a sample domain for testing."""
     db.execute(
         "INSERT IGNORE INTO domains (domain, organization_id, active) VALUES (%s, %s, %s)",
-        ("test.example.com", sample_org, True)
+        ("test.example.com", sample_org, True),
     )
     return "test.example.com"
 ```
@@ -193,6 +199,7 @@ def test_create_domain_duplicate_returns_409(client, api_key_header, sample_doma
     )
     assert response.status_code == 409
 
+
 def test_create_domain_invalid_name(client, api_key_header, sample_org):
     response = client.post(
         "/api/v1/add/domain",
@@ -200,6 +207,7 @@ def test_create_domain_invalid_name(client, api_key_header, sample_org):
         json={"domain": "not a valid domain!!", "organization_id": sample_org},
     )
     assert response.status_code == 422
+
 
 def test_create_domain_without_auth(client):
     response = client.post(
@@ -215,6 +223,7 @@ def test_create_domain_without_auth(client):
 
 ```python
 from unittest.mock import patch, MagicMock
+
 
 @patch("worker.api.services.redis_client.Redis")
 def test_rate_limit_check(mock_redis, client, api_key_header):
@@ -234,12 +243,16 @@ def test_send_email(mock_smtp, client, api_key_header):
     mock_instance = MagicMock()
     mock_smtp.return_value.__enter__ = MagicMock(return_value=mock_instance)
 
-    response = client.post("/api/v1/send/email", headers=api_key_header, json={
-        "from": "sender@test.com",
-        "to": "recipient@test.com",
-        "subject": "Test",
-        "text": "Hello",
-    })
+    response = client.post(
+        "/api/v1/send/email",
+        headers=api_key_header,
+        json={
+            "from": "sender@test.com",
+            "to": "recipient@test.com",
+            "subject": "Test",
+            "text": "Hello",
+        },
+    )
 
     assert response.status_code == 200
     mock_instance.sendmail.assert_called_once()
@@ -249,6 +262,7 @@ def test_send_email(mock_smtp, client, api_key_header):
 
 ```python
 import responses
+
 
 @responses.activate
 def test_webhook_delivery():
@@ -269,6 +283,7 @@ def test_webhook_delivery():
 ```python
 from freezegun import freeze_time
 
+
 @freeze_time("2025-03-25 14:00:00")
 def test_cert_expiry_check():
     # All datetime.now() calls return 2025-03-25 14:00:00
@@ -285,20 +300,30 @@ Integration tests hit the real database and services. They're slower but catch m
 class TestFullMailFlow:
     def test_domain_to_mailbox_lifecycle(self, client, api_key_header):
         # Create org
-        client.post("/api/v1/add/organization", headers=api_key_header, json={
-            "id": "lifecycle-test", "name": "Lifecycle Test"
-        })
+        client.post(
+            "/api/v1/add/organization",
+            headers=api_key_header,
+            json={"id": "lifecycle-test", "name": "Lifecycle Test"},
+        )
 
         # Create domain
-        client.post("/api/v1/add/domain", headers=api_key_header, json={
-            "domain": "lifecycle.test", "organization_id": "lifecycle-test"
-        })
+        client.post(
+            "/api/v1/add/domain",
+            headers=api_key_header,
+            json={"domain": "lifecycle.test", "organization_id": "lifecycle-test"},
+        )
 
         # Create mailbox
-        resp = client.post("/api/v1/add/mailbox", headers=api_key_header, json={
-            "local_part": "user", "domain": "lifecycle.test",
-            "password": "testpass123", "name": "Test User"
-        })
+        resp = client.post(
+            "/api/v1/add/mailbox",
+            headers=api_key_header,
+            json={
+                "local_part": "user",
+                "domain": "lifecycle.test",
+                "password": "testpass123",
+                "name": "Test User",
+            },
+        )
         assert resp.status_code == 200
 
         # Verify mailbox exists

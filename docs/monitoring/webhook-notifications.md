@@ -172,6 +172,7 @@ import json
 
 app = FastAPI()
 
+
 @app.post("/api/alerts")
 async def receive_alert(request: Request):
     payload = await request.json()

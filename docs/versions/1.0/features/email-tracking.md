@@ -156,29 +156,22 @@ For custom implementations, you can manually add tracking:
     
     ```python
     import requests
-    
+
     # Send email with tracking
     response = requests.post(
-        'https://mail.yourdomain.com/api/v1/emails',
-        headers={
-            'Authorization': 'Bearer YOUR_API_KEY',
-            'Content-Type': 'application/json'
-        },
+        "https://mail.yourdomain.com/api/v1/emails",
+        headers={"Authorization": "Bearer YOUR_API_KEY", "Content-Type": "application/json"},
         json={
-            'from': 'sender@yourdomain.com',
-            'to': ['recipient@example.com'],
-            'subject': 'Test Email',
-            'html': '<p>Hello World! <a href="https://example.com">Click here</a></p>',
-            'tracking': {
-                'opens': True,
-                'clicks': True,
-                'delivery': True
-            }
-        }
+            "from": "sender@yourdomain.com",
+            "to": ["recipient@example.com"],
+            "subject": "Test Email",
+            "html": '<p>Hello World! <a href="https://example.com">Click here</a></p>',
+            "tracking": {"opens": True, "clicks": True, "delivery": True},
+        },
     )
-    
+
     # Get tracking ID from response
-    tracking_id = response.json()['tracking_id']
+    tracking_id = response.json()["tracking_id"]
     print(f"Email sent with tracking ID: {tracking_id}")
     ```
 
@@ -188,18 +181,18 @@ For custom implementations, you can manually add tracking:
     import smtplib
     from email.mime.text import MIMEText
     from email.mime.multipart import MIMEMultipart
-    
+
     # Create message with tracking headers
-    msg = MIMEMultipart('alternative')
-    msg['From'] = 'sender@yourdomain.com'
-    msg['To'] = 'recipient@example.com'
-    msg['Subject'] = 'Test Email'
-    
+    msg = MIMEMultipart("alternative")
+    msg["From"] = "sender@yourdomain.com"
+    msg["To"] = "recipient@example.com"
+    msg["Subject"] = "Test Email"
+
     # Add tracking headers
-    msg['X-Tracking-Opens'] = 'yes'
-    msg['X-Tracking-Clicks'] = 'yes'
-    msg['X-Tracking-ID'] = 'custom-tracking-id-123'
-    
+    msg["X-Tracking-Opens"] = "yes"
+    msg["X-Tracking-Clicks"] = "yes"
+    msg["X-Tracking-ID"] = "custom-tracking-id-123"
+
     # Email content
     html = """
     <html>
@@ -209,13 +202,13 @@ For custom implementations, you can manually add tracking:
     </body>
     </html>
     """
-    
-    msg.attach(MIMEText(html, 'html'))
-    
+
+    msg.attach(MIMEText(html, "html"))
+
     # Send via SMTP
-    with smtplib.SMTP('mail.yourdomain.com', 587) as server:
+    with smtplib.SMTP("mail.yourdomain.com", 587) as server:
         server.starttls()
-        server.login('username', 'password')
+        server.login("username", "password")
         server.send_message(msg)
     ```
 
@@ -430,25 +423,22 @@ import hmac
 import hashlib
 import json
 
+
 def verify_webhook(payload, signature, secret):
     """
     Verify webhook signature
     """
     expected_signature = hmac.new(
-        secret.encode('utf-8'),
-        payload.encode('utf-8'),
-        hashlib.sha256
+        secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256
     ).hexdigest()
-    
-    return hmac.compare_digest(
-        f"sha256={expected_signature}",
-        signature
-    )
+
+    return hmac.compare_digest(f"sha256={expected_signature}", signature)
+
 
 # Example usage
 webhook_secret = "your_webhook_secret"
 webhook_payload = request.body
-webhook_signature = request.headers.get('X-Webhook-Signature')
+webhook_signature = request.headers.get("X-Webhook-Signature")
 
 if verify_webhook(webhook_payload, webhook_signature, webhook_secret):
     # Process webhook data

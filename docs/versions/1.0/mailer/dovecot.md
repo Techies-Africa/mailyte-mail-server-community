@@ -239,48 +239,55 @@ import json
 import logging
 from datetime import datetime, timedelta
 
+
 class DovecotAuthPolicy:
     def __init__(self):
         self.db_config = {
-            'host': os.getenv('DB_HOST', 'localhost'),
-            'user': os.getenv('DB_USER', 'mailserver'),
-            'password': os.getenv('DB_PASSWORD'),
-            'database': os.getenv('DB_NAME', 'mailserver')
+            "host": os.getenv("DB_HOST", "localhost"),
+            "user": os.getenv("DB_USER", "mailserver"),
+            "password": os.getenv("DB_PASSWORD"),
+            "database": os.getenv("DB_NAME", "mailserver"),
         }
-        self.webhook_url = os.getenv('WEBHOOK_URL', '')
-        self.max_failed_attempts = int(os.getenv('MAX_FAILED_ATTEMPTS', 5))
-        self.lockout_duration = int(os.getenv('LOCKOUT_DURATION', 900))  # 15 minutes
+        self.webhook_url = os.getenv("WEBHOOK_URL", "")
+        self.max_failed_attempts = int(os.getenv("MAX_FAILED_ATTEMPTS", 5))
+        self.lockout_duration = int(os.getenv("LOCKOUT_DURATION", 900))  # 15 minutes
 
     def authenticate_user(self, username, password, client_ip):
         """Authenticate user with enhanced security policies"""
         try:
             # Check if account is locked
             if self.is_account_locked(username, client_ip):
-                self.log_auth_event(username, client_ip, 'locked_account')
+                self.log_auth_event(username, client_ip, "locked_account")
                 return False
-            
+
             # Verify credentials
             if self.verify_credentials(username, password):
                 # Reset failed attempts on successful login
                 self.reset_failed_attempts(username, client_ip)
-                self.log_auth_event(username, client_ip, 'successful_login')
-                self.send_webhook_notification('login_success', {
-                    'username': username,
-                    'ip': client_ip,
-                    'timestamp': datetime.utcnow().isoformat()
-                })
+                self.log_auth_event(username, client_ip, "successful_login")
+                self.send_webhook_notification(
+                    "login_success",
+                    {
+                        "username": username,
+                        "ip": client_ip,
+                        "timestamp": datetime.utcnow().isoformat(),
+                    },
+                )
                 return True
             else:
                 # Increment failed attempts
                 self.increment_failed_attempts(username, client_ip)
-                self.log_auth_event(username, client_ip, 'failed_login')
-                self.send_webhook_notification('login_failure', {
-                    'username': username,
-                    'ip': client_ip,
-                    'timestamp': datetime.utcnow().isoformat()
-                })
+                self.log_auth_event(username, client_ip, "failed_login")
+                self.send_webhook_notification(
+                    "login_failure",
+                    {
+                        "username": username,
+                        "ip": client_ip,
+                        "timestamp": datetime.utcnow().isoformat(),
+                    },
+                )
                 return False
-                
+
         except Exception as e:
             logging.error(f"Authentication error: {e}")
             return False
@@ -290,22 +297,25 @@ class DovecotAuthPolicy:
         try:
             conn = mysql.connector.connect(**self.db_config)
             cursor = conn.cursor()
-            
-            cursor.execute("""
+
+            cursor.execute(
+                """
                 SELECT password, active FROM mailboxes 
                 WHERE email = %s
-            """, (username,))
-            
+            """,
+                (username,),
+            )
+
             result = cursor.fetchone()
-            
+
             if not result or not result[1]:  # User not found or inactive
                 return False
-            
+
             stored_password = result[0]
-            
+
             # Verify password (supports multiple hash schemes)
             return self.verify_password(password, stored_password)
-            
+
         except Exception as e:
             logging.error(f"Credential verification failed: {e}")
             return False
@@ -315,14 +325,14 @@ class DovecotAuthPolicy:
 
     def verify_password(self, plain_password, stored_password):
         """Verify password against stored hash"""
-        if stored_password.startswith('{SHA512-CRYPT}'):
+        if stored_password.startswith("{SHA512-CRYPT}"):
             hash_value = stored_password[13:]
             return crypt.crypt(plain_password, hash_value) == hash_value
-        elif stored_password.startswith('{SHA256}'):
+        elif stored_password.startswith("{SHA256}"):
             hash_value = stored_password[8:]
             computed_hash = hashlib.sha256(plain_password.encode()).hexdigest()
             return computed_hash == hash_value
-        elif stored_password.startswith('{MD5}'):
+        elif stored_password.startswith("{MD5}"):
             hash_value = stored_password[5:]
             computed_hash = hashlib.md5(plain_password.encode()).hexdigest()
             return computed_hash == hash_value
@@ -335,20 +345,23 @@ class DovecotAuthPolicy:
         try:
             conn = mysql.connector.connect(**self.db_config)
             cursor = conn.cursor()
-            
+
             # Check failed attempts within lockout duration
             lockout_time = datetime.utcnow() - timedelta(seconds=self.lockout_duration)
-            
-            cursor.execute("""
+
+            cursor.execute(
+                """
                 SELECT COUNT(*) FROM auth_failures 
                 WHERE (username = %s OR client_ip = %s) 
                 AND attempt_time > %s
-            """, (username, client_ip, lockout_time))
-            
+            """,
+                (username, client_ip, lockout_time),
+            )
+
             failed_count = cursor.fetchone()[0]
-            
+
             return failed_count >= self.max_failed_attempts
-            
+
         except Exception as e:
             logging.error(f"Lock check failed: {e}")
             return False
@@ -361,14 +374,17 @@ class DovecotAuthPolicy:
         try:
             conn = mysql.connector.connect(**self.db_config)
             cursor = conn.cursor()
-            
-            cursor.execute("""
+
+            cursor.execute(
+                """
                 INSERT INTO auth_failures (username, client_ip, attempt_time)
                 VALUES (%s, %s, NOW())
-            """, (username, client_ip))
-            
+            """,
+                (username, client_ip),
+            )
+
             conn.commit()
-            
+
         except Exception as e:
             logging.error(f"Failed to record auth failure: {e}")
         finally:
@@ -380,14 +396,17 @@ class DovecotAuthPolicy:
         try:
             conn = mysql.connector.connect(**self.db_config)
             cursor = conn.cursor()
-            
-            cursor.execute("""
+
+            cursor.execute(
+                """
                 DELETE FROM auth_failures 
                 WHERE username = %s OR client_ip = %s
-            """, (username, client_ip))
-            
+            """,
+                (username, client_ip),
+            )
+
             conn.commit()
-            
+
         except Exception as e:
             logging.error(f"Failed to reset auth failures: {e}")
         finally:
@@ -399,14 +418,17 @@ class DovecotAuthPolicy:
         try:
             conn = mysql.connector.connect(**self.db_config)
             cursor = conn.cursor()
-            
-            cursor.execute("""
+
+            cursor.execute(
+                """
                 INSERT INTO auth_log (username, client_ip, event_type, event_time)
                 VALUES (%s, %s, %s, NOW())
-            """, (username, client_ip, event_type))
-            
+            """,
+                (username, client_ip, event_type),
+            )
+
             conn.commit()
-            
+
         except Exception as e:
             logging.error(f"Failed to log auth event: {e}")
         finally:
@@ -417,37 +439,38 @@ class DovecotAuthPolicy:
         """Send webhook notification for authentication events"""
         if not self.webhook_url:
             return
-        
+
         payload = {
-            'event': event_type,
-            'service': 'dovecot',
-            'timestamp': datetime.utcnow().isoformat(),
-            'data': data
+            "event": event_type,
+            "service": "dovecot",
+            "timestamp": datetime.utcnow().isoformat(),
+            "data": data,
         }
-        
+
         try:
             response = requests.post(
                 self.webhook_url,
                 json=payload,
                 timeout=10,
-                headers={'Content-Type': 'application/json'}
+                headers={"Content-Type": "application/json"},
             )
-            
+
             if response.status_code != 200:
                 logging.warning(f"Webhook notification failed: {response.status_code}")
-                
+
         except Exception as e:
             logging.error(f"Webhook notification error: {e}")
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     # This script is called by Dovecot auth process
     auth_policy = DovecotAuthPolicy()
-    
+
     # Parse environment variables set by Dovecot
-    username = os.getenv('USER', '')
-    password = os.getenv('PASS', '')
-    client_ip = os.getenv('REMOTE_IP', '')
-    
+    username = os.getenv("USER", "")
+    password = os.getenv("PASS", "")
+    client_ip = os.getenv("REMOTE_IP", "")
+
     # Perform authentication
     if auth_policy.authenticate_user(username, password, client_ip):
         sys.exit(0)  # Success
@@ -526,14 +549,15 @@ import json
 import mysql.connector
 from datetime import datetime
 
+
 class QuotaNotifier:
     def __init__(self):
-        self.webhook_url = os.getenv('WEBHOOK_URL', '')
+        self.webhook_url = os.getenv("WEBHOOK_URL", "")
         self.db_config = {
-            'host': os.getenv('DB_HOST', 'localhost'),
-            'user': os.getenv('DB_USER', 'mailserver'),
-            'password': os.getenv('DB_PASSWORD'),
-            'database': os.getenv('DB_NAME', 'mailserver')
+            "host": os.getenv("DB_HOST", "localhost"),
+            "user": os.getenv("DB_USER", "mailserver"),
+            "password": os.getenv("DB_PASSWORD"),
+            "database": os.getenv("DB_NAME", "mailserver"),
         }
 
     def send_quota_notification(self, username, usage_percent):
@@ -541,38 +565,38 @@ class QuotaNotifier:
         try:
             # Get additional user information
             user_info = self.get_user_info(username)
-            
+
             payload = {
-                'event': 'quota_warning',
-                'service': 'dovecot',
-                'timestamp': datetime.utcnow().isoformat(),
-                'data': {
-                    'username': username,
-                    'usage_percent': int(usage_percent),
-                    'quota_mb': user_info.get('quota_mb', 0),
-                    'used_mb': user_info.get('used_mb', 0),
-                    'domain': username.split('@')[1] if '@' in username else '',
-                    'warning_level': self.get_warning_level(int(usage_percent))
-                }
+                "event": "quota_warning",
+                "service": "dovecot",
+                "timestamp": datetime.utcnow().isoformat(),
+                "data": {
+                    "username": username,
+                    "usage_percent": int(usage_percent),
+                    "quota_mb": user_info.get("quota_mb", 0),
+                    "used_mb": user_info.get("used_mb", 0),
+                    "domain": username.split("@")[1] if "@" in username else "",
+                    "warning_level": self.get_warning_level(int(usage_percent)),
+                },
             }
-            
+
             # Send to webhook endpoint
             if self.webhook_url:
                 response = requests.post(
                     self.webhook_url,
                     json=payload,
                     timeout=10,
-                    headers={'Content-Type': 'application/json'}
+                    headers={"Content-Type": "application/json"},
                 )
-                
+
                 if response.status_code == 200:
                     print(f"Quota notification sent for {username}")
                 else:
                     print(f"Webhook failed with status {response.status_code}")
-            
+
             # Update database with quota usage
             self.update_quota_usage(username, usage_percent, user_info)
-            
+
         except Exception as e:
             print(f"Quota notification failed: {e}")
 
@@ -581,24 +605,24 @@ class QuotaNotifier:
         try:
             conn = mysql.connector.connect(**self.db_config)
             cursor = conn.cursor(dictionary=True)
-            
-            cursor.execute("""
+
+            cursor.execute(
+                """
                 SELECT quota, 
                        ROUND(quota * %s / 100, 2) as used_mb
                 FROM mailboxes 
                 WHERE email = %s
-            """, (int(sys.argv[2]), username))
-            
+            """,
+                (int(sys.argv[2]), username),
+            )
+
             result = cursor.fetchone()
-            
+
             if result:
-                return {
-                    'quota_mb': result['quota'],
-                    'used_mb': result['used_mb']
-                }
-            
+                return {"quota_mb": result["quota"], "used_mb": result["used_mb"]}
+
             return {}
-            
+
         except Exception as e:
             print(f"Failed to get user info: {e}")
             return {}
@@ -609,19 +633,20 @@ class QuotaNotifier:
     def get_warning_level(self, usage_percent):
         """Determine warning level based on usage"""
         if usage_percent >= 95:
-            return 'critical'
+            return "critical"
         elif usage_percent >= 80:
-            return 'warning'
+            return "warning"
         else:
-            return 'info'
+            return "info"
 
     def update_quota_usage(self, username, usage_percent, user_info):
         """Update quota usage statistics"""
         try:
             conn = mysql.connector.connect(**self.db_config)
             cursor = conn.cursor()
-            
-            cursor.execute("""
+
+            cursor.execute(
+                """
                 INSERT INTO quota_usage_log 
                 (username, usage_percent, quota_mb, used_mb, logged_at)
                 VALUES (%s, %s, %s, %s, NOW())
@@ -629,29 +654,32 @@ class QuotaNotifier:
                 usage_percent = VALUES(usage_percent),
                 used_mb = VALUES(used_mb),
                 logged_at = NOW()
-            """, (
-                username, 
-                usage_percent, 
-                user_info.get('quota_mb', 0),
-                user_info.get('used_mb', 0)
-            ))
-            
+            """,
+                (
+                    username,
+                    usage_percent,
+                    user_info.get("quota_mb", 0),
+                    user_info.get("used_mb", 0),
+                ),
+            )
+
             conn.commit()
-            
+
         except Exception as e:
             print(f"Failed to update quota usage: {e}")
         finally:
             if conn:
                 conn.close()
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     if len(sys.argv) != 3:
         print("Usage: quota-webhook-notify.py <username> <usage_percent>")
         sys.exit(1)
-    
+
     username = sys.argv[1]
     usage_percent = sys.argv[2]
-    
+
     notifier = QuotaNotifier()
     notifier.send_quota_notification(username, usage_percent)
 ```
@@ -881,58 +909,61 @@ import mysql.connector
 import os
 from datetime import datetime
 
+
 class DovecotMetrics:
     def __init__(self):
         self.db_config = {
-            'host': os.getenv('DB_HOST', 'localhost'),
-            'user': os.getenv('DB_USER', 'mailserver'),
-            'password': os.getenv('DB_PASSWORD'),
-            'database': os.getenv('DB_NAME', 'mailserver')
+            "host": os.getenv("DB_HOST", "localhost"),
+            "user": os.getenv("DB_USER", "mailserver"),
+            "password": os.getenv("DB_PASSWORD"),
+            "database": os.getenv("DB_NAME", "mailserver"),
         }
 
     def collect_metrics(self):
         """Collect comprehensive Dovecot metrics"""
         metrics = {
-            'timestamp': datetime.utcnow().isoformat(),
-            'service': 'dovecot',
-            'connections': self.get_connection_stats(),
-            'authentication': self.get_auth_stats(),
-            'quota': self.get_quota_stats(),
-            'performance': self.get_performance_stats(),
-            'errors': self.get_error_stats()
+            "timestamp": datetime.utcnow().isoformat(),
+            "service": "dovecot",
+            "connections": self.get_connection_stats(),
+            "authentication": self.get_auth_stats(),
+            "quota": self.get_quota_stats(),
+            "performance": self.get_performance_stats(),
+            "errors": self.get_error_stats(),
         }
-        
+
         return metrics
 
     def get_connection_stats(self):
         """Get connection statistics"""
         try:
             # Count active IMAP connections
-            imap_result = subprocess.run(['ss', '-tn', 'src', ':993'], 
-                                       capture_output=True, text=True)
-            imap_connections = len(imap_result.stdout.strip().split('\n')) - 1
-            
+            imap_result = subprocess.run(
+                ["ss", "-tn", "src", ":993"], capture_output=True, text=True
+            )
+            imap_connections = len(imap_result.stdout.strip().split("\n")) - 1
+
             # Count active POP3 connections
-            pop3_result = subprocess.run(['ss', '-tn', 'src', ':995'], 
-                                       capture_output=True, text=True)
-            pop3_connections = len(pop3_result.stdout.strip().split('\n')) - 1
-            
+            pop3_result = subprocess.run(
+                ["ss", "-tn", "src", ":995"], capture_output=True, text=True
+            )
+            pop3_connections = len(pop3_result.stdout.strip().split("\n")) - 1
+
             return {
-                'imap_active': max(0, imap_connections),
-                'pop3_active': max(0, pop3_connections),
-                'total_active': max(0, imap_connections + pop3_connections)
+                "imap_active": max(0, imap_connections),
+                "pop3_active": max(0, pop3_connections),
+                "total_active": max(0, imap_connections + pop3_connections),
             }
-            
+
         except Exception as e:
             print(f"Failed to get connection stats: {e}")
-            return {'imap_active': 0, 'pop3_active': 0, 'total_active': 0}
+            return {"imap_active": 0, "pop3_active": 0, "total_active": 0}
 
     def get_auth_stats(self):
         """Get authentication statistics"""
         try:
             conn = mysql.connector.connect(**self.db_config)
             cursor = conn.cursor()
-            
+
             # Get authentication stats for last hour
             cursor.execute("""
                 SELECT 
@@ -942,19 +973,26 @@ class DovecotMetrics:
                 FROM auth_log 
                 WHERE event_time > DATE_SUB(NOW(), INTERVAL 1 HOUR)
             """)
-            
+
             result = cursor.fetchone()
-            
+
             return {
-                'successful_logins': result[0] or 0,
-                'failed_logins': result[1] or 0,
-                'unique_users': result[2] or 0,
-                'success_rate': (result[0] / (result[0] + result[1]) * 100) if (result[0] or result[1]) else 0
+                "successful_logins": result[0] or 0,
+                "failed_logins": result[1] or 0,
+                "unique_users": result[2] or 0,
+                "success_rate": (result[0] / (result[0] + result[1]) * 100)
+                if (result[0] or result[1])
+                else 0,
             }
-            
+
         except Exception as e:
             print(f"Failed to get auth stats: {e}")
-            return {'successful_logins': 0, 'failed_logins': 0, 'unique_users': 0, 'success_rate': 0}
+            return {
+                "successful_logins": 0,
+                "failed_logins": 0,
+                "unique_users": 0,
+                "success_rate": 0,
+            }
         finally:
             if conn:
                 conn.close()
@@ -964,7 +1002,7 @@ class DovecotMetrics:
         try:
             conn = mysql.connector.connect(**self.db_config)
             cursor = conn.cursor()
-            
+
             cursor.execute("""
                 SELECT 
                     COUNT(*) as total_mailboxes,
@@ -974,19 +1012,24 @@ class DovecotMetrics:
                 FROM mailboxes 
                 WHERE active = 1
             """)
-            
+
             result = cursor.fetchone()
-            
+
             return {
-                'total_mailboxes': result[0] or 0,
-                'avg_quota_mb': round(result[1] or 0, 2),
-                'total_quota_mb': result[2] or 0,
-                'quota_enabled': result[3] or 0
+                "total_mailboxes": result[0] or 0,
+                "avg_quota_mb": round(result[1] or 0, 2),
+                "total_quota_mb": result[2] or 0,
+                "quota_enabled": result[3] or 0,
             }
-            
+
         except Exception as e:
             print(f"Failed to get quota stats: {e}")
-            return {'total_mailboxes': 0, 'avg_quota_mb': 0, 'total_quota_mb': 0, 'quota_enabled': 0}
+            return {
+                "total_mailboxes": 0,
+                "avg_quota_mb": 0,
+                "total_quota_mb": 0,
+                "quota_enabled": 0,
+            }
         finally:
             if conn:
                 conn.close()
@@ -995,49 +1038,50 @@ class DovecotMetrics:
         """Get performance statistics"""
         try:
             # Get system load
-            with open('/proc/loadavg', 'r') as f:
+            with open("/proc/loadavg", "r") as f:
                 load_avg = f.read().strip().split()
-            
+
             # Get memory usage
-            with open('/proc/meminfo', 'r') as f:
+            with open("/proc/meminfo", "r") as f:
                 meminfo = f.read()
-            
-            mem_total = int([line for line in meminfo.split('\n') if 'MemTotal' in line][0].split()[1])
-            mem_available = int([line for line in meminfo.split('\n') if 'MemAvailable' in line][0].split()[1])
+
+            mem_total = int(
+                [line for line in meminfo.split("\n") if "MemTotal" in line][0].split()[1]
+            )
+            mem_available = int(
+                [line for line in meminfo.split("\n") if "MemAvailable" in line][0].split()[1]
+            )
             mem_usage = (mem_total - mem_available) / mem_total * 100
-            
+
             return {
-                'load_1min': float(load_avg[0]),
-                'load_5min': float(load_avg[1]),
-                'load_15min': float(load_avg[2]),
-                'memory_usage_percent': round(mem_usage, 2)
+                "load_1min": float(load_avg[0]),
+                "load_5min": float(load_avg[1]),
+                "load_15min": float(load_avg[2]),
+                "memory_usage_percent": round(mem_usage, 2),
             }
-            
+
         except Exception as e:
             print(f"Failed to get performance stats: {e}")
-            return {'load_1min': 0, 'load_5min': 0, 'load_15min': 0, 'memory_usage_percent': 0}
+            return {"load_1min": 0, "load_5min": 0, "load_15min": 0, "memory_usage_percent": 0}
 
     def get_error_stats(self):
         """Get error statistics from logs"""
         try:
             # Count errors in last hour from dovecot logs
-            result = subprocess.run([
-                'grep', '-c', 'ERROR',
-                '/var/log/dovecot.log'
-            ], capture_output=True, text=True)
-            
+            result = subprocess.run(
+                ["grep", "-c", "ERROR", "/var/log/dovecot.log"], capture_output=True, text=True
+            )
+
             error_count = int(result.stdout.strip()) if result.returncode == 0 else 0
-            
-            return {
-                'error_count_1h': error_count,
-                'last_check': datetime.utcnow().isoformat()
-            }
-            
+
+            return {"error_count_1h": error_count, "last_check": datetime.utcnow().isoformat()}
+
         except Exception as e:
             print(f"Failed to get error stats: {e}")
-            return {'error_count_1h': 0, 'last_check': datetime.utcnow().isoformat()}
+            return {"error_count_1h": 0, "last_check": datetime.utcnow().isoformat()}
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     metrics_collector = DovecotMetrics()
     metrics = metrics_collector.collect_metrics()
     print(json.dumps(metrics, indent=2))

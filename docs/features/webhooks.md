@@ -43,12 +43,9 @@ Every webhook payload is signed with your organization's webhook secret using HM
 import hmac
 import hashlib
 
+
 def verify_webhook(payload_bytes, signature, secret):
-    expected = hmac.new(
-        secret.encode('utf-8'),
-        payload_bytes,
-        hashlib.sha256
-    ).hexdigest()
+    expected = hmac.new(secret.encode("utf-8"), payload_bytes, hashlib.sha256).hexdigest()
     return hmac.compare_digest(f"sha256={expected}", signature)
 ```
 

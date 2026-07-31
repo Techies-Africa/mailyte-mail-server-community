@@ -129,36 +129,30 @@ POST   /api/v1/certificates/{cert_id}/renew
 def process_outbound_email(email_data):
     # Check encryption policy
     policy_result = encryption_service.check_policy(email_data)
-    
+
     if policy_result.requires_encryption:
         # Get recipient keys
-        recipient_keys = key_service.get_public_keys(
-            email_data['recipients']
-        )
-        
+        recipient_keys = key_service.get_public_keys(email_data["recipients"])
+
         # Encrypt email content
         encrypted_content = encryption_service.encrypt(
-            content=email_data['body'],
+            content=email_data["body"],
             recipient_keys=recipient_keys,
-            method=policy_result.encryption_method
+            method=policy_result.encryption_method,
         )
-        
+
         # Add digital signature
         if policy_result.requires_signature:
             signature = encryption_service.sign(
                 content=encrypted_content,
-                sender_key=key_service.get_private_key(
-                    email_data['sender']
-                )
+                sender_key=key_service.get_private_key(email_data["sender"]),
             )
-            encrypted_content = encryption_service.attach_signature(
-                encrypted_content, signature
-            )
-        
-        email_data['body'] = encrypted_content
-        email_data['is_encrypted'] = True
-        email_data['encryption_method'] = policy_result.encryption_method
-    
+            encrypted_content = encryption_service.attach_signature(encrypted_content, signature)
+
+        email_data["body"] = encrypted_content
+        email_data["is_encrypted"] = True
+        email_data["encryption_method"] = policy_result.encryption_method
+
     return email_data
 ```
 
@@ -166,26 +160,25 @@ def process_outbound_email(email_data):
 ```python
 def handle_key_exchange(sender, recipient):
     """Automatic key exchange for new contacts"""
-    
+
     # Check if we have recipient's public key
     recipient_key = key_service.get_public_key(recipient)
-    
+
     if not recipient_key:
         # Request key from recipient's key server
         key_request = KeyExchangeRequest(
             requester=sender,
             target=recipient,
-            method='pgp',
-            key_server=discover_key_server(recipient)
+            method="pgp",
+            key_server=discover_key_server(recipient),
         )
-        
+
         # Send key request
         key_exchange_service.request_key(key_request)
-        
+
         # Also publish our public key
         key_exchange_service.publish_key(
-            sender_key=key_service.get_public_key(sender),
-            target_server=key_request.key_server
+            sender_key=key_service.get_public_key(sender), target_server=key_request.key_server
         )
 ```
 
@@ -196,35 +189,32 @@ def handle_key_exchange(sender, recipient):
 class PGPEncryption:
     def __init__(self, gnupg_home="/var/lib/mailserver/gnupg"):
         self.gpg = gnupg.GPG(gnupghome=gnupg_home)
-    
+
     def encrypt_email(self, content, recipient_keys, sender_key=None):
         """Encrypt email using PGP"""
         encrypted_data = self.gpg.encrypt(
             content,
             recipients=[key.fingerprint for key in recipient_keys],
             sign=sender_key.fingerprint if sender_key else None,
-            always_trust=True
+            always_trust=True,
         )
-        
+
         if not encrypted_data.ok:
             raise EncryptionError(f"PGP encryption failed: {encrypted_data.stderr}")
-        
+
         return str(encrypted_data)
-    
+
     def decrypt_email(self, encrypted_content, passphrase=None):
         """Decrypt PGP encrypted email"""
-        decrypted_data = self.gpg.decrypt(
-            encrypted_content,
-            passphrase=passphrase
-        )
-        
+        decrypted_data = self.gpg.decrypt(encrypted_content, passphrase=passphrase)
+
         if not decrypted_data.ok:
             raise DecryptionError(f"PGP decryption failed: {decrypted_data.stderr}")
-        
+
         return {
-            'content': str(decrypted_data),
-            'signature_valid': decrypted_data.valid,
-            'signature_fingerprint': decrypted_data.fingerprint
+            "content": str(decrypted_data),
+            "signature_valid": decrypted_data.valid,
+            "signature_fingerprint": decrypted_data.fingerprint,
         }
 ```
 
@@ -233,40 +223,40 @@ class PGPEncryption:
 class SMIMEEncryption:
     def __init__(self, cert_store="/var/lib/mailserver/certificates"):
         self.cert_store = cert_store
-    
+
     def encrypt_email(self, content, recipient_certificates):
         """Encrypt email using S/MIME"""
         from M2Crypto import SMIME, X509, BIO
-        
+
         s = SMIME.SMIME()
-        
+
         # Load recipient certificates
         sk = X509.X509_Stack()
         for cert in recipient_certificates:
             x509 = X509.load_cert_string(cert.certificate)
             sk.push(x509)
-        
+
         s.set_x509_stack(sk)
-        s.set_cipher(SMIME.Cipher('aes_256_cbc'))
-        
+        s.set_cipher(SMIME.Cipher("aes_256_cbc"))
+
         # Encrypt
         msg = BIO.MemoryBuffer(content.encode())
         p7 = s.encrypt(msg)
-        
+
         return p7
-    
+
     def sign_email(self, content, sender_certificate, private_key):
         """Sign email using S/MIME"""
         from M2Crypto import SMIME, X509, BIO, EVP
-        
+
         s = SMIME.SMIME()
-        
+
         # Load certificate and private key
         s.load_key(private_key, sender_certificate)
-        
+
         msg = BIO.MemoryBuffer(content.encode())
         p7 = s.sign(msg, SMIME.PKCS7_DETACHED)
-        
+
         return p7
 ```
 
@@ -300,24 +290,20 @@ class SMIMEEncryption:
 class HSMKeyManager:
     def __init__(self, hsm_config):
         self.hsm = HSMClient(hsm_config)
-    
+
     def generate_key_pair(self, key_spec):
         """Generate key pair in HSM"""
         key_id = self.hsm.generate_keypair(
             algorithm=key_spec.algorithm,
             key_size=key_spec.size,
-            usage=['encrypt', 'decrypt', 'sign', 'verify']
+            usage=["encrypt", "decrypt", "sign", "verify"],
         )
-        
+
         # Export public key for distribution
         public_key = self.hsm.export_public_key(key_id)
-        
-        return {
-            'key_id': key_id,
-            'public_key': public_key,
-            'hsm_backed': True
-        }
-    
+
+        return {"key_id": key_id, "public_key": public_key, "hsm_backed": True}
+
     def sign_with_hsm(self, content_hash, key_id):
         """Sign using HSM-stored private key"""
         return self.hsm.sign(content_hash, key_id)

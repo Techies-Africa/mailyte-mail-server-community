@@ -13,11 +13,12 @@ Features:
 - Service-specific log files in organized directory structure
 """
 
-import os
 import logging
 import logging.handlers
+import os
 from datetime import datetime
 from pathlib import Path
+
 
 class ServiceLogger:
     """
@@ -27,7 +28,7 @@ class ServiceLogger:
     rotation and formatting.
     """
 
-    def __init__(self, service_name: str, log_level: str = 'INFO'):
+    def __init__(self, service_name: str, log_level: str = "INFO"):
         """
         Initialize logger for a specific service.
 
@@ -47,7 +48,7 @@ class ServiceLogger:
         """Configure logging handlers and formatters."""
 
         # Create logs directory structure
-        log_dir = Path(__file__).parent.parent / 'logs' / self.service_name
+        log_dir = Path(__file__).parent.parent / "logs" / self.service_name
         log_dir.mkdir(parents=True, exist_ok=True)
 
         # Set logger level
@@ -55,13 +56,12 @@ class ServiceLogger:
 
         # Create formatters
         detailed_formatter = logging.Formatter(
-            fmt='%(asctime)s | %(name)s | %(levelname)s | %(module)s:%(lineno)d | %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
+            fmt="%(asctime)s | %(name)s | %(levelname)s | %(module)s:%(lineno)d | %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
         )
 
         simple_formatter = logging.Formatter(
-            fmt='%(asctime)s | %(levelname)s | %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
+            fmt="%(asctime)s | %(levelname)s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
         )
 
         # Console handler (INFO and above)
@@ -71,46 +71,45 @@ class ServiceLogger:
         self.logger.addHandler(console_handler)
 
         # Main log file handler (all messages)
-        main_log_file = log_dir / f'{self.service_name}.log'
+        main_log_file = log_dir / f"{self.service_name}.log"
         main_handler = logging.handlers.RotatingFileHandler(
             filename=main_log_file,
             maxBytes=10 * 1024 * 1024,  # 10MB
             backupCount=5,
-            encoding='utf-8'
+            encoding="utf-8",
         )
         main_handler.setLevel(self.log_level)
         main_handler.setFormatter(detailed_formatter)
         self.logger.addHandler(main_handler)
 
         # Error log file handler (WARNING and above)
-        error_log_file = log_dir / f'{self.service_name}_errors.log'
+        error_log_file = log_dir / f"{self.service_name}_errors.log"
         error_handler = logging.handlers.RotatingFileHandler(
             filename=error_log_file,
             maxBytes=5 * 1024 * 1024,  # 5MB
             backupCount=3,
-            encoding='utf-8'
+            encoding="utf-8",
         )
         error_handler.setLevel(logging.WARNING)
         error_handler.setFormatter(detailed_formatter)
         self.logger.addHandler(error_handler)
 
         # Performance log file handler (for timing and metrics)
-        perf_log_file = log_dir / f'{self.service_name}_performance.log'
+        perf_log_file = log_dir / f"{self.service_name}_performance.log"
         self.perf_handler = logging.handlers.RotatingFileHandler(
             filename=perf_log_file,
             maxBytes=5 * 1024 * 1024,  # 5MB
             backupCount=3,
-            encoding='utf-8'
+            encoding="utf-8",
         )
         self.perf_handler.setLevel(logging.INFO)
         perf_formatter = logging.Formatter(
-            fmt='%(asctime)s | PERF | %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S'
+            fmt="%(asctime)s | PERF | %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
         )
         self.perf_handler.setFormatter(perf_formatter)
 
         # Create performance logger
-        self.perf_logger = logging.getLogger(f'{self.service_name}_performance')
+        self.perf_logger = logging.getLogger(f"{self.service_name}_performance")
         self.perf_logger.setLevel(logging.INFO)
         self.perf_logger.addHandler(self.perf_handler)
         self.perf_logger.propagate = False
@@ -145,8 +144,15 @@ class ServiceLogger:
 
         self.perf_logger.info(perf_msg)
 
-    def log_request(self, method: str, path: str, status_code: int, 
-                   duration: float, user_agent: str = None, ip: str = None):
+    def log_request(
+        self,
+        method: str,
+        path: str,
+        status_code: int,
+        duration: float,
+        user_agent: str = None,
+        ip: str = None,
+    ):
         """
         Log HTTP request details.
 
@@ -166,10 +172,8 @@ class ServiceLogger:
 
         extra_str = f" | {' | '.join(extras)}" if extras else ""
 
-        self.log_performance(
-            f"HTTP {method} {path} -> {status_code}",
-            duration=duration
-        )
+        self.log_performance(f"HTTP {method} {path} -> {status_code}", duration=duration)
+
 
 def get_service_logger(service_name: str, log_level: str = None) -> logging.Logger:
     """
@@ -183,10 +187,11 @@ def get_service_logger(service_name: str, log_level: str = None) -> logging.Logg
         Configured logger instance
     """
     if log_level is None:
-        log_level = os.getenv('LOG_LEVEL', 'INFO')
+        log_level = os.getenv("LOG_LEVEL", "INFO")
 
     service_logger = ServiceLogger(service_name, log_level)
     return service_logger.get_logger()
+
 
 def get_performance_logger(service_name: str) -> tuple:
     """
@@ -200,6 +205,7 @@ def get_performance_logger(service_name: str) -> tuple:
     """
     service_logger = ServiceLogger(service_name)
     return service_logger.get_logger(), service_logger.log_performance
+
 
 # Context manager for timing operations
 class LogTimer:
@@ -218,20 +224,16 @@ class LogTimer:
     def __exit__(self, exc_type, exc_val, exc_tb):
         duration = (datetime.now() - self.start_time).total_seconds()
 
-        if hasattr(self.logger, 'log_performance'):
-            self.logger.log_performance(
-                self.operation_name, 
-                duration=duration, 
-                **self.kwargs
-            )
+        if hasattr(self.logger, "log_performance"):
+            self.logger.log_performance(self.operation_name, duration=duration, **self.kwargs)
         else:
             # Fallback for regular loggers
             self.logger.info(f"{self.operation_name} completed in {duration:.3f}s")
 
+
 import logging
-import os
 from logging.handlers import RotatingFileHandler
-from pathlib import Path
+
 
 def setup_logging(log_level=None):
     """
@@ -244,12 +246,12 @@ def setup_logging(log_level=None):
 
         # Get log level from environment or use default
         if log_level is None:
-            log_level = os.getenv('LOG_LEVEL', 'INFO').upper()
+            log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 
         # Validate log level
-        valid_levels = ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL']
+        valid_levels = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
         if log_level not in valid_levels:
-            log_level = 'INFO'
+            log_level = "INFO"
 
         # Configure logging
         handlers = [logging.StreamHandler()]
@@ -258,8 +260,8 @@ def setup_logging(log_level=None):
         try:
             file_handler = RotatingFileHandler(
                 log_dir / "application.log",
-                maxBytes=10*1024*1024,  # 10MB
-                backupCount=5
+                maxBytes=10 * 1024 * 1024,  # 10MB
+                backupCount=5,
             )
             handlers.append(file_handler)
         except Exception as e:
@@ -267,9 +269,9 @@ def setup_logging(log_level=None):
 
         logging.basicConfig(
             level=getattr(logging, log_level),
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+            format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
             handlers=handlers,
-            force=True  # Override any existing configuration
+            force=True,  # Override any existing configuration
         )
 
         # Get logger for this module

@@ -1,11 +1,12 @@
-from fastapi import FastAPI, HTTPException, Depends, Request
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, HTMLResponse
-from fastapi.staticfiles import StaticFiles
-import uvicorn
 import os
 import sys
 from pathlib import Path
+
+import uvicorn
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 # Add project root to path
 project_root = Path(__file__).parent.parent.parent
@@ -123,7 +124,12 @@ app.add_middleware(
 
 # Serve static files and templates
 TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), "templates")
-app.mount("/static", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")), name="static")
+app.mount(
+    "/static",
+    StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")),
+    name="static",
+)
+
 
 @app.get("/api-reference", include_in_schema=False)
 async def api_reference():
@@ -140,6 +146,7 @@ async def api_reference():
     <script src="/static/redoc.standalone.js"></script>
 </body>
 </html>""")
+
 
 # Dynamically import and include routers with error handling
 # Format: (module_name, url_prefix, display_tag)
@@ -158,7 +165,7 @@ route_modules = [
 for module_name, prefix, tag in route_modules:
     try:
         module = __import__(f"routes.{module_name}", fromlist=["router"])
-        if hasattr(module, 'router'):
+        if hasattr(module, "router"):
             app.include_router(module.router, prefix=prefix, tags=[tag])
             logger.info(f"Successfully loaded {module_name} router")
         else:
@@ -168,6 +175,7 @@ for module_name, prefix, tag in route_modules:
     except Exception as e:
         logger.error(f"Error loading {module_name} router: {e}")
 
+
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
     """Consistent error format for HTTP exceptions (removes FastAPI's detail wrapper)."""
@@ -176,27 +184,28 @@ async def http_exception_handler(request: Request, exc: HTTPException):
         return JSONResponse(status_code=exc.status_code, content=content)
     return JSONResponse(
         status_code=exc.status_code,
-        content={"type": "error", "msg": str(content) if content else "Request failed"}
+        content={"type": "error", "msg": str(content) if content else "Request failed"},
     )
+
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     """Catch-all exception handler — prevents stack traces leaking to clients."""
     logger.error(f"Unhandled exception on {request.method} {request.url}: {exc}", exc_info=True)
-    return JSONResponse(
-        status_code=500,
-        content={"type": "error", "msg": "Internal server error"}
-    )
+    return JSONResponse(status_code=500, content={"type": "error", "msg": "Internal server error"})
+
 
 @app.get("/", include_in_schema=False)
 async def root():
-    with open(os.path.join(TEMPLATES_DIR, "landing.html"), "r") as f:
+    with open(os.path.join(TEMPLATES_DIR, "landing.html")) as f:
         return HTMLResponse(f.read())
+
 
 @app.get("/features", include_in_schema=False)
 async def features():
-    with open(os.path.join(TEMPLATES_DIR, "features.html"), "r") as f:
+    with open(os.path.join(TEMPLATES_DIR, "features.html")) as f:
         return HTMLResponse(f.read())
+
 
 # Legacy — kept for backward compat, now served from template
 _UNUSED_INLINE_HTML = """<!DOCTYPE html>
@@ -579,6 +588,7 @@ _UNUSED_INLINE_HTML = """<!DOCTYPE html>
 </body>
 </html>"""
 
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
@@ -586,13 +596,14 @@ async def health_check():
         # Try to import database utility
         try:
             import mysql.connector
+
             conn = mysql.connector.connect(
                 host=os.getenv("DB_HOST", "mysql"),
                 port=int(os.getenv("DB_PORT", "3306")),
                 database=os.getenv("DB_NAME", "mailserver"),
                 user=os.getenv("DB_USER", "mailuser"),
                 password=os.getenv("DB_PASSWORD", ""),
-                connect_timeout=5
+                connect_timeout=5,
             )
             cursor = conn.cursor()
             cursor.execute("SELECT 1")
@@ -604,24 +615,16 @@ async def health_check():
             logger.error(f"Database connection failed: {e}")
             db_status = "failed"
 
-        return {
-            "status": "healthy",
-            "database": db_status,
-            "version": "1.0.0"
-        }
+        return {"status": "healthy", "database": db_status, "version": "1.0.0"}
     except Exception as e:
         logger.error(f"Health check failed: {e}")
         return JSONResponse(
-            status_code=503,
-            content={
-                "status": "unhealthy",
-                "error": str(e),
-                "version": "1.0.0"
-            }
+            status_code=503, content={"status": "unhealthy", "error": str(e), "version": "1.0.0"}
         )
+
 
 if __name__ == "__main__":
     # Use 0.0.0.0 for Replit compatibility and port 5000
-    host = os.getenv('HOST', '0.0.0.0')
-    port = int(os.getenv('PORT', 5000))
+    host = os.getenv("HOST", "0.0.0.0")
+    port = int(os.getenv("PORT", 5000))
     uvicorn.run("app:app", host=host, port=port, reload=True)

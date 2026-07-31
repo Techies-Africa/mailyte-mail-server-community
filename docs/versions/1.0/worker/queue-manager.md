@@ -34,36 +34,11 @@ The Queue Manager Service provides reliable message queuing for email processing
 ### Email Processing Queues
 ```python
 QUEUE_TYPES = {
-    "incoming_email": {
-        "priority": "high",
-        "workers": 5,
-        "retry_attempts": 3,
-        "timeout": 30
-    },
-    "outgoing_email": {
-        "priority": "high", 
-        "workers": 3,
-        "retry_attempts": 5,
-        "timeout": 60
-    },
-    "tracking_injection": {
-        "priority": "medium",
-        "workers": 2,
-        "retry_attempts": 2,
-        "timeout": 15
-    },
-    "webhook_delivery": {
-        "priority": "medium",
-        "workers": 4,
-        "retry_attempts": 3,
-        "timeout": 30
-    },
-    "analytics_processing": {
-        "priority": "low",
-        "workers": 1,
-        "retry_attempts": 1,
-        "timeout": 120
-    }
+    "incoming_email": {"priority": "high", "workers": 5, "retry_attempts": 3, "timeout": 30},
+    "outgoing_email": {"priority": "high", "workers": 3, "retry_attempts": 5, "timeout": 60},
+    "tracking_injection": {"priority": "medium", "workers": 2, "retry_attempts": 2, "timeout": 15},
+    "webhook_delivery": {"priority": "medium", "workers": 4, "retry_attempts": 3, "timeout": 30},
+    "analytics_processing": {"priority": "low", "workers": 1, "retry_attempts": 1, "timeout": 120},
 }
 ```
 
@@ -172,36 +147,32 @@ class EmailProcessor:
     def __init__(self, queue_manager):
         self.queue_manager = queue_manager
         self.workers = []
-    
+
     def process_message(self, message):
         """Process a single email message"""
         try:
             # Extract email data
             email_data = message.data
-            
+
             # Apply tracking injection
-            if message.metadata.get('tracking_enabled'):
+            if message.metadata.get("tracking_enabled"):
                 email_data = self.inject_tracking(email_data)
-            
+
             # Send via SMTP
             result = self.send_email(email_data)
-            
+
             # Update analytics
             self.update_analytics(email_data, result)
-            
+
             # Send webhook notification
             self.send_webhook(email_data, result)
-            
-            return ProcessingResult(
-                success=True,
-                message="Email sent successfully",
-                data=result
-            )
-            
+
+            return ProcessingResult(success=True, message="Email sent successfully", data=result)
+
         except TemporaryError as e:
             # Retryable error
             raise RetryableError(str(e))
-            
+
         except PermanentError as e:
             # Non-retryable error
             raise FatalError(str(e))
@@ -213,26 +184,26 @@ class EmailProcessor:
 ```python
 class ErrorClassifier:
     TEMPORARY_ERRORS = [
-        'ConnectionTimeout',
-        'ServiceUnavailable', 
-        'RateLimitExceeded',
-        'TemporaryDNSFailure'
+        "ConnectionTimeout",
+        "ServiceUnavailable",
+        "RateLimitExceeded",
+        "TemporaryDNSFailure",
     ]
-    
+
     PERMANENT_ERRORS = [
-        'InvalidEmailAddress',
-        'DomainNotFound',
-        'AuthenticationFailed',
-        'MessageTooLarge'
+        "InvalidEmailAddress",
+        "DomainNotFound",
+        "AuthenticationFailed",
+        "MessageTooLarge",
     ]
-    
+
     def classify_error(self, error):
         if type(error).__name__ in self.TEMPORARY_ERRORS:
-            return 'temporary'
+            return "temporary"
         elif type(error).__name__ in self.PERMANENT_ERRORS:
-            return 'permanent'
+            return "permanent"
         else:
-            return 'unknown'
+            return "unknown"
 ```
 
 ### Retry Strategy
@@ -242,22 +213,19 @@ class RetryStrategy:
         self.max_attempts = max_attempts
         self.base_delay = base_delay
         self.max_delay = max_delay
-    
+
     def calculate_delay(self, attempt):
         """Calculate delay with exponential backoff and jitter"""
-        delay = min(
-            self.base_delay * (2 ** attempt),
-            self.max_delay
-        )
+        delay = min(self.base_delay * (2**attempt), self.max_delay)
         # Add jitter (±20%)
         jitter = delay * 0.2 * (random.random() - 0.5)
         return delay + jitter
-    
+
     def should_retry(self, attempt, error_type):
         """Determine if message should be retried"""
         if attempt >= self.max_attempts:
             return False
-        if error_type == 'permanent':
+        if error_type == "permanent":
             return False
         return True
 ```
@@ -355,12 +323,9 @@ def queue_incoming_email(email_data):
     message = {
         "queue": "incoming_email",
         "data": email_data,
-        "metadata": {
-            "source": "postfix",
-            "received_at": datetime.utcnow()
-        }
+        "metadata": {"source": "postfix", "received_at": datetime.utcnow()},
     }
-    
+
     queue_manager.enqueue(message)
 ```
 
@@ -370,20 +335,14 @@ def queue_incoming_email(email_data):
 def send_email_async(email_data):
     message = {
         "queue": "outgoing_email",
-        "priority": email_data.get('priority', 5),
+        "priority": email_data.get("priority", 5),
         "data": email_data,
-        "metadata": {
-            "tracking_enabled": True,
-            "webhook_url": "https://app.com/webhook"
-        }
+        "metadata": {"tracking_enabled": True, "webhook_url": "https://app.com/webhook"},
     }
-    
-    response = requests.post(
-        f'{QUEUE_API}/queues/outgoing_email/message',
-        json=message
-    )
-    
-    return response.json()['message_id']
+
+    response = requests.post(f"{QUEUE_API}/queues/outgoing_email/message", json=message)
+
+    return response.json()["message_id"]
 ```
 
 ## Worker Scaling
@@ -394,20 +353,20 @@ class AutoScaler:
     def __init__(self, queue_manager):
         self.queue_manager = queue_manager
         self.scaling_rules = {
-            "scale_up_threshold": 50,    # messages per worker
+            "scale_up_threshold": 50,  # messages per worker
             "scale_down_threshold": 10,  # messages per worker
             "min_workers": 1,
             "max_workers": 20,
-            "cooldown_minutes": 5
+            "cooldown_minutes": 5,
         }
-    
+
     def check_scaling_needed(self):
         """Check if worker scaling is needed"""
         for queue_name in self.queue_manager.get_queues():
             stats = self.queue_manager.get_queue_stats(queue_name)
-            
+
             messages_per_worker = stats.pending / max(stats.workers, 1)
-            
+
             if messages_per_worker > self.scaling_rules["scale_up_threshold"]:
                 self.scale_up(queue_name)
             elif messages_per_worker < self.scaling_rules["scale_down_threshold"]:
@@ -436,16 +395,16 @@ curl http://0.0.0.0:5008/stats
 import asyncio
 import aiohttp
 
+
 async def send_test_messages(count=1000):
     async with aiohttp.ClientSession() as session:
         tasks = []
         for i in range(count):
             task = session.post(
-                'http://0.0.0.0:5008/queues/test/message',
-                json={'data': {'test_id': i}}
+                "http://0.0.0.0:5008/queues/test/message", json={"data": {"test_id": i}}
             )
             tasks.append(task)
-        
+
         responses = await asyncio.gather(*tasks)
         return responses
 ```

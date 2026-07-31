@@ -1,30 +1,40 @@
-
 #!/usr/bin/env python3
 """
 Mail Processing Models - Mail queue and delivery logs
 """
 
-from datetime import datetime
 from sqlalchemy import (
-    Column, Integer, String, DateTime, Text, Boolean,
-    Index, BigInteger, Float, ForeignKey,
-    JSON, Enum as SQLEnum
+    JSON,
+    Column,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+)
+from sqlalchemy import (
+    Enum as SQLEnum,
 )
 from sqlalchemy.sql import func
 
+from shared.ulid_utils import generate_ulid
+
 from . import Base
 from .enums import MailStatus
-from shared.ulid_utils import generate_ulid
+
 
 # Mail Processing and Queue
 class MailQueue(Base):
     """Mail queue for processing"""
-    __tablename__ = 'mail_queue'
+
+    __tablename__ = "mail_queue"
 
     id = Column(String(26), primary_key=True, default=generate_ulid)
     sender = Column(String(255), nullable=False, index=True)
     recipient = Column(String(255), nullable=False, index=True)
-    organization_id = Column(String(26), ForeignKey('organizations.id'), nullable=True, index=True)
+    organization_id = Column(String(26), ForeignKey("organizations.id"), nullable=True, index=True)
     subject = Column(Text, nullable=True)
     body = Column(Text, nullable=False)
     headers = Column(JSON, nullable=True)
@@ -41,19 +51,19 @@ class MailQueue(Base):
     worker_id = Column(String(100), nullable=True)
     processing_time = Column(Float, nullable=True)  # seconds
 
-    __table_args__ = (
-        Index('idx_queue_processing', 'status', 'scheduled_at', 'priority'),
-    )
+    __table_args__ = (Index("idx_queue_processing", "status", "scheduled_at", "priority"),)
+
 
 class MailLog(Base):
     """Mail delivery logs"""
-    __tablename__ = 'mail_logs'
+
+    __tablename__ = "mail_logs"
 
     id = Column(String(26), primary_key=True, default=generate_ulid)
     timestamp = Column(DateTime, nullable=False, default=func.now(), index=True)
     sender = Column(String(255), nullable=False, index=True)
     recipient = Column(String(255), nullable=False, index=True)
-    organization_id = Column(String(26), ForeignKey('organizations.id'), nullable=True, index=True)
+    organization_id = Column(String(26), ForeignKey("organizations.id"), nullable=True, index=True)
     subject = Column(Text, nullable=True)
     status = Column(SQLEnum(MailStatus), nullable=False, index=True)
     message_id = Column(String(255), nullable=True, index=True)
@@ -67,6 +77,6 @@ class MailLog(Base):
     spam_score = Column(Float, nullable=True)
 
     __table_args__ = (
-        Index('idx_mail_logs_time_status', 'timestamp', 'status'),
-        Index('idx_mail_logs_sender_time', 'sender', 'timestamp'),
+        Index("idx_mail_logs_time_status", "timestamp", "status"),
+        Index("idx_mail_logs_sender_time", "sender", "timestamp"),
     )

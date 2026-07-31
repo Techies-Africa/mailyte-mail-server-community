@@ -5,6 +5,7 @@ Validates that SSL certificates are tracked in the database, STARTTLS is
 offered on SMTP, and SSL/TLS handshakes succeed on secure IMAP and POP3
 ports with acceptable protocol versions.
 """
+
 import smtplib
 import socket
 import ssl
@@ -14,11 +15,11 @@ import requests
 
 from .conftest import (
     API_BASE,
-    SMTP_HOST,
-    SMTP_PORT,
     IMAP_HOST,
     IMAP_SSL_PORT,
     POP3_SSL_PORT,
+    SMTP_HOST,
+    SMTP_PORT,
 )
 
 TIMEOUT = 10  # seconds for network operations
@@ -27,6 +28,7 @@ TIMEOUT = 10  # seconds for network operations
 # ---------------------------------------------------------------------------
 # Database
 # ---------------------------------------------------------------------------
+
 
 class TestSSLDatabase:
     """Verify the ssl_certificates table is accessible."""
@@ -45,6 +47,7 @@ class TestSSLDatabase:
 # STARTTLS
 # ---------------------------------------------------------------------------
 
+
 class TestSTARTTLS:
     """SMTP STARTTLS advertisement and negotiation."""
 
@@ -59,9 +62,7 @@ class TestSTARTTLS:
                 chunk = sock.recv(4096)
                 response += chunk
                 if b"\r\n" in chunk and any(
-                    line.startswith(b"250 ")
-                    for line in response.split(b"\r\n")
-                    if line
+                    line.startswith(b"250 ") for line in response.split(b"\r\n") if line
                 ):
                     break
             capabilities = response.decode("utf-8", errors="replace")
@@ -73,6 +74,7 @@ class TestSTARTTLS:
 # ---------------------------------------------------------------------------
 # SSL/TLS handshakes
 # ---------------------------------------------------------------------------
+
 
 class TestSSLHandshake:
     """Verify that SSL handshakes succeed on secure ports."""
@@ -103,6 +105,7 @@ class TestSSLHandshake:
 # TLS version
 # ---------------------------------------------------------------------------
 
+
 class TestTLSVersion:
     """Ensure the server negotiates TLS 1.2 or higher."""
 
@@ -116,9 +119,7 @@ class TestTLSVersion:
             server.starttls(context=ctx)
 
             tls_version = server.sock.version()
-            assert tls_version in ("TLSv1.2", "TLSv1.3"), (
-                f"Unexpected TLS version: {tls_version}"
-            )
+            assert tls_version in ("TLSv1.2", "TLSv1.3"), f"Unexpected TLS version: {tls_version}"
         finally:
             try:
                 server.quit()
@@ -129,6 +130,7 @@ class TestTLSVersion:
 # ---------------------------------------------------------------------------
 # API
 # ---------------------------------------------------------------------------
+
 
 class TestSSLAPI:
     """SSL status endpoint (may not exist in all deployments)."""

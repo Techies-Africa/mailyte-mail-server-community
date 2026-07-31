@@ -40,6 +40,7 @@ worker/
 # worker/my_new_worker/config.py
 import os
 
+
 class Config:
     # Database
     DB_HOST = os.environ.get("DB_HOST", "mysql")
@@ -67,6 +68,7 @@ import threading
 import time
 
 logger = logging.getLogger(__name__)
+
 
 class MyNewWorkerService:
     def __init__(self, config, db, redis_client):
@@ -125,6 +127,7 @@ from fastapi import FastAPI
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 from starlette.responses import Response
 
+
 def create_app(service) -> FastAPI:
     app = FastAPI(title="My New Worker")
 
@@ -160,6 +163,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
 def main():
     config = Config()
 
@@ -180,6 +184,7 @@ def main():
     # Run the HTTP server
     logger.info("Starting HTTP server on port %d", config.SERVICE_PORT)
     uvicorn.run(app, host="0.0.0.0", port=config.SERVICE_PORT)
+
 
 if __name__ == "__main__":
     main()
@@ -275,6 +280,7 @@ QUEUE_SIZE = Gauge(
     "mailyte_my_worker_queue_size",
     "Number of items waiting to be processed",
 )
+
 
 class MyNewWorkerService:
     def process(self):

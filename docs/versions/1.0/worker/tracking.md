@@ -392,10 +392,10 @@ def anonymize_tracking_data(days_old=90):
 ```python
 # Retention policies
 RETENTION_POLICIES = {
-    'raw_events': 365,      # Keep raw events for 1 year
-    'aggregated_stats': 2555,  # Keep aggregated stats for 7 years
-    'personal_data': 90,    # Anonymize personal data after 90 days
-    'suppression_list': None  # Keep suppression list indefinitely
+    "raw_events": 365,  # Keep raw events for 1 year
+    "aggregated_stats": 2555,  # Keep aggregated stats for 7 years
+    "personal_data": 90,  # Anonymize personal data after 90 days
+    "suppression_list": None,  # Keep suppression list indefinitely
 }
 ```
 
@@ -413,45 +413,42 @@ import base64
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
+
 class TrackingInjector:
     def __init__(self, config):
-        self.tracking_domain = config.get('TRACKING_DOMAIN')
-        self.secret_key = config.get('TRACKING_SECRET_KEY')
-        
+        self.tracking_domain = config.get("TRACKING_DOMAIN")
+        self.secret_key = config.get("TRACKING_SECRET_KEY")
+
     def inject_tracking(self, email_message, message_id, recipient):
         """Inject tracking pixel and rewrite links"""
         # Create tracking token
         tracking_token = self.create_tracking_token(message_id, recipient)
-        
+
         # Inject pixel
         self.inject_pixel(email_message, tracking_token)
-        
+
         # Rewrite links
         self.rewrite_links(email_message, tracking_token)
-        
+
         return email_message
-    
+
     def create_tracking_token(self, message_id, recipient):
         """Create JWT tracking token"""
-        payload = {
-            'msg_id': message_id,
-            'recipient': recipient,
-            'timestamp': int(time.time())
-        }
-        return jwt.encode(payload, self.secret_key, algorithm='HS256')
-    
+        payload = {"msg_id": message_id, "recipient": recipient, "timestamp": int(time.time())}
+        return jwt.encode(payload, self.secret_key, algorithm="HS256")
+
     def inject_pixel(self, message, token):
         """Inject 1x1 tracking pixel"""
         pixel_url = f"https://{self.tracking_domain}/open/{token}"
         pixel_html = f'<img src="{pixel_url}" width="1" height="1" style="display:none;" alt="" />'
-        
+
         # Add pixel to HTML content
         if message.is_multipart():
             for part in message.walk():
-                if part.get_content_type() == 'text/html':
+                if part.get_content_type() == "text/html":
                     content = part.get_content()
-                    content = content.replace('</body>', f'{pixel_html}</body>')
-                    part.set_content(content, subtype='html')
+                    content = content.replace("</body>", f"{pixel_html}</body>")
+                    part.set_content(content, subtype="html")
 ```
 
 ### Webhook Integration
@@ -460,18 +457,18 @@ class TrackingInjector:
 # Send tracking events via webhooks
 def send_tracking_webhook(event_data):
     webhook_payload = {
-        'event': f'email.{event_data["event_type"]}',
-        'timestamp': event_data['timestamp'].isoformat(),
-        'data': {
-            'message_id': event_data['message_id'],
-            'recipient': event_data['recipient'],
-            'ip_address': event_data['ip_address'],
-            'user_agent': event_data['user_agent'],
-            'location': event_data.get('location'),
-            'device': event_data.get('device')
-        }
+        "event": f"email.{event_data['event_type']}",
+        "timestamp": event_data["timestamp"].isoformat(),
+        "data": {
+            "message_id": event_data["message_id"],
+            "recipient": event_data["recipient"],
+            "ip_address": event_data["ip_address"],
+            "user_agent": event_data["user_agent"],
+            "location": event_data.get("location"),
+            "device": event_data.get("device"),
+        },
     }
-    
+
     # Send to webhook service
     webhook_service.send(webhook_payload)
 ```
@@ -484,14 +481,15 @@ def send_tracking_webhook(event_data):
 # Redis caching for tracking data
 import redis
 
-cache = redis.Redis(host='localhost', port=6379, db=0)
+cache = redis.Redis(host="localhost", port=6379, db=0)
+
 
 def get_tracking_stats(cache_key, query_func, ttl=3600):
     """Get stats with caching"""
     cached_result = cache.get(cache_key)
     if cached_result:
         return json.loads(cached_result)
-    
+
     result = query_func()
     cache.setex(cache_key, ttl, json.dumps(result))
     return result
@@ -549,9 +547,9 @@ GET /health
 from prometheus_client import Counter, Histogram, Gauge
 
 # Tracking metrics
-tracking_events_total = Counter('tracking_events_total', 'Total tracking events', ['event_type'])
-tracking_response_time = Histogram('tracking_response_time_seconds', 'Response time')
-active_tracking_sessions = Gauge('active_tracking_sessions', 'Active tracking sessions')
+tracking_events_total = Counter("tracking_events_total", "Total tracking events", ["event_type"])
+tracking_response_time = Histogram("tracking_response_time_seconds", "Response time")
+active_tracking_sessions = Gauge("active_tracking_sessions", "Active tracking sessions")
 ```
 
 ## Security Considerations

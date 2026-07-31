@@ -162,23 +162,25 @@ socket.on('service_alert', (data) => {
 
 ### Live Data Updates
 ```python
-@socketio.on('connect')
+@socketio.on("connect")
 def handle_connect():
     """Handle client connection"""
-    emit('connected', {'status': 'Connected to dashboard'})
+    emit("connected", {"status": "Connected to dashboard"})
     # Send initial data
-    emit('system_metrics', get_current_metrics())
+    emit("system_metrics", get_current_metrics())
 
-@app.route('/api/realtime/metrics')
+
+@app.route("/api/realtime/metrics")
 def stream_metrics():
     """Stream real-time metrics via Server-Sent Events"""
+
     def generate():
         while True:
             metrics = collect_system_metrics()
             yield f"data: {json.dumps(metrics)}\n\n"
             time.sleep(5)
-    
-    return Response(generate(), mimetype='text/plain')
+
+    return Response(generate(), mimetype="text/plain")
 ```
 
 ## User Interface
@@ -415,6 +417,7 @@ class ConfigurationManager {
 from functools import wraps
 from flask_login import login_required, current_user
 
+
 def admin_required(f):
     @wraps(f)
     @login_required
@@ -422,35 +425,40 @@ def admin_required(f):
         if not current_user.is_admin:
             abort(403)
         return f(*args, **kwargs)
+
     return decorated_function
 
-@app.route('/admin/domains', methods=['POST'])
+
+@app.route("/admin/domains", methods=["POST"])
 @admin_required
 def create_domain():
     """Create new domain - admin only"""
     domain_data = request.get_json()
     # Domain creation logic
-    return jsonify({'status': 'created'})
+    return jsonify({"status": "created"})
 ```
 
 ### Audit Logging
 ```python
 def log_admin_action(action, details):
     """Log administrative actions for audit trail"""
-    audit_log.info({
-        'user': current_user.username,
-        'action': action,
-        'details': details,
-        'timestamp': datetime.utcnow(),
-        'ip_address': request.remote_addr
-    })
+    audit_log.info(
+        {
+            "user": current_user.username,
+            "action": action,
+            "details": details,
+            "timestamp": datetime.utcnow(),
+            "ip_address": request.remote_addr,
+        }
+    )
 
-@app.route('/admin/mailboxes/<email>', methods=['DELETE'])
+
+@app.route("/admin/mailboxes/<email>", methods=["DELETE"])
 @admin_required
 def delete_mailbox(email):
     # Delete mailbox logic
-    log_admin_action('delete_mailbox', {'email': email})
-    return jsonify({'status': 'deleted'})
+    log_admin_action("delete_mailbox", {"email": email})
+    return jsonify({"status": "deleted"})
 ```
 
 ## Configuration

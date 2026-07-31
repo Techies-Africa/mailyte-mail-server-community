@@ -3,12 +3,19 @@
 Mailyte CE — Edge Case Test Suite
 Tests boundary conditions, error handling, malicious inputs, and failure scenarios.
 """
-import requests, json, time, smtplib, imaplib, poplib, ssl, socket, os
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from email.mime.base import MIMEBase
-from email.utils import formatdate, make_msgid
+
+import imaplib
+import poplib
+import smtplib
+import socket
+import ssl
 from email import encoders
+from email.mime.base import MIMEBase
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.utils import formatdate, make_msgid
+
+import requests
 
 API = "http://api:8080/api/v1"
 KEY = "test-api-key-123"
@@ -56,9 +63,17 @@ r = requests.post(f"{API}/mailboxes/add", headers=H, json={"email": "x@test.loca
 test("Missing fields rejected", r.status_code in (400, 422), f"status={r.status_code}")
 
 # Invalid email format
-r = requests.post(f"{API}/mailboxes/add", headers=H, json={
-    "email": "notanemail", "local_part": "bad", "password": "test1234", "domain": "test.local"
-}, timeout=10)
+r = requests.post(
+    f"{API}/mailboxes/add",
+    headers=H,
+    json={
+        "email": "notanemail",
+        "local_part": "bad",
+        "password": "test1234",
+        "domain": "test.local",
+    },
+    timeout=10,
+)
 test("Invalid email format rejected", r.status_code in (400, 422), f"status={r.status_code}")
 
 # SQL injection in API key
@@ -70,12 +85,18 @@ r = requests.get(f"{API}/domains/?domain=' OR 1=1 --", headers=H, timeout=10)
 test("SQL injection in query param", r.status_code in (200, 400, 404), f"status={r.status_code}")
 
 # XSS in name field
-r = requests.post(f"{API}/mailboxes/add", headers=H, json={
-    "email": "xss@test.local", "local_part": "xss",
-    "password": "testpass123",
-    "name": "<script>alert('xss')</script>",
-    "domain": "test.local"
-}, timeout=10)
+r = requests.post(
+    f"{API}/mailboxes/add",
+    headers=H,
+    json={
+        "email": "xss@test.local",
+        "local_part": "xss",
+        "password": "testpass123",
+        "name": "<script>alert('xss')</script>",
+        "domain": "test.local",
+    },
+    timeout=10,
+)
 test("XSS in name field", r.status_code in (200, 201, 400), f"status={r.status_code}")
 # Clean up if created
 if r.status_code in (200, 201):
@@ -83,36 +104,63 @@ if r.status_code in (200, 201):
 
 # Very long email
 long_local = "a" * 200
-r = requests.post(f"{API}/mailboxes/add", headers=H, json={
-    "email": f"{long_local}@test.local", "local_part": long_local,
-    "password": "testpass123", "domain": "test.local"
-}, timeout=10)
+r = requests.post(
+    f"{API}/mailboxes/add",
+    headers=H,
+    json={
+        "email": f"{long_local}@test.local",
+        "local_part": long_local,
+        "password": "testpass123",
+        "domain": "test.local",
+    },
+    timeout=10,
+)
 test("Very long email rejected", r.status_code in (400, 422, 500), f"status={r.status_code}")
 
 # Weak password
-r = requests.post(f"{API}/mailboxes/add", headers=H, json={
-    "email": "weak@test.local", "local_part": "weak",
-    "password": "123", "domain": "test.local"
-}, timeout=10)
+r = requests.post(
+    f"{API}/mailboxes/add",
+    headers=H,
+    json={
+        "email": "weak@test.local",
+        "local_part": "weak",
+        "password": "123",
+        "domain": "test.local",
+    },
+    timeout=10,
+)
 test("Weak password rejected", r.status_code in (400, 422), f"status={r.status_code}")
 
 # Non-existent domain
-r = requests.post(f"{API}/mailboxes/add", headers=H, json={
-    "email": "user@nonexistent.com", "local_part": "user",
-    "password": "testpass123", "domain": "nonexistent.com"
-}, timeout=10)
+r = requests.post(
+    f"{API}/mailboxes/add",
+    headers=H,
+    json={
+        "email": "user@nonexistent.com",
+        "local_part": "user",
+        "password": "testpass123",
+        "domain": "nonexistent.com",
+    },
+    timeout=10,
+)
 test("Non-existent domain rejected", r.status_code in (400, 404), f"status={r.status_code}")
 
 # Duplicate mailbox
-r = requests.post(f"{API}/mailboxes/add", headers=H, json={
-    "email": "user@test.local", "local_part": "user",
-    "password": "testpass123", "domain": "test.local"
-}, timeout=10)
+r = requests.post(
+    f"{API}/mailboxes/add",
+    headers=H,
+    json={
+        "email": "user@test.local",
+        "local_part": "user",
+        "password": "testpass123",
+        "domain": "test.local",
+    },
+    timeout=10,
+)
 test("Duplicate mailbox rejected", r.status_code == 409, f"status={r.status_code}")
 
 # Invalid JSON
-r = requests.post(f"{API}/mailboxes/add", headers={"X-API-Key": KEY},
-                   data="not json", timeout=10)
+r = requests.post(f"{API}/mailboxes/add", headers={"X-API-Key": KEY}, data="not json", timeout=10)
 test("Invalid JSON rejected", r.status_code in (400, 422), f"status={r.status_code}")
 
 # Huge payload
@@ -129,7 +177,7 @@ print("\n--- 2. SMTP EDGE CASES ---")
 try:
     send_smtp("user@test.local", "nobody@test.local", "To Nobody", "Should bounce")
     test("Send to non-existent user", False, "Should have been rejected")
-except smtplib.SMTPRecipientsRefused as e:
+except smtplib.SMTPRecipientsRefused:
     test("Send to non-existent user rejected", True, "550 User unknown")
 except Exception as e:
     test("Send to non-existent user", False, str(e)[:80])
@@ -168,8 +216,12 @@ except Exception as e:
 
 # Unicode body
 try:
-    send_smtp("user@test.local", "user@test.local", "Unicode Body",
-              "Hello 你好 Привет مرحبا こんにちは 🎉🔥💌")
+    send_smtp(
+        "user@test.local",
+        "user@test.local",
+        "Unicode Body",
+        "Hello 你好 Привет مرحبا こんにちは 🎉🔥💌",
+    )
     test("Unicode body accepted", True)
 except Exception as e:
     test("Unicode body", False, str(e)[:60])
@@ -206,7 +258,7 @@ for i in range(20):
         rapid_ok += 1
     except:
         break
-test(f"Rapid sends (20x)", rapid_ok >= 15, f"{rapid_ok}/20 succeeded")
+test("Rapid sends (20x)", rapid_ok >= 15, f"{rapid_ok}/20 succeeded")
 
 # Connection without STARTTLS (should reject auth)
 try:
@@ -418,6 +470,8 @@ print("\n--- 7. SERVICE RESILIENCE ---")
 
 # API under load (50 rapid requests)
 import concurrent.futures
+
+
 def api_request(_):
     try:
         r = requests.get(f"{API}/domains/", headers=H, timeout=10)
@@ -425,10 +479,12 @@ def api_request(_):
     except:
         return False
 
+
 with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
     results_list = list(executor.map(api_request, range(50)))
 ok_count = sum(results_list)
-test(f"API under load (50 concurrent)", ok_count >= 40, f"{ok_count}/50 succeeded")
+test("API under load (50 concurrent)", ok_count >= 40, f"{ok_count}/50 succeeded")
+
 
 # Health endpoint under load
 def health_request(_):
@@ -438,13 +494,15 @@ def health_request(_):
     except:
         return False
 
+
 with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
     results_list = list(executor.map(health_request, range(50)))
 ok_count = sum(results_list)
-test(f"Health under load (50 concurrent)", ok_count >= 45, f"{ok_count}/50 succeeded")
+test("Health under load (50 concurrent)", ok_count >= 45, f"{ok_count}/50 succeeded")
 
 # Redis resilience
 import redis
+
 rc = redis.Redis(host="redis", port=6379, db=0)
 try:
     pipe = rc.pipeline()
@@ -462,11 +520,17 @@ except Exception as e:
 
 # MySQL connection pool
 import mysql.connector
+
 try:
     conns = []
     for i in range(10):
-        c = mysql.connector.connect(host="mysql", port=3306, database="mailserver",
-                                     user="mailuser", password="mailpassword123")
+        c = mysql.connector.connect(
+            host="mysql",
+            port=3306,
+            database="mailserver",
+            user="mailuser",
+            password="mailpassword123",
+        )
         conns.append(c)
     test("10 concurrent MySQL connections", len(conns) == 10)
     for c in conns:

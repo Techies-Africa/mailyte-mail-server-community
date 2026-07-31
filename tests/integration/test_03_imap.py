@@ -3,9 +3,10 @@ Integration tests for IMAP and POP3 access.
 
 Tests run against live Dovecot services — ensure the dev environment is up.
 """
-import ssl
+
 import imaplib
 import poplib
+import ssl
 
 import pytest
 
@@ -16,10 +17,9 @@ from .conftest import (
     POP3_HOST,
     POP3_PORT,
     POP3_SSL_PORT,
-    TEST_USER,
     TEST_PASS,
+    TEST_USER,
 )
-
 
 # ---------------------------------------------------------------------------
 # IMAP Tests
@@ -349,7 +349,7 @@ class TestIMAPOperationsAdvanced:
         """
         status, _ = imap_connection.select("INBOX")
         assert status == "OK"
-        status, data = imap_connection.search(None, 'SUBJECT', '"test"')
+        status, data = imap_connection.search(None, "SUBJECT", '"test"')
         assert status == "OK"
         # data[0] is a space-separated list of message numbers or b""
         assert isinstance(data, list)

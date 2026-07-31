@@ -124,7 +124,7 @@ When an anomaly is detected, the analyzer fires a webhook event and logs the ale
 If the GeoLite2 database is available, the analyzer resolves connecting IPs to countries:
 
 ```python
-self.geoip_db = '/usr/share/GeoIP/GeoLite2-Country.mmdb'
+self.geoip_db = "/usr/share/GeoIP/GeoLite2-Country.mmdb"
 ```
 
 This data feeds into:
@@ -162,8 +162,8 @@ The analyzer writes aggregated stats to:
 To add a new detection pattern, add a compiled regex to the `patterns` dictionary in `mailer/log_analyzer/app.py`:
 
 ```python
-self.patterns['my_custom_pattern'] = re.compile(
-    r'my-service\[\d+\]: suspicious activity from \[([^\]]+)\]'
+self.patterns["my_custom_pattern"] = re.compile(
+    r"my-service\[\d+\]: suspicious activity from \[([^\]]+)\]"
 )
 ```
 
