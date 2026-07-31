@@ -90,6 +90,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -102,6 +104,7 @@ jobs:
           pip install -r requirements-test.txt
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           pip install -r worker/api/requirements.txt
+          pip install diff-cover
 
       - name: Wait for MySQL
         run: |
@@ -131,7 +134,6 @@ jobs:
         run: |
           pytest tests/ -v \
             --tb=short \
-            -x \
             --ignore=tests/e2e \
             --ignore=tests/integration \
             --ignore=tests/load \
@@ -162,6 +164,21 @@ jobs:
           path: |
             test-results.xml
             coverage.xml
+
+      - name: Coverage ratchet (repo total may not fall)
+        if: always()
+        run: |
+          PCT=$(python -c "import xml.etree.ElementTree as ET; print(round(float(ET.parse('coverage.xml').getroot().get('line-rate')) * 100, 2))")
+          BASELINE=$(cat coverage-baseline.txt)
+          echo "line coverage: ${PCT}% (baseline: ${BASELINE}%)"
+          if awk "BEGIN{exit !($PCT < $BASELINE)}"; then
+            echo "::error::line coverage dropped from ${BASELINE}% to ${PCT}%. Coverage may only rise (Engineering Standards SS3: coverage is a ratchet)."
+            exit 1
+          fi
+
+      - name: Diff coverage (changed code >= 60%)
+        if: always()
+        run: diff-cover coverage.xml --compare-branch=origin/develop --fail-under=60
 
       - name: Upload coverage to Codecov
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
