@@ -118,21 +118,21 @@ def index_email(email_data):
     """Process email for vector indexing"""
     # 1. Extract and clean content
     content = extract_email_content(email_data)
-    
+
     # 2. Generate embeddings
     embedding = embedding_service.create_embedding(content)
-    
+
     # 3. Create document
     document = RAGDocument(
         content=content,
         metadata=email_data.metadata,
         embedding=embedding,
-        organization_id=email_data.organization_id
+        organization_id=email_data.organization_id,
     )
-    
+
     # 4. Store in vector database
     qdrant_service.index_document(document)
-    
+
     return document.id
 ```
 
@@ -144,12 +144,9 @@ class OpenAIProvider:
     def __init__(self, api_key, model="text-embedding-ada-002"):
         self.client = OpenAI(api_key=api_key)
         self.model = model
-    
+
     def create_embedding(self, text):
-        response = self.client.embeddings.create(
-            input=text,
-            model=self.model
-        )
+        response = self.client.embeddings.create(input=text, model=self.model)
         return response.data[0].embedding
 ```
 
@@ -168,9 +165,7 @@ class HuggingFaceProvider:
 class AzureOpenAIProvider:
     def __init__(self, endpoint, api_key, deployment_name):
         self.client = AzureOpenAI(
-            azure_endpoint=endpoint,
-            api_key=api_key,
-            api_version="2024-02-01"
+            azure_endpoint=endpoint, api_key=api_key, api_version="2024-02-01"
         )
         self.deployment = deployment_name
 ```
@@ -225,20 +220,16 @@ def hybrid_search(query, filters=None, weights=None):
     """Combine semantic and keyword search"""
     if weights is None:
         weights = {"semantic": 0.7, "keyword": 0.3}
-    
+
     # Semantic search
     semantic_results = vector_search(query, filters)
-    
+
     # Keyword search
     keyword_results = keyword_search(query, filters)
-    
+
     # Combine and rank results
-    combined_results = combine_results(
-        semantic_results, 
-        keyword_results, 
-        weights
-    )
-    
+    combined_results = combine_results(semantic_results, keyword_results, weights)
+
     return ranked_results(combined_results)
 ```
 
@@ -250,23 +241,21 @@ class OrganizationService:
     def create_organization(self, org_data):
         """Create new organization with isolated resources"""
         org = Organization(
-            name=org_data.name,
-            settings=org_data.settings,
-            resource_limits=org_data.limits
+            name=org_data.name, settings=org_data.settings, resource_limits=org_data.limits
         )
-        
+
         # Create organization-specific vector collection
         qdrant_service.create_collection(f"org_{org.id}")
-        
+
         return org
-    
+
     def get_organization_stats(self, org_id):
         """Get organization usage statistics"""
         return {
             "documents_indexed": count_documents(org_id),
             "storage_used": calculate_storage(org_id),
             "queries_today": count_queries(org_id),
-            "embedding_usage": get_embedding_usage(org_id)
+            "embedding_usage": get_embedding_usage(org_id),
         }
 ```
 
@@ -274,12 +263,15 @@ class OrganizationService:
 ```python
 def require_organization_access(org_id, user_id, permission):
     """Decorator for organization-based access control"""
+
     def decorator(func):
         def wrapper(*args, **kwargs):
             if not has_permission(user_id, org_id, permission):
                 raise PermissionError("Insufficient permissions")
             return func(*args, **kwargs)
+
         return wrapper
+
     return decorator
 ```
 
@@ -317,9 +309,9 @@ class PerformanceMonitor:
         self.thresholds = {
             "query_time": 100,  # ms
             "indexing_time": 5000,  # ms
-            "error_rate": 0.01
+            "error_rate": 0.01,
         }
-    
+
     def check_performance(self):
         """Monitor and alert on performance issues"""
         for metric, threshold in self.thresholds.items():
@@ -387,17 +379,17 @@ CREATE TABLE rag_documents (
 ### Email Processing Integration
 ```python
 # In email processing pipeline
-@app.route('/webhook/email-processed', methods=['POST'])
+@app.route("/webhook/email-processed", methods=["POST"])
 def process_email_for_rag():
     email_data = request.get_json()
-    
+
     # Index email content
     document_id = rag_service.index_email(email_data)
-    
+
     # Update search index
     search_service.refresh_index()
-    
-    return jsonify({'document_id': document_id})
+
+    return jsonify({"document_id": document_id})
 ```
 
 ### API Integration Example
@@ -405,17 +397,14 @@ def process_email_for_rag():
 # Search emails using RAG
 def search_customer_emails(customer_email, query):
     response = requests.post(
-        f'{RAG_API}/search/semantic',
+        f"{RAG_API}/search/semantic",
         json={
-            'query': query,
-            'filters': {
-                'sender': customer_email,
-                'date_range': get_last_30_days()
-            }
+            "query": query,
+            "filters": {"sender": customer_email, "date_range": get_last_30_days()},
         },
-        headers={'X-API-Key': api_key}
+        headers={"X-API-Key": api_key},
     )
-    return response.json()['results']
+    return response.json()["results"]
 ```
 
 ## Development

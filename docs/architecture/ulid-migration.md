@@ -67,6 +67,7 @@ For 500K+ domains with millions of mailboxes across potentially distributed infr
 # shared/ulid_utils.py
 from ulid import ULID
 
+
 def generate_ulid() -> str:
     return str(ULID())
 ```
@@ -77,10 +78,11 @@ def generate_ulid() -> str:
 from sqlalchemy import Column, String, ForeignKey
 from shared.ulid_utils import generate_ulid
 
+
 class Domain(Base):
-    __tablename__ = 'domains'
+    __tablename__ = "domains"
     id = Column(String(26), primary_key=True, default=generate_ulid)
-    organization_id = Column(String(26), ForeignKey('organizations.id'))
+    organization_id = Column(String(26), ForeignKey("organizations.id"))
 ```
 
 ---

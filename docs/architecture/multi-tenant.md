@@ -42,9 +42,7 @@ Almost every table has an `organization_id` column. The API layer adds a `WHERE 
 ```python
 # Simplified example of how queries are scoped
 def get_domains(db: Session, org_id: int):
-    return db.query(Domain).filter(
-        Domain.organization_id == org_id
-    ).all()
+    return db.query(Domain).filter(Domain.organization_id == org_id).all()
 ```
 
 The org ID comes from the authenticated API key, not from the request body. A tenant can't forge another org's ID because the API key determines which org they are.

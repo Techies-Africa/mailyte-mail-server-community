@@ -6,6 +6,7 @@ They replace auto-increment INT and VARCHAR primary keys across all tables.
 
 Example ULID: 01ARZ3NDEKTSV4RRFFQ69G5FAV
 """
+
 from ulid import ULID
 
 

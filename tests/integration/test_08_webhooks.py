@@ -5,6 +5,7 @@ Verifies webhook health, endpoint listing, delivery logs,
 dead-letter queue, inbound/outbound webhook endpoints,
 and secret validation against the live Docker services.
 """
+
 import pytest
 import requests
 
@@ -45,8 +46,8 @@ OUTBOUND_PAYLOAD = {
 # Webhook service health
 # ---------------------------------------------------------------------------
 
-class TestWebhookHealth:
 
+class TestWebhookHealth:
     def test_webhooks_health(self):
         """Webhooks service health endpoint returns 200."""
         resp = requests.get(f"{WEBHOOKS_BASE}/health", timeout=TIMEOUT)
@@ -57,8 +58,8 @@ class TestWebhookHealth:
 # Webhook management API
 # ---------------------------------------------------------------------------
 
-class TestWebhookManagementAPI:
 
+class TestWebhookManagementAPI:
     def test_webhook_endpoints_list(self, api_headers):
         """Listing webhook endpoints requires auth and returns 200 or 401."""
         resp = requests.get(
@@ -99,12 +100,13 @@ class TestWebhookManagementAPI:
 # Webhook event types
 # ---------------------------------------------------------------------------
 
-class TestWebhookEventTypes:
 
+class TestWebhookEventTypes:
     def test_webhook_event_types_defined(self):
         """Verify the webhooks service responds (event types are registered)."""
         try:
             from shared import webhook_dispatcher
+
             # If the module is importable, check it defines event types
             assert hasattr(webhook_dispatcher, "dispatch") or hasattr(
                 webhook_dispatcher, "EVENTS"
@@ -122,8 +124,8 @@ class TestWebhookEventTypes:
 # Webhook inbound / outbound endpoints
 # ---------------------------------------------------------------------------
 
-class TestWebhookEndpoints:
 
+class TestWebhookEndpoints:
     def test_webhook_inbound_endpoint(self):
         """Posting to the inbound webhook endpoint returns 200 or 400."""
         resp = requests.post(
@@ -144,17 +146,15 @@ class TestWebhookEndpoints:
             timeout=TIMEOUT,
         )
         # Accept success or validation rejection; a 5xx would be a bug
-        assert resp.status_code < 500, (
-            f"Outbound webhook returned server error: {resp.status_code}"
-        )
+        assert resp.status_code < 500, f"Outbound webhook returned server error: {resp.status_code}"
 
 
 # ---------------------------------------------------------------------------
 # Webhook secret validation
 # ---------------------------------------------------------------------------
 
-class TestWebhookSecretValidation:
 
+class TestWebhookSecretValidation:
     def test_webhook_secret_validation(self):
         """Posting without a webhook secret should not return 200."""
         resp = requests.post(
@@ -167,6 +167,4 @@ class TestWebhookSecretValidation:
         # be 200 when no secret is provided. If the service does not enforce
         # secrets (e.g. in dev mode), a 200 is tolerable — so we assert it
         # is not a server crash at minimum.
-        assert resp.status_code != 500, (
-            "Webhook inbound without secret caused a 500 server error"
-        )
+        assert resp.status_code != 500, "Webhook inbound without secret caused a 500 server error"

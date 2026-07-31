@@ -11,6 +11,7 @@ higher-level libraries (smtplib) would never produce.
 NOTE: This entire module runs serially (no xdist parallelism) because
 several tests manipulate raw socket state on the same ports.
 """
+
 import socket
 import smtplib
 import ssl
@@ -36,6 +37,7 @@ TIMEOUT = 15  # seconds for socket operations
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _raw_connect(host=SMTP_HOST, port=SMTP_PORT_25, timeout=TIMEOUT):
     """Open a raw TCP socket to the SMTP server and read the banner.
 
@@ -57,6 +59,7 @@ def _send_line(sock, line):
 # ---------------------------------------------------------------------------
 # Protocol ordering and malformed input
 # ---------------------------------------------------------------------------
+
 
 class TestInboundProtocolSecurity:
     """Verify the server enforces correct SMTP command sequencing and
@@ -130,8 +133,7 @@ class TestInboundProtocolSecurity:
                 code = int(resp[:3])
                 # Any response is fine as long as the server is still alive
                 assert 200 <= code < 600 or code >= 500, (
-                    f"Unexpected response to bare-LF EHLO: "
-                    f"{resp.decode(errors='replace').strip()}"
+                    f"Unexpected response to bare-LF EHLO: {resp.decode(errors='replace').strip()}"
                 )
             # Empty response (connection closed) is also acceptable — the
             # server detected the smuggling attempt and dropped us.
@@ -173,8 +175,7 @@ class TestInboundProtocolSecurity:
             # The test passes as long as the server did not crash.
             # We verify by checking that we received at least one response.
             assert len(resp) > 0, (
-                "Server returned no data after pipelined commands — "
-                "it may have crashed."
+                "Server returned no data after pipelined commands — it may have crashed."
             )
         finally:
             sock.close()
@@ -183,6 +184,7 @@ class TestInboundProtocolSecurity:
 # ---------------------------------------------------------------------------
 # Header and content checks
 # ---------------------------------------------------------------------------
+
 
 class TestInboundHeaderChecks:
     """Verify the server applies content-level security policies on inbound
@@ -216,9 +218,7 @@ class TestInboundHeaderChecks:
         exe_part = MIMEBase("application", "x-msdownload")
         exe_part.set_payload(b"\x4d\x5a" + b"\x00" * 100)  # MZ header stub
         encoders.encode_base64(exe_part)
-        exe_part.add_header(
-            "Content-Disposition", "attachment", filename="test.exe"
-        )
+        exe_part.add_header("Content-Disposition", "attachment", filename="test.exe")
         msg.attach(exe_part)
 
         server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=TIMEOUT)
@@ -269,9 +269,7 @@ class TestInboundHeaderChecks:
             oversized = size_limit * 10
 
             # Use raw command to include SIZE= parameter
-            code, resp = server.docmd(
-                f"MAIL FROM:<{TEST_USER}> SIZE={oversized}"
-            )
+            code, resp = server.docmd(f"MAIL FROM:<{TEST_USER}> SIZE={oversized}")
             assert code >= 500, (
                 f"Expected 5xx rejection for oversized message announcement "
                 f"(SIZE={oversized}), got {code}: {resp.decode(errors='replace')}"
@@ -286,6 +284,7 @@ class TestInboundHeaderChecks:
 # ---------------------------------------------------------------------------
 # Relay control
 # ---------------------------------------------------------------------------
+
 
 class TestInboundRelayControl:
     """Ensure the server only accepts mail for domains it is configured to
@@ -326,9 +325,7 @@ class TestInboundRelayControl:
         try:
             _send_line(sock, b"EHLO relaytest.example.com")
             _send_line(sock, b"MAIL FROM:<sender@example.com>")
-            resp = _send_line(
-                sock, b"RCPT TO:<" + TEST_USER.encode() + b">"
-            )
+            resp = _send_line(sock, b"RCPT TO:<" + TEST_USER.encode() + b">")
             code = int(resp[:3])
             assert code < 500, (
                 f"Expected 2xx/4xx acceptance for valid domain recipient, "

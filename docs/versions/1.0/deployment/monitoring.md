@@ -491,127 +491,137 @@ Create `monitoring/health_check.py`:
 """
 Custom health check script for Mailyte Mail Server
 """
+
 import requests
 import json
 import sys
 import time
 from datetime import datetime
 
+
 class HealthChecker:
     def __init__(self, config):
         self.config = config
         self.results = []
-    
+
     def check_service(self, name, url, timeout=10):
         """Check individual service health"""
         try:
             start_time = time.time()
             response = requests.get(url, timeout=timeout)
             response_time = (time.time() - start_time) * 1000
-            
+
             if response.status_code == 200:
                 data = response.json()
-                status = data.get('status', 'unknown')
-                
+                status = data.get("status", "unknown")
+
                 result = {
-                    'service': name,
-                    'status': status,
-                    'response_time_ms': round(response_time, 2),
-                    'timestamp': datetime.utcnow().isoformat(),
-                    'healthy': status == 'healthy'
+                    "service": name,
+                    "status": status,
+                    "response_time_ms": round(response_time, 2),
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "healthy": status == "healthy",
                 }
-                
-                if 'checks' in data:
-                    result['checks'] = data['checks']
-                
+
+                if "checks" in data:
+                    result["checks"] = data["checks"]
+
                 self.results.append(result)
-                return result['healthy']
+                return result["healthy"]
             else:
-                self.results.append({
-                    'service': name,
-                    'status': 'unhealthy',
-                    'error': f'HTTP {response.status_code}',
-                    'timestamp': datetime.utcnow().isoformat(),
-                    'healthy': False
-                })
+                self.results.append(
+                    {
+                        "service": name,
+                        "status": "unhealthy",
+                        "error": f"HTTP {response.status_code}",
+                        "timestamp": datetime.utcnow().isoformat(),
+                        "healthy": False,
+                    }
+                )
                 return False
-                
+
         except Exception as e:
-            self.results.append({
-                'service': name,
-                'status': 'unhealthy',
-                'error': str(e),
-                'timestamp': datetime.utcnow().isoformat(),
-                'healthy': False
-            })
+            self.results.append(
+                {
+                    "service": name,
+                    "status": "unhealthy",
+                    "error": str(e),
+                    "timestamp": datetime.utcnow().isoformat(),
+                    "healthy": False,
+                }
+            )
             return False
-    
+
     def run_checks(self):
         """Run all health checks"""
         services = [
-            ('Health Monitor', 'http://localhost:8080/health'),
-            ('API Gateway', 'http://localhost:5000/api/v1/health'),
-            ('Webhooks', 'http://localhost:8081/health'),
-            ('Rate Limiter', 'http://localhost:8082/health'),
-            ('Tracking', 'http://localhost:8083/health'),
-            ('Storage', 'http://localhost:8084/health'),
-            ('RAG', 'http://localhost:8085/health'),
-            ('Queue Manager', 'http://localhost:8086/health'),
-            ('Analytics', 'http://localhost:8087/health'),
+            ("Health Monitor", "http://localhost:8080/health"),
+            ("API Gateway", "http://localhost:5000/api/v1/health"),
+            ("Webhooks", "http://localhost:8081/health"),
+            ("Rate Limiter", "http://localhost:8082/health"),
+            ("Tracking", "http://localhost:8083/health"),
+            ("Storage", "http://localhost:8084/health"),
+            ("RAG", "http://localhost:8085/health"),
+            ("Queue Manager", "http://localhost:8086/health"),
+            ("Analytics", "http://localhost:8087/health"),
         ]
-        
+
         healthy_count = 0
         total_count = len(services)
-        
+
         for name, url in services:
             if self.check_service(name, url):
                 healthy_count += 1
-        
+
         overall_health = {
-            'overall_status': 'healthy' if healthy_count == total_count else 'unhealthy',
-            'healthy_services': healthy_count,
-            'total_services': total_count,
-            'health_percentage': round((healthy_count / total_count) * 100, 2),
-            'timestamp': datetime.utcnow().isoformat(),
-            'details': self.results
+            "overall_status": "healthy" if healthy_count == total_count else "unhealthy",
+            "healthy_services": healthy_count,
+            "total_services": total_count,
+            "health_percentage": round((healthy_count / total_count) * 100, 2),
+            "timestamp": datetime.utcnow().isoformat(),
+            "details": self.results,
         }
-        
+
         return overall_health
-    
-    def report(self, output_format='json'):
+
+    def report(self, output_format="json"):
         """Generate health report"""
         health_data = self.run_checks()
-        
-        if output_format == 'json':
+
+        if output_format == "json":
             print(json.dumps(health_data, indent=2))
-        elif output_format == 'summary':
+        elif output_format == "summary":
             print(f"Overall Status: {health_data['overall_status']}")
-            print(f"Healthy Services: {health_data['healthy_services']}/{health_data['total_services']}")
+            print(
+                f"Healthy Services: {health_data['healthy_services']}/{health_data['total_services']}"
+            )
             print(f"Health Percentage: {health_data['health_percentage']}%")
-            
-            for result in health_data['details']:
-                status_icon = "✅" if result['healthy'] else "❌"
+
+            for result in health_data["details"]:
+                status_icon = "✅" if result["healthy"] else "❌"
                 print(f"{status_icon} {result['service']}: {result['status']}")
-        
+
         # Exit with error code if not fully healthy
-        if health_data['overall_status'] != 'healthy':
+        if health_data["overall_status"] != "healthy":
             sys.exit(1)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     import argparse
-    
-    parser = argparse.ArgumentParser(description='Mail Server Health Check')
-    parser.add_argument('--format', choices=['json', 'summary'], 
-                       default='summary', help='Output format')
-    parser.add_argument('--config', help='Configuration file path')
-    
+
+    parser = argparse.ArgumentParser(description="Mail Server Health Check")
+    parser.add_argument(
+        "--format", choices=["json", "summary"], default="summary", help="Output format"
+    )
+    parser.add_argument("--config", help="Configuration file path")
+
     args = parser.parse_args()
-    
+
     config = {}
     if args.config:
-        with open(args.config, 'r') as f:
+        with open(args.config, "r") as f:
             config = json.load(f)
-    
+
     checker = HealthChecker(config)
     checker.report(args.format)
 ```
@@ -624,79 +634,82 @@ Create `monitoring/performance_monitor.py`:
 """
 Performance monitoring script
 """
+
 import psutil
 import requests
 import json
 import time
 from datetime import datetime
 
+
 class PerformanceMonitor:
     def __init__(self):
         self.metrics = {}
-    
+
     def collect_system_metrics(self):
         """Collect system-level metrics"""
         cpu_percent = psutil.cpu_percent(interval=1)
         memory = psutil.virtual_memory()
-        disk = psutil.disk_usage('/')
-        
-        self.metrics['system'] = {
-            'cpu_percent': cpu_percent,
-            'memory_percent': memory.percent,
-            'memory_used_gb': round(memory.used / (1024**3), 2),
-            'memory_total_gb': round(memory.total / (1024**3), 2),
-            'disk_percent': round((disk.used / disk.total) * 100, 2),
-            'disk_used_gb': round(disk.used / (1024**3), 2),
-            'disk_total_gb': round(disk.total / (1024**3), 2),
-            'load_average': psutil.getloadavg(),
-            'timestamp': datetime.utcnow().isoformat()
+        disk = psutil.disk_usage("/")
+
+        self.metrics["system"] = {
+            "cpu_percent": cpu_percent,
+            "memory_percent": memory.percent,
+            "memory_used_gb": round(memory.used / (1024**3), 2),
+            "memory_total_gb": round(memory.total / (1024**3), 2),
+            "disk_percent": round((disk.used / disk.total) * 100, 2),
+            "disk_used_gb": round(disk.used / (1024**3), 2),
+            "disk_total_gb": round(disk.total / (1024**3), 2),
+            "load_average": psutil.getloadavg(),
+            "timestamp": datetime.utcnow().isoformat(),
         }
-    
+
     def collect_service_metrics(self):
         """Collect service-specific metrics"""
         services = {
-            'api': 'http://localhost:5000/metrics',
-            'webhooks': 'http://localhost:8081/metrics',
-            'tracking': 'http://localhost:8083/metrics',
+            "api": "http://localhost:5000/metrics",
+            "webhooks": "http://localhost:8081/metrics",
+            "tracking": "http://localhost:8083/metrics",
         }
-        
-        self.metrics['services'] = {}
-        
+
+        self.metrics["services"] = {}
+
         for service, url in services.items():
             try:
                 response = requests.get(url, timeout=5)
                 if response.status_code == 200:
                     # Parse Prometheus metrics
                     metrics = self.parse_prometheus_metrics(response.text)
-                    self.metrics['services'][service] = metrics
+                    self.metrics["services"][service] = metrics
             except Exception as e:
-                self.metrics['services'][service] = {'error': str(e)}
-    
+                self.metrics["services"][service] = {"error": str(e)}
+
     def parse_prometheus_metrics(self, metrics_text):
         """Parse Prometheus metrics format"""
         metrics = {}
-        for line in metrics_text.split('\n'):
-            if line and not line.startswith('#'):
-                parts = line.split(' ')
+        for line in metrics_text.split("\n"):
+            if line and not line.startswith("#"):
+                parts = line.split(" ")
                 if len(parts) == 2:
                     try:
                         metrics[parts[0]] = float(parts[1])
                     except ValueError:
                         metrics[parts[0]] = parts[1]
         return metrics
-    
+
     def generate_report(self):
         """Generate performance report"""
         self.collect_system_metrics()
         self.collect_service_metrics()
-        
+
         return {
-            'timestamp': datetime.utcnow().isoformat(),
-            'system': self.metrics['system'],
-            'services': self.metrics['services']
+            "timestamp": datetime.utcnow().isoformat(),
+            "system": self.metrics["system"],
+            "services": self.metrics["services"],
         }
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     monitor = PerformanceMonitor()
     report = monitor.generate_report()
     print(json.dumps(report, indent=2))

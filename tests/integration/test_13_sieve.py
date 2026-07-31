@@ -4,6 +4,7 @@ Integration tests for Sieve filtering and mail folder structure.
 Verifies filter/sieve API endpoints, ManageSieve port availability,
 and default IMAP folder presence against the live Docker services.
 """
+
 import socket
 
 import pytest
@@ -25,8 +26,8 @@ TIMEOUT = 10
 # Filter API endpoints
 # ---------------------------------------------------------------------------
 
-class TestFilterAPI:
 
+class TestFilterAPI:
     def test_filters_list(self, api_headers):
         """GET /filters/ endpoint is reachable."""
         resp = requests.get(
@@ -66,8 +67,8 @@ class TestFilterAPI:
 # ManageSieve port
 # ---------------------------------------------------------------------------
 
-class TestManageSieve:
 
+class TestManageSieve:
     def test_managesieve_port_open(self):
         """ManageSieve port 4190 is listening on IMAP_HOST."""
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -84,16 +85,13 @@ class TestManageSieve:
 # Default IMAP folders
 # ---------------------------------------------------------------------------
 
-class TestIMAPFolders:
 
+class TestIMAPFolders:
     def test_imap_has_junk_folder(self, imap_connection):
         """IMAP account must have a Junk folder."""
         status, folders = imap_connection.list()
         assert status == "OK", f"IMAP LIST failed: {status}"
-        folder_names = [
-            entry.decode() if isinstance(entry, bytes) else entry
-            for entry in folders
-        ]
+        folder_names = [entry.decode() if isinstance(entry, bytes) else entry for entry in folders]
         joined = "\n".join(folder_names)
         assert any("Junk" in f for f in folder_names), (
             f"Junk folder not found in IMAP LIST:\n{joined}"
@@ -103,10 +101,7 @@ class TestIMAPFolders:
         """IMAP account must have an Archive folder."""
         status, folders = imap_connection.list()
         assert status == "OK", f"IMAP LIST failed: {status}"
-        folder_names = [
-            entry.decode() if isinstance(entry, bytes) else entry
-            for entry in folders
-        ]
+        folder_names = [entry.decode() if isinstance(entry, bytes) else entry for entry in folders]
         joined = "\n".join(folder_names)
         assert any("Archive" in f for f in folder_names), (
             f"Archive folder not found in IMAP LIST:\n{joined}"

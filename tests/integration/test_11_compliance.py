@@ -4,6 +4,7 @@ Integration tests for GDPR compliance features.
 Verifies audit logging, consent management, data export endpoints,
 and the underlying database tables that support compliance operations.
 """
+
 import pytest
 import requests
 
@@ -17,8 +18,8 @@ from .conftest import (
 # Compliance API endpoints
 # ---------------------------------------------------------------------------
 
-class TestComplianceAPI:
 
+class TestComplianceAPI:
     def test_compliance_audit_log(self, api_headers):
         """Audit log endpoint is reachable and requires proper auth."""
         resp = requests.get(
@@ -37,9 +38,7 @@ class TestComplianceAPI:
             headers=api_headers,
             timeout=10,
         )
-        assert resp.status_code < 600, (
-            f"Consent GET returned server error: {resp.status_code}"
-        )
+        assert resp.status_code < 600, f"Consent GET returned server error: {resp.status_code}"
 
     def test_compliance_consent_post(self, api_headers):
         """POST consent grant for a user returns a valid response."""
@@ -49,9 +48,7 @@ class TestComplianceAPI:
             json={"consent_type": "marketing", "granted": True},
             timeout=10,
         )
-        assert resp.status_code < 600, (
-            f"Consent POST returned server error: {resp.status_code}"
-        )
+        assert resp.status_code < 600, f"Consent POST returned server error: {resp.status_code}"
 
     def test_compliance_data_export(self, api_headers):
         """Requesting a full data export returns a valid response."""
@@ -61,9 +58,7 @@ class TestComplianceAPI:
             json={"export_type": "full"},
             timeout=10,
         )
-        assert resp.status_code < 600, (
-            f"Data export POST returned server error: {resp.status_code}"
-        )
+        assert resp.status_code < 600, f"Data export POST returned server error: {resp.status_code}"
 
     def test_compliance_data_export_status(self, api_headers):
         """Data export status endpoint returns a valid response."""
@@ -81,8 +76,8 @@ class TestComplianceAPI:
 # Compliance database tables
 # ---------------------------------------------------------------------------
 
-class TestComplianceDatabase:
 
+class TestComplianceDatabase:
     def test_audit_log_table_exists(self, db_connection):
         """The audit_logs table exists and is queryable."""
         cursor = db_connection.cursor()

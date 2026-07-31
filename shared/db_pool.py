@@ -212,9 +212,7 @@ class DatabasePool:
                     attempt,
                     exc,
                 )
-        raise MySQLError(
-            f"Unable to obtain a healthy connection after 3 attempts: {last_error}"
-        )
+        raise MySQLError(f"Unable to obtain a healthy connection after 3 attempts: {last_error}")
 
     # ------------------------------------------------------------------
     # Public connection accessors
@@ -564,9 +562,7 @@ def generate_partition_sql(
         current = next_boundary
 
     # Catch-all partition for dates beyond the last explicit boundary
-    partitions.append(
-        "    PARTITION p_future VALUES LESS THAN MAXVALUE"
-    )
+    partitions.append("    PARTITION p_future VALUES LESS THAN MAXVALUE")
 
     partition_list = ",\n".join(partitions)
 

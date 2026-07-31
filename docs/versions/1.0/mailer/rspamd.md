@@ -478,85 +478,82 @@ import dns.resolver
 import logging
 from datetime import datetime, timedelta
 
+
 class DKIMKeyManager:
     def __init__(self):
         self.db_config = {
-            'host': os.getenv('DB_HOST', 'localhost'),
-            'user': os.getenv('DB_USER', 'mailserver'),
-            'password': os.getenv('DB_PASSWORD'),
-            'database': os.getenv('DB_NAME', 'mailserver')
+            "host": os.getenv("DB_HOST", "localhost"),
+            "user": os.getenv("DB_USER", "mailserver"),
+            "password": os.getenv("DB_PASSWORD"),
+            "database": os.getenv("DB_NAME", "mailserver"),
         }
-        
+
         self.redis_config = {
-            'host': os.getenv('REDIS_HOST', 'localhost'),
-            'port': int(os.getenv('REDIS_PORT', 6379)),
-            'db': int(os.getenv('REDIS_DKIM_DB', 6)),
-            'password': os.getenv('REDIS_PASSWORD', '')
+            "host": os.getenv("REDIS_HOST", "localhost"),
+            "port": int(os.getenv("REDIS_PORT", 6379)),
+            "db": int(os.getenv("REDIS_DKIM_DB", 6)),
+            "password": os.getenv("REDIS_PASSWORD", ""),
         }
-        
-        self.key_path = '/var/lib/rspamd/dkim'
-        self.webhook_url = os.getenv('WEBHOOK_URL', '')
-        
+
+        self.key_path = "/var/lib/rspamd/dkim"
+        self.webhook_url = os.getenv("WEBHOOK_URL", "")
+
         # Ensure key directory exists
         os.makedirs(self.key_path, exist_ok=True)
 
-    def generate_dkim_key(self, domain, selector='default', key_size=2048):
+    def generate_dkim_key(self, domain, selector="default", key_size=2048):
         """Generate DKIM key pair for domain"""
         try:
             # Generate RSA key pair
-            private_key = rsa.generate_private_key(
-                public_exponent=65537,
-                key_size=key_size
-            )
-            
+            private_key = rsa.generate_private_key(public_exponent=65537, key_size=key_size)
+
             # Serialize private key
             private_pem = private_key.private_bytes(
                 encoding=serialization.Encoding.PEM,
                 format=serialization.PrivateFormat.PKCS8,
-                encryption_algorithm=serialization.NoEncryption()
+                encryption_algorithm=serialization.NoEncryption(),
             )
-            
+
             # Get public key
             public_key = private_key.public_key()
             public_pem = public_key.public_bytes(
                 encoding=serialization.Encoding.PEM,
-                format=serialization.PublicFormat.SubjectPublicKeyInfo
+                format=serialization.PublicFormat.SubjectPublicKeyInfo,
             )
-            
+
             # Save private key
             key_filename = f"{domain}.{selector}.key"
             key_file_path = os.path.join(self.key_path, key_filename)
-            
-            with open(key_file_path, 'wb') as f:
+
+            with open(key_file_path, "wb") as f:
                 f.write(private_pem)
-            
+
             os.chmod(key_file_path, 0o600)
-            
+
             # Generate DNS record
             dns_record = self.generate_dns_record(public_pem, selector)
-            
+
             # Store in database
             self.store_dkim_key(domain, selector, key_file_path, dns_record)
-            
+
             # Store in Redis for Rspamd
             self.store_redis_key(domain, selector, private_pem.decode())
-            
+
             # Send webhook notification
-            self.send_webhook_notification('dkim_key_generated', {
-                'domain': domain,
-                'selector': selector,
-                'dns_record': dns_record
-            })
-            
+            self.send_webhook_notification(
+                "dkim_key_generated",
+                {"domain": domain, "selector": selector, "dns_record": dns_record},
+            )
+
             logging.info(f"DKIM key generated for {domain} with selector {selector}")
-            
+
             return {
-                'domain': domain,
-                'selector': selector,
-                'key_file': key_file_path,
-                'dns_record': dns_record
+                "domain": domain,
+                "selector": selector,
+                "key_file": key_file_path,
+                "dns_record": dns_record,
             }
-            
+
         except Exception as e:
             logging.error(f"Failed to generate DKIM key for {domain}: {e}")
             raise
@@ -564,12 +561,12 @@ class DKIMKeyManager:
     def generate_dns_record(self, public_pem, selector):
         """Generate DNS TXT record for DKIM"""
         # Extract public key components
-        public_key_lines = public_pem.decode().split('\n')[1:-2]
-        public_key_b64 = ''.join(public_key_lines)
-        
+        public_key_lines = public_pem.decode().split("\n")[1:-2]
+        public_key_b64 = "".join(public_key_lines)
+
         # Create DNS record
         dns_record = f'{selector}._domainkey IN TXT "v=DKIM1; k=rsa; p={public_key_b64}"'
-        
+
         return dns_record
 
     def store_dkim_key(self, domain, selector, key_file, dns_record):
@@ -577,8 +574,9 @@ class DKIMKeyManager:
         try:
             conn = mysql.connector.connect(**self.db_config)
             cursor = conn.cursor()
-            
-            cursor.execute("""
+
+            cursor.execute(
+                """
                 INSERT INTO dkim_keys 
                 (domain, selector, key_file, dns_record, created_at, active)
                 VALUES (%s, %s, %s, %s, NOW(), 1)
@@ -586,10 +584,12 @@ class DKIMKeyManager:
                 key_file = VALUES(key_file),
                 dns_record = VALUES(dns_record),
                 updated_at = NOW()
-            """, (domain, selector, key_file, dns_record))
-            
+            """,
+                (domain, selector, key_file, dns_record),
+            )
+
             conn.commit()
-            
+
         except Exception as e:
             logging.error(f"Failed to store DKIM key in database: {e}")
             raise
@@ -601,14 +601,14 @@ class DKIMKeyManager:
         """Store DKIM private key in Redis for Rspamd"""
         try:
             r = redis.Redis(**self.redis_config)
-            
+
             # Store with domain and selector
             key_name = f"dkim_keys_{domain}_{selector}"
             r.set(key_name, private_key)
-            
+
             # Set expiration (90 days)
             r.expire(key_name, 7776000)
-            
+
         except Exception as e:
             logging.error(f"Failed to store DKIM key in Redis: {e}")
             raise
@@ -618,34 +618,37 @@ class DKIMKeyManager:
         try:
             conn = mysql.connector.connect(**self.db_config)
             cursor = conn.cursor()
-            
+
             # Find keys older than 90 days
             cursor.execute("""
                 SELECT domain, selector FROM dkim_keys 
                 WHERE created_at < DATE_SUB(NOW(), INTERVAL 90 DAY)
                 AND active = 1
             """)
-            
+
             keys_to_rotate = cursor.fetchall()
-            
+
             for domain, selector in keys_to_rotate:
                 # Generate new key with incremented selector
                 new_selector = f"{selector}_{datetime.now().strftime('%Y%m')}"
-                
+
                 # Generate new key
                 self.generate_dkim_key(domain, new_selector)
-                
+
                 # Mark old key as inactive after overlap period
-                cursor.execute("""
+                cursor.execute(
+                    """
                     UPDATE dkim_keys 
                     SET active = 0, rotated_at = NOW()
                     WHERE domain = %s AND selector = %s
-                """, (domain, selector))
-                
+                """,
+                    (domain, selector),
+                )
+
                 conn.commit()
-                
+
                 logging.info(f"Rotated DKIM key for {domain}")
-            
+
         except Exception as e:
             logging.error(f"DKIM key rotation failed: {e}")
         finally:
@@ -656,16 +659,16 @@ class DKIMKeyManager:
         """Verify DKIM DNS record is properly configured"""
         try:
             dns_name = f"{selector}._domainkey.{domain}"
-            
-            answers = dns.resolver.resolve(dns_name, 'TXT')
-            
+
+            answers = dns.resolver.resolve(dns_name, "TXT")
+
             for rdata in answers:
                 txt_record = str(rdata).strip('"')
-                if 'v=DKIM1' in txt_record:
+                if "v=DKIM1" in txt_record:
                     return True, txt_record
-            
+
             return False, "DKIM record not found"
-            
+
         except Exception as e:
             return False, f"DNS verification failed: {e}"
 
@@ -673,33 +676,34 @@ class DKIMKeyManager:
         """Send webhook notification for DKIM events"""
         if not self.webhook_url:
             return
-        
+
         payload = {
-            'event': event_type,
-            'service': 'rspamd_dkim',
-            'timestamp': datetime.utcnow().isoformat(),
-            'data': data
+            "event": event_type,
+            "service": "rspamd_dkim",
+            "timestamp": datetime.utcnow().isoformat(),
+            "data": data,
         }
-        
+
         try:
             response = requests.post(
                 self.webhook_url,
                 json=payload,
                 timeout=10,
-                headers={'Content-Type': 'application/json'}
+                headers={"Content-Type": "application/json"},
             )
-            
+
             if response.status_code != 200:
                 logging.warning(f"Webhook notification failed: {response.status_code}")
-                
+
         except Exception as e:
             logging.error(f"Webhook notification error: {e}")
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    
+
     manager = DKIMKeyManager()
-    
+
     if len(sys.argv) < 2:
         print("Usage: generate_dkim_key.py <command> [args]")
         print("Commands:")
@@ -707,37 +711,37 @@ if __name__ == '__main__':
         print("  rotate - Rotate all DKIM keys")
         print("  verify <domain> <selector> - Verify DNS record")
         sys.exit(1)
-    
+
     command = sys.argv[1]
-    
-    if command == 'generate':
+
+    if command == "generate":
         if len(sys.argv) < 3:
             print("Usage: generate_dkim_key.py generate <domain> [selector]")
             sys.exit(1)
-        
+
         domain = sys.argv[2]
-        selector = sys.argv[3] if len(sys.argv) > 3 else 'default'
-        
+        selector = sys.argv[3] if len(sys.argv) > 3 else "default"
+
         result = manager.generate_dkim_key(domain, selector)
         print(f"DKIM key generated for {domain}")
         print(f"DNS record: {result['dns_record']}")
-        
-    elif command == 'rotate':
+
+    elif command == "rotate":
         manager.rotate_dkim_keys()
         print("DKIM key rotation completed")
-        
-    elif command == 'verify':
+
+    elif command == "verify":
         if len(sys.argv) < 4:
             print("Usage: generate_dkim_key.py verify <domain> <selector>")
             sys.exit(1)
-        
+
         domain = sys.argv[2]
         selector = sys.argv[3]
-        
+
         verified, message = manager.verify_dns_record(domain, selector)
         print(f"DNS verification for {domain}: {'PASSED' if verified else 'FAILED'}")
         print(f"Details: {message}")
-        
+
     else:
         print(f"Unknown command: {command}")
         sys.exit(1)
@@ -1076,20 +1080,21 @@ import mysql.connector
 import os
 from datetime import datetime, timedelta
 
+
 class RspamdStats:
     def __init__(self):
         self.rspamd_url = "http://127.0.0.1:11334"
         self.redis_config = {
-            'host': os.getenv('REDIS_HOST', 'localhost'),
-            'port': int(os.getenv('REDIS_PORT', 6379)),
-            'password': os.getenv('REDIS_PASSWORD', '')
+            "host": os.getenv("REDIS_HOST", "localhost"),
+            "port": int(os.getenv("REDIS_PORT", 6379)),
+            "password": os.getenv("REDIS_PASSWORD", ""),
         }
-        
+
         self.db_config = {
-            'host': os.getenv('DB_HOST', 'localhost'),
-            'user': os.getenv('DB_USER', 'mailserver'),
-            'password': os.getenv('DB_PASSWORD'),
-            'database': os.getenv('DB_NAME', 'mailserver')
+            "host": os.getenv("DB_HOST", "localhost"),
+            "user": os.getenv("DB_USER", "mailserver"),
+            "password": os.getenv("DB_PASSWORD"),
+            "database": os.getenv("DB_NAME", "mailserver"),
         }
 
     def collect_stats(self):
@@ -1098,30 +1103,30 @@ class RspamdStats:
             # Get basic statistics
             response = requests.get(f"{self.rspamd_url}/stat", timeout=10)
             basic_stats = response.json() if response.status_code == 200 else {}
-            
+
             # Get learning statistics
             learning_stats = self.get_learning_stats()
-            
+
             # Get performance metrics
             performance_stats = self.get_performance_stats()
-            
+
             # Get error statistics
             error_stats = self.get_error_stats()
-            
+
             stats = {
-                'timestamp': datetime.utcnow().isoformat(),
-                'service': 'rspamd',
-                'basic': basic_stats,
-                'learning': learning_stats,
-                'performance': performance_stats,
-                'errors': error_stats
+                "timestamp": datetime.utcnow().isoformat(),
+                "service": "rspamd",
+                "basic": basic_stats,
+                "learning": learning_stats,
+                "performance": performance_stats,
+                "errors": error_stats,
             }
-            
+
             # Store in database
             self.store_stats(stats)
-            
+
             return stats
-            
+
         except Exception as e:
             print(f"Failed to collect Rspamd stats: {e}")
             return {}
@@ -1130,19 +1135,19 @@ class RspamdStats:
         """Get Bayes learning statistics"""
         try:
             r = redis.Redis(**self.redis_config, db=2)
-            
-            ham_learns = int(r.get('learns_ham') or 0)
-            spam_learns = int(r.get('learns_spam') or 0)
+
+            ham_learns = int(r.get("learns_ham") or 0)
+            spam_learns = int(r.get("learns_spam") or 0)
             total_learns = ham_learns + spam_learns
-            
+
             return {
-                'ham_learns': ham_learns,
-                'spam_learns': spam_learns,
-                'total_learns': total_learns,
-                'ham_ratio': (ham_learns / total_learns * 100) if total_learns > 0 else 0,
-                'spam_ratio': (spam_learns / total_learns * 100) if total_learns > 0 else 0
+                "ham_learns": ham_learns,
+                "spam_learns": spam_learns,
+                "total_learns": total_learns,
+                "ham_ratio": (ham_learns / total_learns * 100) if total_learns > 0 else 0,
+                "spam_ratio": (spam_learns / total_learns * 100) if total_learns > 0 else 0,
             }
-            
+
         except Exception as e:
             print(f"Failed to get learning stats: {e}")
             return {}
@@ -1151,21 +1156,21 @@ class RspamdStats:
         """Get performance statistics"""
         try:
             response = requests.get(f"{self.rspamd_url}/stat", timeout=10)
-            
+
             if response.status_code == 200:
                 data = response.json()
-                
+
                 return {
-                    'scanned': data.get('scanned', 0),
-                    'learned': data.get('learned', 0),
-                    'actions': data.get('actions', {}),
-                    'scan_time': data.get('scan_time', 0),
-                    'connections': data.get('connections', 0),
-                    'control_connections': data.get('control_connections', 0)
+                    "scanned": data.get("scanned", 0),
+                    "learned": data.get("learned", 0),
+                    "actions": data.get("actions", {}),
+                    "scan_time": data.get("scan_time", 0),
+                    "connections": data.get("connections", 0),
+                    "control_connections": data.get("control_connections", 0),
                 }
-            
+
             return {}
-            
+
         except Exception as e:
             print(f"Failed to get performance stats: {e}")
             return {}
@@ -1175,52 +1180,53 @@ class RspamdStats:
         try:
             # Count recent errors
             error_count = 0
-            
-            with open('/var/log/rspamd/rspamd.log', 'r') as f:
+
+            with open("/var/log/rspamd/rspamd.log", "r") as f:
                 lines = f.readlines()
                 recent_lines = lines[-1000:]  # Last 1000 lines
-                
+
                 for line in recent_lines:
-                    if 'ERROR' in line or 'CRITICAL' in line:
+                    if "ERROR" in line or "CRITICAL" in line:
                         error_count += 1
-            
-            return {
-                'recent_errors': error_count,
-                'last_check': datetime.utcnow().isoformat()
-            }
-            
+
+            return {"recent_errors": error_count, "last_check": datetime.utcnow().isoformat()}
+
         except Exception as e:
             print(f"Failed to get error stats: {e}")
-            return {'recent_errors': 0, 'last_check': datetime.utcnow().isoformat()}
+            return {"recent_errors": 0, "last_check": datetime.utcnow().isoformat()}
 
     def store_stats(self, stats):
         """Store statistics in database"""
         try:
             conn = mysql.connector.connect(**self.db_config)
             cursor = conn.cursor()
-            
-            cursor.execute("""
+
+            cursor.execute(
+                """
                 INSERT INTO rspamd_stats 
                 (timestamp, scanned, learned, scan_time, actions, errors)
                 VALUES (%s, %s, %s, %s, %s, %s)
-            """, (
-                stats['timestamp'],
-                stats['basic'].get('scanned', 0),
-                stats['learning'].get('total_learns', 0),
-                stats['performance'].get('scan_time', 0),
-                json.dumps(stats['basic'].get('actions', {})),
-                stats['errors'].get('recent_errors', 0)
-            ))
-            
+            """,
+                (
+                    stats["timestamp"],
+                    stats["basic"].get("scanned", 0),
+                    stats["learning"].get("total_learns", 0),
+                    stats["performance"].get("scan_time", 0),
+                    json.dumps(stats["basic"].get("actions", {})),
+                    stats["errors"].get("recent_errors", 0),
+                ),
+            )
+
             conn.commit()
-            
+
         except Exception as e:
             print(f"Failed to store stats: {e}")
         finally:
             if conn:
                 conn.close()
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     collector = RspamdStats()
     stats = collector.collect_stats()
     print(json.dumps(stats, indent=2))

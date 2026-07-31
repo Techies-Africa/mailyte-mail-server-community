@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 """
 Mailyte Mail Server Community Edition - Database Models Package
@@ -21,28 +20,48 @@ from .certificates import SSLCertificate, DKIMKey
 from .authentication import APIKey, UserSession
 from .system import SystemConfig, HealthCheck, ServiceMetrics
 from .enums import (
-    AccountStatus, CertificateStatus, MailStatus, EventType,
-    WebhookDeliveryStatus, AlertLevel, LimitType
+    AccountStatus,
+    CertificateStatus,
+    MailStatus,
+    EventType,
+    WebhookDeliveryStatus,
+    AlertLevel,
+    LimitType,
 )
 
 # Export all models
 __all__ = [
-    'Base',
+    "Base",
     # Core models
-    'Organization', 'Domain', 'EmailAccount', 'Alias',
+    "Organization",
+    "Domain",
+    "EmailAccount",
+    "Alias",
     # Mail processing models
-    'MailQueue', 'MailLog',
+    "MailQueue",
+    "MailLog",
     # Tracking models
-    'EmailTracking', 'TrackingStatistics',
+    "EmailTracking",
+    "TrackingStatistics",
     # Webhook models
-    'WebhookURL', 'WebhookDeliveryLog',
+    "WebhookURL",
+    "WebhookDeliveryLog",
     # Certificate models
-    'SSLCertificate', 'DKIMKey',
+    "SSLCertificate",
+    "DKIMKey",
     # Authentication models
-    'APIKey', 'UserSession',
+    "APIKey",
+    "UserSession",
     # System models
-    'SystemConfig', 'HealthCheck', 'ServiceMetrics',
+    "SystemConfig",
+    "HealthCheck",
+    "ServiceMetrics",
     # Enums
-    'AccountStatus', 'CertificateStatus', 'MailStatus', 'EventType',
-    'WebhookDeliveryStatus', 'AlertLevel', 'LimitType',
+    "AccountStatus",
+    "CertificateStatus",
+    "MailStatus",
+    "EventType",
+    "WebhookDeliveryStatus",
+    "AlertLevel",
+    "LimitType",
 ]

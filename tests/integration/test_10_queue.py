@@ -4,6 +4,7 @@ Integration tests for queue management.
 Validates the queue manager health, status, metrics endpoints,
 Postfix queue accessibility, and API gateway routing to queue services.
 """
+
 import subprocess
 
 import pytest
@@ -21,36 +22,30 @@ TIMEOUT = 10
 # Queue Manager direct endpoints
 # ---------------------------------------------------------------------------
 
-class TestQueueManagerDirect:
 
+class TestQueueManagerDirect:
     def test_queue_manager_health(self):
         """Queue manager health endpoint should return 200."""
         resp = requests.get(f"{QUEUE_BASE}/health", timeout=TIMEOUT)
-        assert resp.status_code == 200, (
-            f"Queue manager /health returned {resp.status_code}"
-        )
+        assert resp.status_code == 200, f"Queue manager /health returned {resp.status_code}"
 
     def test_queue_status(self):
         """Queue manager status endpoint should return 200."""
         resp = requests.get(f"{QUEUE_BASE}/api/status", timeout=TIMEOUT)
-        assert resp.status_code == 200, (
-            f"Queue manager /api/status returned {resp.status_code}"
-        )
+        assert resp.status_code == 200, f"Queue manager /api/status returned {resp.status_code}"
 
     def test_queue_metrics(self):
         """Queue manager metrics endpoint should return 200."""
         resp = requests.get(f"{QUEUE_BASE}/metrics", timeout=TIMEOUT)
-        assert resp.status_code == 200, (
-            f"Queue manager /metrics returned {resp.status_code}"
-        )
+        assert resp.status_code == 200, f"Queue manager /metrics returned {resp.status_code}"
 
 
 # ---------------------------------------------------------------------------
 # Postfix queue accessibility
 # ---------------------------------------------------------------------------
 
-class TestPostfixQueue:
 
+class TestPostfixQueue:
     def test_postfix_queue_accessible(self):
         """Postfix queue status should be queryable via the queue API."""
         # Try the queue manager's mail-queue endpoint first
@@ -83,8 +78,8 @@ class TestPostfixQueue:
 # Queue endpoints via API gateway
 # ---------------------------------------------------------------------------
 
-class TestQueueViaGateway:
 
+class TestQueueViaGateway:
     def test_queue_api_via_gateway(self, api_headers):
         """Queue health through the API gateway should respond."""
         resp = requests.get(
@@ -94,9 +89,7 @@ class TestQueueViaGateway:
         )
         # Accept any response — the gateway may return 200, 502, or 404
         # depending on routing config; we just verify connectivity.
-        assert resp.status_code is not None, (
-            "No response from queue health via API gateway"
-        )
+        assert resp.status_code is not None, "No response from queue health via API gateway"
 
     def test_deferred_queue_endpoint(self, api_headers):
         """Deferred queue endpoint through the API gateway should respond."""
@@ -105,6 +98,4 @@ class TestQueueViaGateway:
             headers=api_headers,
             timeout=TIMEOUT,
         )
-        assert resp.status_code is not None, (
-            "No response from deferred queue via API gateway"
-        )
+        assert resp.status_code is not None, "No response from deferred queue via API gateway"

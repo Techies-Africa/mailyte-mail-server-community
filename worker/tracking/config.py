@@ -8,9 +8,11 @@ import json
 
 logger = logging.getLogger(__name__)
 
+
 @dataclass
 class TrackingConfig:
     """Tracking configuration data class"""
+
     # Core tracking settings
     enabled: bool = True
     open_tracking_enabled: bool = True
@@ -76,7 +78,8 @@ class TrackingConfig:
         if self.exclude_domains is None:
             self.exclude_domains = []
         if self.exclude_link_patterns is None:
-            self.exclude_link_patterns = ['mailto:', 'tel:', 'ftp:', 'file:']
+            self.exclude_link_patterns = ["mailto:", "tel:", "ftp:", "file:"]
+
 
 class ConfigManager:
     """Centralized configuration manager for tracking service"""
@@ -89,68 +92,64 @@ class ConfigManager:
         """Load configuration from environment variables"""
         return TrackingConfig(
             # Core tracking settings
-            enabled=self._get_bool('TRACKING_ENABLED', True),
-            open_tracking_enabled=self._get_bool('OPEN_TRACKING_ENABLED', True),
-            click_tracking_enabled=self._get_bool('CLICK_TRACKING_ENABLED', True),
-
+            enabled=self._get_bool("TRACKING_ENABLED", True),
+            open_tracking_enabled=self._get_bool("OPEN_TRACKING_ENABLED", True),
+            click_tracking_enabled=self._get_bool("CLICK_TRACKING_ENABLED", True),
             # Tracking pixel settings
-            pixel_cache_control=os.getenv('TRACKING_PIXEL_CACHE_CONTROL', 'no-cache, no-store, must-revalidate'),
-            pixel_expires=self._get_int('TRACKING_PIXEL_EXPIRES', 0),
-            pixel_size=os.getenv('TRACKING_PIXEL_SIZE', '1x1'),
-
+            pixel_cache_control=os.getenv(
+                "TRACKING_PIXEL_CACHE_CONTROL", "no-cache, no-store, must-revalidate"
+            ),
+            pixel_expires=self._get_int("TRACKING_PIXEL_EXPIRES", 0),
+            pixel_size=os.getenv("TRACKING_PIXEL_SIZE", "1x1"),
             # Click tracking settings
-            click_redirect_timeout=self._get_int('CLICK_REDIRECT_TIMEOUT', 30),
-            click_preserve_query_params=self._get_bool('CLICK_PRESERVE_QUERY_PARAMS', True),
-            click_preserve_fragments=self._get_bool('CLICK_PRESERVE_FRAGMENTS', True),
-
+            click_redirect_timeout=self._get_int("CLICK_REDIRECT_TIMEOUT", 30),
+            click_preserve_query_params=self._get_bool("CLICK_PRESERVE_QUERY_PARAMS", True),
+            click_preserve_fragments=self._get_bool("CLICK_PRESERVE_FRAGMENTS", True),
             # Security settings
-            tracking_domain=os.getenv('TRACKING_DOMAIN', os.getenv('HOSTNAME', 'mail.yourdomain.com')),
-            tracking_subdomain=os.getenv('TRACKING_SUBDOMAIN', 'track'),
-            tracking_protocol=os.getenv('TRACKING_PROTOCOL', 'https'),
-            require_ssl=self._get_bool('TRACKING_REQUIRE_SSL', True),
-
+            tracking_domain=os.getenv(
+                "TRACKING_DOMAIN", os.getenv("HOSTNAME", "mail.yourdomain.com")
+            ),
+            tracking_subdomain=os.getenv("TRACKING_SUBDOMAIN", "track"),
+            tracking_protocol=os.getenv("TRACKING_PROTOCOL", "https"),
+            require_ssl=self._get_bool("TRACKING_REQUIRE_SSL", True),
             # Database settings
-            batch_insert_size=self._get_int('TRACKING_BATCH_INSERT_SIZE', 100),
-            connection_pool_size=self._get_int('TRACKING_DB_POOL_SIZE', 10),
-            connection_timeout=self._get_int('TRACKING_DB_TIMEOUT', 30),
-
+            batch_insert_size=self._get_int("TRACKING_BATCH_INSERT_SIZE", 100),
+            connection_pool_size=self._get_int("TRACKING_DB_POOL_SIZE", 10),
+            connection_timeout=self._get_int("TRACKING_DB_TIMEOUT", 30),
             # Webhook settings
-            webhook_enabled=self._get_bool('TRACKING_WEBHOOK_ENABLED', True),
-            webhook_timeout=self._get_int('TRACKING_WEBHOOK_TIMEOUT', 10),
-            webhook_retry_attempts=self._get_int('TRACKING_WEBHOOK_RETRY_ATTEMPTS', 3),
-            webhook_retry_delay=self._get_int('TRACKING_WEBHOOK_RETRY_DELAY', 5),
-
+            webhook_enabled=self._get_bool("TRACKING_WEBHOOK_ENABLED", True),
+            webhook_timeout=self._get_int("TRACKING_WEBHOOK_TIMEOUT", 10),
+            webhook_retry_attempts=self._get_int("TRACKING_WEBHOOK_RETRY_ATTEMPTS", 3),
+            webhook_retry_delay=self._get_int("TRACKING_WEBHOOK_RETRY_DELAY", 5),
             # Analytics settings
-            track_user_agent=self._get_bool('TRACK_USER_AGENT', True),
-            track_ip_address=self._get_bool('TRACK_IP_ADDRESS', True),
-            track_geolocation=self._get_bool('TRACK_GEOLOCATION', True),
-            track_device_info=self._get_bool('TRACK_DEVICE_INFO', True),
-            track_referrer=self._get_bool('TRACK_REFERRER', True),
-
+            track_user_agent=self._get_bool("TRACK_USER_AGENT", True),
+            track_ip_address=self._get_bool("TRACK_IP_ADDRESS", True),
+            track_geolocation=self._get_bool("TRACK_GEOLOCATION", True),
+            track_device_info=self._get_bool("TRACK_DEVICE_INFO", True),
+            track_referrer=self._get_bool("TRACK_REFERRER", True),
             # Privacy settings
-            anonymize_ip=self._get_bool('TRACKING_ANONYMIZE_IP', False),
-            ip_retention_days=self._get_int('TRACKING_IP_RETENTION_DAYS', 90),
-            tracking_data_retention_days=self._get_int('TRACKING_DATA_RETENTION_DAYS', 365),
-
+            anonymize_ip=self._get_bool("TRACKING_ANONYMIZE_IP", False),
+            ip_retention_days=self._get_int("TRACKING_IP_RETENTION_DAYS", 90),
+            tracking_data_retention_days=self._get_int("TRACKING_DATA_RETENTION_DAYS", 365),
             # Performance settings
-            async_logging=self._get_bool('TRACKING_ASYNC_LOGGING', True),
-            cache_tracking_configs=self._get_bool('TRACKING_CACHE_CONFIGS', True),
-            cache_ttl=self._get_int('TRACKING_CACHE_TTL', 300),
-
+            async_logging=self._get_bool("TRACKING_ASYNC_LOGGING", True),
+            cache_tracking_configs=self._get_bool("TRACKING_CACHE_CONFIGS", True),
+            cache_ttl=self._get_int("TRACKING_CACHE_TTL", 300),
             # Link rewriting settings
-            exclude_domains=self._get_list('TRACKING_EXCLUDE_DOMAINS', []),
-            exclude_link_patterns=self._get_list('TRACKING_EXCLUDE_PATTERNS', ['mailto:', 'tel:', 'ftp:', 'file:']),
-            preserve_utm_params=self._get_bool('TRACKING_PRESERVE_UTM_PARAMS', True),
-
+            exclude_domains=self._get_list("TRACKING_EXCLUDE_DOMAINS", []),
+            exclude_link_patterns=self._get_list(
+                "TRACKING_EXCLUDE_PATTERNS", ["mailto:", "tel:", "ftp:", "file:"]
+            ),
+            preserve_utm_params=self._get_bool("TRACKING_PRESERVE_UTM_PARAMS", True),
             # Rate limiting
-            rate_limit_per_ip=self._get_int('TRACKING_RATE_LIMIT_PER_IP', 1000),
-            rate_limit_window=self._get_int('TRACKING_RATE_LIMIT_WINDOW', 3600),
+            rate_limit_per_ip=self._get_int("TRACKING_RATE_LIMIT_PER_IP", 1000),
+            rate_limit_window=self._get_int("TRACKING_RATE_LIMIT_WINDOW", 3600),
         )
 
     def _get_bool(self, key: str, default: bool) -> bool:
         """Get boolean value from environment variable"""
         value = os.getenv(key, str(default)).lower()
-        return value in ('true', '1', 'yes', 'on', 'enabled')
+        return value in ("true", "1", "yes", "on", "enabled")
 
     def _get_int(self, key: str, default: int) -> int:
         """Get integer value from environment variable"""
@@ -170,10 +169,10 @@ class ConfigManager:
 
     def _get_list(self, key: str, default: List[str]) -> List[str]:
         """Get list value from environment variable (comma-separated)"""
-        value = os.getenv(key, '')
+        value = os.getenv(key, "")
         if not value:
             return default
-        return [item.strip() for item in value.split(',') if item.strip()]
+        return [item.strip() for item in value.split(",") if item.strip()]
 
     def _validate_config(self):
         """Validate configuration values"""
@@ -222,12 +221,12 @@ class ConfigManager:
     def get_database_config(self) -> Dict[str, Any]:
         """Get database configuration from environment variables"""
         return {
-            'host': os.getenv('DB_HOST', 'mysql'),
-            'port': int(os.getenv('DB_PORT', 3306)),
-            'database': os.getenv('DB_NAME', 'mailserver'),
-            'user': os.getenv('DB_USER', 'root'),
-            'password': os.getenv('DB_PASSWORD', 'password'),
-            'charset': 'utf8mb4'
+            "host": os.getenv("DB_HOST", "mysql"),
+            "port": int(os.getenv("DB_PORT", 3306)),
+            "database": os.getenv("DB_NAME", "mailserver"),
+            "user": os.getenv("DB_USER", "root"),
+            "password": os.getenv("DB_PASSWORD", "password"),
+            "charset": "utf8mb4",
         }
 
     def get_database_url(self) -> str:
@@ -237,16 +236,16 @@ class ConfigManager:
 
     def get_webhook_config(self) -> Dict[str, Any]:
         """Get webhook configuration"""
-        webhook_urls = os.getenv('WEBHOOK_URLS', '').split(',')
+        webhook_urls = os.getenv("WEBHOOK_URLS", "").split(",")
         webhook_urls = [url.strip() for url in webhook_urls if url.strip()]
 
         return {
-            'enabled': self.config.webhook_enabled,
-            'urls': webhook_urls,
-            'secret': os.getenv('WEBHOOK_SECRET', 'default-secret'),
-            'timeout': self.config.webhook_timeout,
-            'retry_attempts': self.config.webhook_retry_attempts,
-            'retry_delay': self.config.webhook_retry_delay
+            "enabled": self.config.webhook_enabled,
+            "urls": webhook_urls,
+            "secret": os.getenv("WEBHOOK_SECRET", "default-secret"),
+            "timeout": self.config.webhook_timeout,
+            "retry_attempts": self.config.webhook_retry_attempts,
+            "retry_delay": self.config.webhook_retry_delay,
         }
 
     def anonymize_ip_address(self, ip_address: str) -> str:
@@ -255,31 +254,33 @@ class ConfigManager:
             return ip_address
 
         # IPv4 anonymization (remove last octet)
-        if '.' in ip_address and ip_address.count('.') == 3:
-            parts = ip_address.split('.')
+        if "." in ip_address and ip_address.count(".") == 3:
+            parts = ip_address.split(".")
             return f"{parts[0]}.{parts[1]}.{parts[2]}.0"
 
         # IPv6 anonymization (remove last 64 bits)
-        if ':' in ip_address:
-            parts = ip_address.split(':')
+        if ":" in ip_address:
+            parts = ip_address.split(":")
             if len(parts) >= 4:
-                return ':'.join(parts[:4]) + '::0'
+                return ":".join(parts[:4]) + "::0"
 
         return ip_address
 
-    def get_organization_tracking_config(self, organization_id: str, domain_id: str = None) -> Dict[str, Any]:
+    def get_organization_tracking_config(
+        self, organization_id: str, domain_id: str = None
+    ) -> Dict[str, Any]:
         """Get tenant-specific tracking configuration"""
         # This would typically load from database in a real implementation
         # For now, return default configuration
         return {
-            'enabled': self.config.enabled,
-            'open_tracking': self.config.open_tracking_enabled,
-            'click_tracking': self.config.click_tracking_enabled,
-            'custom_domain': None,
-            'custom_subdomain': None,
-            'webhook_urls': [],
-            'exclude_domains': self.config.exclude_domains.copy(),
-            'preserve_utm': self.config.preserve_utm_params
+            "enabled": self.config.enabled,
+            "open_tracking": self.config.open_tracking_enabled,
+            "click_tracking": self.config.click_tracking_enabled,
+            "custom_domain": None,
+            "custom_subdomain": None,
+            "webhook_urls": [],
+            "exclude_domains": self.config.exclude_domains.copy(),
+            "preserve_utm": self.config.preserve_utm_params,
         }
 
     def get_organization_config(self, organization_id: str) -> Dict[str, Any]:
@@ -293,7 +294,7 @@ class ConfigManager:
             Organization-specific configuration
         """
         # Get organization-specific configs from environment
-        organization_configs_str = os.getenv('TRACKING_ORGANIZATION_CONFIGS', '{}')
+        organization_configs_str = os.getenv("TRACKING_ORGANIZATION_CONFIGS", "{}")
         try:
             organization_configs = json.loads(organization_configs_str)
             organization_config = organization_configs.get(organization_id, {})
@@ -305,6 +306,7 @@ class ConfigManager:
         config.update(organization_config)
 
         return config
+
 
 # Global configuration instance
 config_manager = ConfigManager()

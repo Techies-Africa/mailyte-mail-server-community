@@ -5,6 +5,7 @@ Validates that Prometheus, Grafana, and the monitoring API endpoints are
 reachable, and that the health_checks and service_metrics tables exist in
 the database.
 """
+
 import pytest
 import requests
 
@@ -16,6 +17,7 @@ TIMEOUT = 10  # seconds for HTTP operations
 # ---------------------------------------------------------------------------
 # External monitoring services
 # ---------------------------------------------------------------------------
+
 
 class TestMonitoringInfrastructure:
     """Prometheus and Grafana availability."""
@@ -47,6 +49,7 @@ class TestMonitoringInfrastructure:
 # API endpoints
 # ---------------------------------------------------------------------------
 
+
 class TestMonitoringAPI:
     """Monitoring endpoints exposed through the main API."""
 
@@ -58,9 +61,7 @@ class TestMonitoringAPI:
             headers=api_headers,
             timeout=TIMEOUT,
         )
-        assert resp.status_code in (200, 401, 403), (
-            f"Unexpected status code: {resp.status_code}"
-        )
+        assert resp.status_code in (200, 401, 403), f"Unexpected status code: {resp.status_code}"
 
     @pytest.mark.xfail(reason="monitoring may be restarting")
     def test_monitoring_health_endpoint(self, api_headers):
@@ -70,9 +71,7 @@ class TestMonitoringAPI:
             headers=api_headers,
             timeout=TIMEOUT,
         )
-        assert resp.status_code in (200, 401, 403), (
-            f"Unexpected status code: {resp.status_code}"
-        )
+        assert resp.status_code in (200, 401, 403), f"Unexpected status code: {resp.status_code}"
 
     @pytest.mark.xfail(reason="monitoring may be restarting")
     def test_monitoring_stats(self, api_headers):
@@ -82,14 +81,13 @@ class TestMonitoringAPI:
             headers=api_headers,
             timeout=TIMEOUT,
         )
-        assert resp.status_code in (200, 401, 403), (
-            f"Unexpected status code: {resp.status_code}"
-        )
+        assert resp.status_code in (200, 401, 403), f"Unexpected status code: {resp.status_code}"
 
 
 # ---------------------------------------------------------------------------
 # Database
 # ---------------------------------------------------------------------------
+
 
 class TestMonitoringDatabase:
     """Verify monitoring-related tables are accessible."""

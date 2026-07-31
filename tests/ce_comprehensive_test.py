@@ -3,6 +3,7 @@
 Mailyte CE — Comprehensive Test Suite
 Tests all Community Edition features against running Docker services.
 """
+
 import requests, json, time, smtplib, imaplib, poplib, ssl, socket, os
 
 API = os.getenv("API_BASE", "http://api:8080/api/v1")
@@ -51,7 +52,11 @@ print("=" * 70)
 print("\n--- 1. API CRUD ---")
 
 r = requests.get("http://api:8080/health", timeout=10)
-test("Health endpoint", r.status_code == 200 and r.json()["database"] == "connected", r.json().get("database"))
+test(
+    "Health endpoint",
+    r.status_code == 200 and r.json()["database"] == "connected",
+    r.json().get("database"),
+)
 
 r = requests.get(f"{API}/organizations/", headers=HEADERS, timeout=10)
 test("List organizations", r.status_code == 200, f"status={r.status_code}")
@@ -62,9 +67,12 @@ test("List domains", r.status_code == 200, f"status={r.status_code}")
 r = requests.get(f"{API}/mailboxes/", headers=HEADERS, timeout=10)
 test("List mailboxes", r.status_code in (200, 404), f"status={r.status_code}")
 
-r = requests.post(f"{API}/aliases/", headers=HEADERS, json={
-    "source": "info@test.local", "destination": "user@test.local"
-}, timeout=10)
+r = requests.post(
+    f"{API}/aliases/",
+    headers=HEADERS,
+    json={"source": "info@test.local", "destination": "user@test.local"},
+    timeout=10,
+)
 test("Create alias", r.status_code in (200, 201, 409), f"status={r.status_code}")
 
 r = requests.get(f"{API}/aliases/", headers=HEADERS, timeout=10)
@@ -84,9 +92,12 @@ r = requests.get(f"{API}/domains/", headers={"X-API-Key": "bad-key"}, timeout=10
 test("Rejects invalid API key", r.status_code == 401)
 
 # Create second mailbox
-r = requests.post(f"{API}/mailboxes/", headers=HEADERS, json={
-    "email": "test2@test.local", "password": "testpass456", "name": "Test User 2"
-}, timeout=10)
+r = requests.post(
+    f"{API}/mailboxes/",
+    headers=HEADERS,
+    json={"email": "test2@test.local", "password": "testpass456", "name": "Test User 2"},
+    timeout=10,
+)
 test("Create second mailbox", r.status_code in (200, 201, 409), f"status={r.status_code}")
 
 # =========================================================================
@@ -104,7 +115,7 @@ except Exception as e:
 bulk_ok = 0
 for i in range(10):
     try:
-        send_email("user@test.local", "user@test.local", f"Bulk #{i+1}", f"Bulk body {i+1}")
+        send_email("user@test.local", "user@test.local", f"Bulk #{i + 1}", f"Bulk body {i + 1}")
         bulk_ok += 1
     except:
         pass
@@ -112,7 +123,9 @@ test(f"Bulk send (10 emails)", bulk_ok == 10, f"{bulk_ok}/10 sent")
 
 # HTML email
 try:
-    html = '<html><body><h1>Test</h1><p>Click <a href="https://mailyte.com">here</a></p></body></html>'
+    html = (
+        '<html><body><h1>Test</h1><p>Click <a href="https://mailyte.com">here</a></p></body></html>'
+    )
     send_email("user@test.local", "user@test.local", "HTML Test", html, html=True)
     test("Send HTML email", True)
 except Exception as e:
@@ -301,7 +314,9 @@ try:
     s.settimeout(5)
     s.connect(("dovecot", 4190))
     banner = s.recv(1024).decode()
-    test("ManageSieve port (4190)", "IMPLEMENTATION" in banner or "OK" in banner.upper(), banner[:60])
+    test(
+        "ManageSieve port (4190)", "IMPLEMENTATION" in banner or "OK" in banner.upper(), banner[:60]
+    )
     s.close()
 except Exception as e:
     test("ManageSieve port (4190)", False, str(e))
@@ -314,7 +329,9 @@ print("\n--- 8. AUTOCONFIG ---")
 r = requests.get("http://autoconfig:8100/health", timeout=10)
 test("Autoconfig health", r.status_code == 200)
 
-r = requests.get("http://autoconfig:8100/mail/config-v1.1.xml?emailaddress=user@test.local", timeout=10)
+r = requests.get(
+    "http://autoconfig:8100/mail/config-v1.1.xml?emailaddress=user@test.local", timeout=10
+)
 test("Autoconfig XML", r.status_code == 200, f"has config: {'emailProvider' in r.text}")
 
 # =========================================================================
@@ -323,12 +340,18 @@ test("Autoconfig XML", r.status_code == 200, f"has config: {'emailProvider' in r
 print("\n--- 9. DATABASE ---")
 
 import mysql.connector
-conn = mysql.connector.connect(host="mysql", port=3306, database="mailserver",
-                                user="mailuser", password="mailpassword123")
+
+conn = mysql.connector.connect(
+    host="mysql", port=3306, database="mailserver", user="mailuser", password="mailpassword123"
+)
 cur = conn.cursor()
 
-for table, label in [("organizations", "Organizations"), ("domains", "Domains"),
-                      ("email_accounts", "Email accounts"), ("api_keys", "API keys")]:
+for table, label in [
+    ("organizations", "Organizations"),
+    ("domains", "Domains"),
+    ("email_accounts", "Email accounts"),
+    ("api_keys", "API keys"),
+]:
     cur.execute(f"SELECT COUNT(*) FROM {table}")
     count = cur.fetchone()[0]
     test(f"DB: {label}", count > 0, f"{count} rows")
@@ -342,8 +365,13 @@ conn.close()
 
 # Roundcube DB
 try:
-    conn = mysql.connector.connect(host="mysql", port=3306, database="roundcubemail",
-                                    user="mailuser", password="mailpassword123")
+    conn = mysql.connector.connect(
+        host="mysql",
+        port=3306,
+        database="roundcubemail",
+        user="mailuser",
+        password="mailpassword123",
+    )
     cur = conn.cursor()
     cur.execute("SHOW TABLES")
     tables = cur.fetchall()
@@ -359,6 +387,7 @@ except Exception as e:
 print("\n--- 10. REDIS ---")
 
 import redis
+
 r = redis.Redis(host="redis", port=6379, db=0)
 test("Redis ping", r.ping())
 r.set("mailyte_ce_test", "ok")

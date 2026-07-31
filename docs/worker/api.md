@@ -128,7 +128,7 @@ Key tables the API touches:
 CORS is configured via the `CORS_ALLOWED_ORIGINS` environment variable:
 
 ```python
-allow_origins=os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:3000").split(",")
+allow_origins = os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:3000").split(",")
 ```
 
 For production, set this to your dashboard URL(s).

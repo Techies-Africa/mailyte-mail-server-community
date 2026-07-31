@@ -4,6 +4,7 @@ Integration tests for message trace, quarantine, and audit logging.
 Verifies the message-trace API endpoints and backing database tables
 against the live Docker services.
 """
+
 import pytest
 import requests
 
@@ -20,8 +21,8 @@ TIMEOUT = 10
 # Message trace API
 # ---------------------------------------------------------------------------
 
-class TestMessageTraceAPI:
 
+class TestMessageTraceAPI:
     def test_message_trace_search(self, api_headers):
         """GET /message-trace/trace with sender param is reachable."""
         resp = requests.get(
@@ -61,8 +62,8 @@ class TestMessageTraceAPI:
 # Database tables
 # ---------------------------------------------------------------------------
 
-class TestMessageTraceDatabase:
 
+class TestMessageTraceDatabase:
     def test_mail_logs_table(self, db_connection):
         """mail_logs table must exist and be queryable."""
         cursor = db_connection.cursor()

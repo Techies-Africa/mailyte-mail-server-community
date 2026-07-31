@@ -144,43 +144,44 @@ from email.mime.text import MIMEText
 import json
 import requests
 
+
 class TrackingInjector:
     def __init__(self):
         self.db_config = {
-            'host': os.getenv('DB_HOST', 'localhost'),
-            'user': os.getenv('DB_USER', 'mailserver'),
-            'password': os.getenv('DB_PASSWORD'),
-            'database': os.getenv('DB_NAME', 'mailserver')
+            "host": os.getenv("DB_HOST", "localhost"),
+            "user": os.getenv("DB_USER", "mailserver"),
+            "password": os.getenv("DB_PASSWORD"),
+            "database": os.getenv("DB_NAME", "mailserver"),
         }
-        self.tracking_domain = os.getenv('TRACKING_DOMAIN', 'track.yourdomain.com')
-        self.webhook_url = os.getenv('WEBHOOK_URL', '')
+        self.tracking_domain = os.getenv("TRACKING_DOMAIN", "track.yourdomain.com")
+        self.webhook_url = os.getenv("WEBHOOK_URL", "")
 
     def process_email(self, raw_email):
         """Process email and inject tracking elements"""
         try:
             # Parse email
             msg = email.message_from_string(raw_email)
-            
+
             # Generate tracking ID
             tracking_id = self.generate_tracking_id(msg)
-            
+
             # Store tracking record
             self.store_tracking_record(tracking_id, msg)
-            
+
             # Inject tracking pixel
             if msg.is_multipart():
                 self.inject_tracking_multipart(msg, tracking_id)
             else:
                 self.inject_tracking_single(msg, tracking_id)
-            
+
             # Modify links for click tracking
             self.modify_links(msg, tracking_id)
-            
+
             # Send webhook notification
-            self.send_webhook_notification('email_sent', tracking_id, msg)
-            
+            self.send_webhook_notification("email_sent", tracking_id, msg)
+
             return msg.as_string()
-            
+
         except Exception as e:
             logger.error(f"Tracking injection failed: {e}")
             return raw_email  # Return original on failure
@@ -193,43 +194,46 @@ class TrackingInjector:
     def inject_tracking_pixel(self, html_content, tracking_id):
         """Inject tracking pixel into HTML content"""
         pixel_url = f"https://{self.tracking_domain}/pixel/{tracking_id}.png"
-        tracking_pixel = f'<img src="{pixel_url}" width="1" height="1" style="display:none;" alt="">'
-        
+        tracking_pixel = (
+            f'<img src="{pixel_url}" width="1" height="1" style="display:none;" alt="">'
+        )
+
         # Insert before closing body tag
-        if '</body>' in html_content:
-            html_content = html_content.replace('</body>', f'{tracking_pixel}</body>')
+        if "</body>" in html_content:
+            html_content = html_content.replace("</body>", f"{tracking_pixel}</body>")
         else:
             html_content += tracking_pixel
-            
+
         return html_content
 
     def modify_links(self, msg, tracking_id):
         """Modify links for click tracking"""
         if msg.is_multipart():
             for part in msg.walk():
-                if part.get_content_type() == 'text/html':
-                    content = part.get_payload(decode=True).decode('utf-8')
+                if part.get_content_type() == "text/html":
+                    content = part.get_payload(decode=True).decode("utf-8")
                     modified_content = self.rewrite_links(content, tracking_id)
-                    part.set_payload(modified_content.encode('utf-8'))
+                    part.set_payload(modified_content.encode("utf-8"))
         else:
-            if msg.get_content_type() == 'text/html':
-                content = msg.get_payload(decode=True).decode('utf-8')
+            if msg.get_content_type() == "text/html":
+                content = msg.get_payload(decode=True).decode("utf-8")
                 modified_content = self.rewrite_links(content, tracking_id)
-                msg.set_payload(modified_content.encode('utf-8'))
+                msg.set_payload(modified_content.encode("utf-8"))
 
     def rewrite_links(self, html_content, tracking_id):
         """Rewrite URLs for click tracking"""
+
         def replace_link(match):
             original_url = match.group(1)
-            if original_url.startswith(('mailto:', 'tel:', '#')):
+            if original_url.startswith(("mailto:", "tel:", "#")):
                 return match.group(0)  # Skip special URLs
-            
+
             # Encode original URL
             encoded_url = base64.urlsafe_b64encode(original_url.encode()).decode()
             tracking_url = f"https://{self.tracking_domain}/click/{tracking_id}/{encoded_url}"
-            
+
             return f'href="{tracking_url}"'
-        
+
         # Replace href attributes
         pattern = r'href=["\']([^"\']+)["\']'
         return re.sub(pattern, replace_link, html_content)
@@ -239,32 +243,31 @@ class TrackingInjector:
         try:
             conn = mysql.connector.connect(**self.db_config)
             cursor = conn.cursor()
-            
-            cursor.execute("""
+
+            cursor.execute(
+                """
                 INSERT INTO email_tracking 
                 (tracking_id, sender, recipient, subject, created_at)
                 VALUES (%s, %s, %s, %s, NOW())
-            """, (
-                tracking_id,
-                msg.get('From', ''),
-                msg.get('To', ''),
-                msg.get('Subject', '')
-            ))
-            
+            """,
+                (tracking_id, msg.get("From", ""), msg.get("To", ""), msg.get("Subject", "")),
+            )
+
             conn.commit()
-            
+
         except Exception as e:
             logger.error(f"Failed to store tracking record: {e}")
         finally:
             if conn:
                 conn.close()
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     injector = TrackingInjector()
-    
+
     # Read email from stdin
     raw_email = sys.stdin.read()
-    
+
     # Process and output modified email
     processed_email = injector.process_email(raw_email)
     sys.stdout.write(processed_email)
@@ -291,67 +294,61 @@ import time
 import logging
 from collections import defaultdict
 
+
 class RateLimitPolicy:
     def __init__(self):
         self.db_config = {
-            'host': os.getenv('DB_HOST', 'localhost'),
-            'user': os.getenv('DB_USER', 'mailserver'),
-            'password': os.getenv('DB_PASSWORD'),
-            'database': os.getenv('DB_NAME', 'mailserver')
-        }
-        
-        self.redis_client = redis.Redis(
-            host=os.getenv('REDIS_HOST', 'localhost'),
-            port=int(os.getenv('REDIS_PORT', 6379)),
-            db=int(os.getenv('REDIS_DB', 1))
-        )
-        
-        self.default_limits = {
-            'hourly': 100,
-            'daily': 1000,
-            'monthly': 10000
+            "host": os.getenv("DB_HOST", "localhost"),
+            "user": os.getenv("DB_USER", "mailserver"),
+            "password": os.getenv("DB_PASSWORD"),
+            "database": os.getenv("DB_NAME", "mailserver"),
         }
 
-    def start_server(self, host='127.0.0.1', port=10030):
+        self.redis_client = redis.Redis(
+            host=os.getenv("REDIS_HOST", "localhost"),
+            port=int(os.getenv("REDIS_PORT", 6379)),
+            db=int(os.getenv("REDIS_DB", 1)),
+        )
+
+        self.default_limits = {"hourly": 100, "daily": 1000, "monthly": 10000}
+
+    def start_server(self, host="127.0.0.1", port=10030):
         """Start the policy server"""
         server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         server_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server_socket.bind((host, port))
         server_socket.listen(5)
-        
+
         logger.info(f"Rate limit policy server listening on {host}:{port}")
-        
+
         while True:
             client_socket, address = server_socket.accept()
-            thread = threading.Thread(
-                target=self.handle_client,
-                args=(client_socket,)
-            )
+            thread = threading.Thread(target=self.handle_client, args=(client_socket,))
             thread.daemon = True
             thread.start()
 
     def handle_client(self, client_socket):
         """Handle policy request from Postfix"""
         try:
-            data = b''
+            data = b""
             while True:
                 chunk = client_socket.recv(1024)
                 if not chunk:
                     break
                 data += chunk
-                if b'\n\n' in data:
+                if b"\n\n" in data:
                     break
-            
+
             # Parse policy request
-            request = self.parse_request(data.decode('utf-8'))
-            
+            request = self.parse_request(data.decode("utf-8"))
+
             # Check rate limits
             decision = self.check_rate_limits(request)
-            
+
             # Send response
             response = f"action={decision}\n\n"
-            client_socket.send(response.encode('utf-8'))
-            
+            client_socket.send(response.encode("utf-8"))
+
         except Exception as e:
             logger.error(f"Policy handling error: {e}")
             client_socket.send(b"action=DUNNO\n\n")
@@ -361,83 +358,86 @@ class RateLimitPolicy:
     def parse_request(self, data):
         """Parse Postfix policy request"""
         request = {}
-        for line in data.strip().split('\n'):
-            if '=' in line:
-                key, value = line.split('=', 1)
+        for line in data.strip().split("\n"):
+            if "=" in line:
+                key, value = line.split("=", 1)
                 request[key] = value
         return request
 
     def check_rate_limits(self, request):
         """Check if request exceeds rate limits"""
         try:
-            sender = request.get('sender', '')
-            client_address = request.get('client_address', '')
-            recipient = request.get('recipient', '')
-            
+            sender = request.get("sender", "")
+            client_address = request.get("client_address", "")
+            recipient = request.get("recipient", "")
+
             # Skip rate limiting for authenticated users (optional)
-            if request.get('sasl_username'):
-                return 'DUNNO'
-            
+            if request.get("sasl_username"):
+                return "DUNNO"
+
             # Check various rate limits
             checks = [
                 self.check_sender_limits(sender),
                 self.check_ip_limits(client_address),
-                self.check_domain_limits(sender.split('@')[-1] if '@' in sender else '')
+                self.check_domain_limits(sender.split("@")[-1] if "@" in sender else ""),
             ]
-            
+
             # If any check fails, reject
             for result in checks:
-                if result != 'DUNNO':
+                if result != "DUNNO":
                     return result
-            
+
             # Record the email for tracking
             self.record_email(sender, client_address, recipient)
-            
-            return 'DUNNO'  # Allow the email
-            
+
+            return "DUNNO"  # Allow the email
+
         except Exception as e:
             logger.error(f"Rate limit check failed: {e}")
-            return 'DUNNO'  # Allow on error
+            return "DUNNO"  # Allow on error
 
     def check_sender_limits(self, sender):
         """Check per-sender rate limits"""
         if not sender:
-            return 'DUNNO'
-        
+            return "DUNNO"
+
         current_time = int(time.time())
-        
+
         # Check hourly limit
         hourly_key = f"sender_hourly:{sender}:{current_time // 3600}"
         hourly_count = self.redis_client.incr(hourly_key)
         self.redis_client.expire(hourly_key, 3600)
-        
-        if hourly_count > self.get_sender_limit(sender, 'hourly'):
-            return 'REJECT Rate limit exceeded for sender'
-        
+
+        if hourly_count > self.get_sender_limit(sender, "hourly"):
+            return "REJECT Rate limit exceeded for sender"
+
         # Check daily limit
         daily_key = f"sender_daily:{sender}:{current_time // 86400}"
         daily_count = self.redis_client.incr(daily_key)
         self.redis_client.expire(daily_key, 86400)
-        
-        if daily_count > self.get_sender_limit(sender, 'daily'):
-            return 'REJECT Daily rate limit exceeded'
-        
-        return 'DUNNO'
+
+        if daily_count > self.get_sender_limit(sender, "daily"):
+            return "REJECT Daily rate limit exceeded"
+
+        return "DUNNO"
 
     def get_sender_limit(self, sender, period):
         """Get rate limit for specific sender"""
         try:
             conn = mysql.connector.connect(**self.db_config)
             cursor = conn.cursor()
-            
-            cursor.execute("""
+
+            cursor.execute(
+                """
                 SELECT rate_limit_value FROM rate_limits 
                 WHERE entity = %s AND period = %s AND active = 1
-            """, (sender, period))
-            
+            """,
+                (sender, period),
+            )
+
             result = cursor.fetchone()
             return result[0] if result else self.default_limits.get(period, 100)
-            
+
         except Exception as e:
             logger.error(f"Failed to get sender limit: {e}")
             return self.default_limits.get(period, 100)
@@ -445,7 +445,8 @@ class RateLimitPolicy:
             if conn:
                 conn.close()
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     policy = RateLimitPolicy()
     policy.start_server()
 ```
@@ -470,21 +471,22 @@ import mysql.connector
 import logging
 from datetime import datetime
 
+
 class WebhookSender:
     def __init__(self):
-        self.webhook_urls = os.getenv('WEBHOOK_URLS', '').split(',')
-        self.webhook_timeout = int(os.getenv('WEBHOOK_TIMEOUT', 10))
-        self.max_retries = int(os.getenv('WEBHOOK_RETRIES', 3))
+        self.webhook_urls = os.getenv("WEBHOOK_URLS", "").split(",")
+        self.webhook_timeout = int(os.getenv("WEBHOOK_TIMEOUT", 10))
+        self.max_retries = int(os.getenv("WEBHOOK_RETRIES", 3))
 
     def send_email_event(self, event_type, email_data):
         """Send email event to webhook endpoints"""
         payload = {
-            'event': event_type,
-            'timestamp': datetime.utcnow().isoformat(),
-            'data': email_data,
-            'source': 'postfix'
+            "event": event_type,
+            "timestamp": datetime.utcnow().isoformat(),
+            "data": email_data,
+            "source": "postfix",
         }
-        
+
         for webhook_url in self.webhook_urls:
             if webhook_url.strip():
                 self.send_webhook(webhook_url.strip(), payload)
@@ -497,37 +499,38 @@ class WebhookSender:
                     url,
                     json=payload,
                     timeout=self.webhook_timeout,
-                    headers={'Content-Type': 'application/json'}
+                    headers={"Content-Type": "application/json"},
                 )
-                
+
                 if response.status_code == 200:
                     logger.info(f"Webhook sent successfully to {url}")
                     return
                 else:
                     logger.warning(f"Webhook failed with status {response.status_code}")
-                    
+
             except Exception as e:
                 logger.error(f"Webhook attempt {attempt + 1} failed: {e}")
-                
-            if attempt < self.max_retries - 1:
-                time.sleep(2 ** attempt)  # Exponential backoff
 
-if __name__ == '__main__':
+            if attempt < self.max_retries - 1:
+                time.sleep(2**attempt)  # Exponential backoff
+
+
+if __name__ == "__main__":
     # This script is called by Postfix with email data
     webhook_sender = WebhookSender()
-    
+
     # Parse command line arguments or stdin for email data
-    event_type = sys.argv[1] if len(sys.argv) > 1 else 'email_processed'
-    
+    event_type = sys.argv[1] if len(sys.argv) > 1 else "email_processed"
+
     # Extract email data (implementation depends on how Postfix calls this)
     email_data = {
-        'message_id': os.getenv('MESSAGE_ID', ''),
-        'sender': os.getenv('SENDER', ''),
-        'recipient': os.getenv('RECIPIENT', ''),
-        'subject': os.getenv('SUBJECT', ''),
-        'size': os.getenv('SIZE', '0')
+        "message_id": os.getenv("MESSAGE_ID", ""),
+        "sender": os.getenv("SENDER", ""),
+        "recipient": os.getenv("RECIPIENT", ""),
+        "subject": os.getenv("SUBJECT", ""),
+        "size": os.getenv("SIZE", "0"),
     }
-    
+
     webhook_sender.send_email_event(event_type, email_data)
 ```
 

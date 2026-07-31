@@ -26,9 +26,11 @@ from config import config
 
 logger = logging.getLogger(__name__)
 
+
 @dataclass
 class RateLimitRule:
     """Rate limit rule configuration"""
+
     entity_type: str  # 'organization', 'domain', 'mailbox'
     identifier: str
     direction: str  # 'inbound', 'outbound'
@@ -47,10 +49,11 @@ class RateLimitRule:
     created_at: datetime = None
     updated_at: datetime = None
 
+
 class RateLimitConfigService:
     """
     Configuration service for rate limiting rules using the new organization structure.
-    
+
     This service manages rate limit configurations stored in the organization,
     domain, and email_account tables with proper inheritance hierarchy.
     """
@@ -59,11 +62,11 @@ class RateLimitConfigService:
         """Initialize the configuration service"""
         self.db_pool = self._create_connection_pool()
         self.redis_client = self._create_redis_client()
-        
+
         # Cache configuration
         self.cache_ttl = config.cache.rate_limit_cache_ttl
         self.org_mapping_ttl = config.cache.organization_mapping_ttl
-        
+
         logger.info("Rate limit configuration service initialized")
 
     def _create_connection_pool(self) -> pooling.MySQLConnectionPool:
@@ -79,16 +82,16 @@ class RateLimitConfigService:
                 user=config.database.user,
                 password=config.database.password,
                 charset=config.database.charset,
-                autocommit=True
+                autocommit=True,
             )
-            
+
             # Test connection
             conn = pool.get_connection()
             conn.close()
-            
+
             logger.info("Database connection pool created successfully")
             return pool
-            
+
         except Exception as e:
             logger.error(f"Failed to create database connection pool: {e}")
             raise
@@ -107,15 +110,15 @@ class RateLimitConfigService:
     def get_organization_for_domain(self, domain: str) -> str:
         """
         Get organization ID for a domain with caching.
-        
+
         Args:
             domain: Domain name
-            
+
         Returns:
             Organization ID or 'default' if not found
         """
         cache_key = f"org_mapping:domain:{domain}"
-        
+
         # Try cache first
         if self.redis_client:
             try:
@@ -129,7 +132,7 @@ class RateLimitConfigService:
         try:
             conn = self.db_pool.get_connection()
             cursor = conn.cursor(dictionary=True)
-            
+
             query = """
                 SELECT organization_id 
                 FROM domains 
@@ -137,39 +140,41 @@ class RateLimitConfigService:
             """
             cursor.execute(query, (domain,))
             result = cursor.fetchone()
-            
+
             cursor.close()
             conn.close()
-            
-            org_id = result['organization_id'] if result else 'default'
-            
+
+            org_id = result["organization_id"] if result else "default"
+
             # Cache the result
             if self.redis_client:
                 try:
                     self.redis_client.setex(cache_key, self.org_mapping_ttl, org_id)
                 except Exception as e:
                     logger.warning(f"Failed to cache organization mapping: {e}")
-            
+
             return org_id
-            
+
         except Exception as e:
             logger.error(f"Failed to get organization for domain {domain}: {e}")
-            return 'default'
+            return "default"
 
-    def get_rate_limit_rule(self, entity_type: str, identifier: str, direction: str) -> RateLimitRule:
+    def get_rate_limit_rule(
+        self, entity_type: str, identifier: str, direction: str
+    ) -> RateLimitRule:
         """
         Get rate limit rule with proper inheritance hierarchy.
-        
+
         Args:
             entity_type: 'organization', 'domain', or 'mailbox'
             identifier: Entity identifier
             direction: 'inbound' or 'outbound'
-            
+
         Returns:
             RateLimitRule with inherited configuration
         """
         cache_key = f"rate_limit_rule:{entity_type}:{identifier}:{direction}"
-        
+
         # Try cache first
         if self.redis_client:
             try:
@@ -182,11 +187,11 @@ class RateLimitConfigService:
 
         # Get rule with inheritance
         try:
-            if entity_type == 'organization':
+            if entity_type == "organization":
                 rule = self._get_organization_rule(identifier, direction)
-            elif entity_type == 'domain':
+            elif entity_type == "domain":
                 rule = self._get_domain_rule(identifier, direction)
-            elif entity_type == 'mailbox':
+            elif entity_type == "mailbox":
                 rule = self._get_mailbox_rule(identifier, direction)
             else:
                 raise ValueError(f"Invalid entity type: {entity_type}")
@@ -199,7 +204,7 @@ class RateLimitConfigService:
                     for key, value in rule_data.items():
                         if isinstance(value, datetime):
                             rule_data[key] = value.isoformat() if value else None
-                    
+
                     self.redis_client.setex(cache_key, self.cache_ttl, json.dumps(rule_data))
                 except Exception as e:
                     logger.warning(f"Failed to cache rate limit rule: {e}")
@@ -216,7 +221,7 @@ class RateLimitConfigService:
         try:
             conn = self.db_pool.get_connection()
             cursor = conn.cursor(dictionary=True)
-            
+
             query = """
                 SELECT rate_limits, active, created_at, updated_at
                 FROM organizations 
@@ -224,44 +229,44 @@ class RateLimitConfigService:
             """
             cursor.execute(query, (org_id,))
             result = cursor.fetchone()
-            
+
             cursor.close()
             conn.close()
-            
-            if result and result['rate_limits']:
-                rate_limits = result['rate_limits']
+
+            if result and result["rate_limits"]:
+                rate_limits = result["rate_limits"]
                 direction_limits = rate_limits.get(direction, {})
-                
+
                 return RateLimitRule(
-                    entity_type='organization',
+                    entity_type="organization",
                     identifier=org_id,
                     direction=direction,
-                    second_limit=direction_limits.get('second_limit', 0),
-                    minute_limit=direction_limits.get('minute_limit', 0),
-                    hourly_limit=direction_limits.get('hourly_limit', 0),
-                    daily_limit=direction_limits.get('daily_limit', 0),
-                    monthly_limit=direction_limits.get('monthly_limit', 0),
-                    burst_limit=direction_limits.get('burst_limit', 0),
-                    active=result['active'],
-                    warning_threshold=direction_limits.get('warning_threshold', 80),
-                    critical_threshold=direction_limits.get('critical_threshold', 95),
-                    created_at=result['created_at'],
-                    updated_at=result['updated_at']
+                    second_limit=direction_limits.get("second_limit", 0),
+                    minute_limit=direction_limits.get("minute_limit", 0),
+                    hourly_limit=direction_limits.get("hourly_limit", 0),
+                    daily_limit=direction_limits.get("daily_limit", 0),
+                    monthly_limit=direction_limits.get("monthly_limit", 0),
+                    burst_limit=direction_limits.get("burst_limit", 0),
+                    active=result["active"],
+                    warning_threshold=direction_limits.get("warning_threshold", 80),
+                    critical_threshold=direction_limits.get("critical_threshold", 95),
+                    created_at=result["created_at"],
+                    updated_at=result["updated_at"],
                 )
-            
+
             # Return default if no custom limits
-            return self._get_default_rule('organization', direction)
-            
+            return self._get_default_rule("organization", direction)
+
         except Exception as e:
             logger.error(f"Failed to get organization rule for {org_id}: {e}")
-            return self._get_default_rule('organization', direction)
+            return self._get_default_rule("organization", direction)
 
     def _get_domain_rule(self, domain: str, direction: str) -> RateLimitRule:
         """Get rate limit rule for domain with organization inheritance"""
         try:
             conn = self.db_pool.get_connection()
             cursor = conn.cursor(dictionary=True)
-            
+
             query = """
                 SELECT d.rate_limits, d.active, d.organization_id, d.created_at, d.updated_at,
                        o.rate_limits as org_rate_limits, o.active as org_active
@@ -271,53 +276,53 @@ class RateLimitConfigService:
             """
             cursor.execute(query, (domain,))
             result = cursor.fetchone()
-            
+
             cursor.close()
             conn.close()
-            
+
             if result:
                 # Start with organization defaults
                 org_limits = {}
-                if result['org_rate_limits'] and result['org_active']:
-                    org_limits = result['org_rate_limits'].get(direction, {})
-                
+                if result["org_rate_limits"] and result["org_active"]:
+                    org_limits = result["org_rate_limits"].get(direction, {})
+
                 # Override with domain-specific limits
                 domain_limits = {}
-                if result['rate_limits']:
-                    domain_limits = result['rate_limits'].get(direction, {})
-                
+                if result["rate_limits"]:
+                    domain_limits = result["rate_limits"].get(direction, {})
+
                 # Merge limits (domain overrides organization)
                 merged_limits = {**org_limits, **domain_limits}
-                
+
                 return RateLimitRule(
-                    entity_type='domain',
+                    entity_type="domain",
                     identifier=domain,
                     direction=direction,
-                    second_limit=merged_limits.get('second_limit', 0),
-                    minute_limit=merged_limits.get('minute_limit', 0),
-                    hourly_limit=merged_limits.get('hourly_limit', 0),
-                    daily_limit=merged_limits.get('daily_limit', 0),
-                    monthly_limit=merged_limits.get('monthly_limit', 0),
-                    burst_limit=merged_limits.get('burst_limit', 0),
-                    active=result['active'],
-                    warning_threshold=merged_limits.get('warning_threshold', 80),
-                    critical_threshold=merged_limits.get('critical_threshold', 95),
-                    created_at=result['created_at'],
-                    updated_at=result['updated_at']
+                    second_limit=merged_limits.get("second_limit", 0),
+                    minute_limit=merged_limits.get("minute_limit", 0),
+                    hourly_limit=merged_limits.get("hourly_limit", 0),
+                    daily_limit=merged_limits.get("daily_limit", 0),
+                    monthly_limit=merged_limits.get("monthly_limit", 0),
+                    burst_limit=merged_limits.get("burst_limit", 0),
+                    active=result["active"],
+                    warning_threshold=merged_limits.get("warning_threshold", 80),
+                    critical_threshold=merged_limits.get("critical_threshold", 95),
+                    created_at=result["created_at"],
+                    updated_at=result["updated_at"],
                 )
-            
-            return self._get_default_rule('domain', direction)
-            
+
+            return self._get_default_rule("domain", direction)
+
         except Exception as e:
             logger.error(f"Failed to get domain rule for {domain}: {e}")
-            return self._get_default_rule('domain', direction)
+            return self._get_default_rule("domain", direction)
 
     def _get_mailbox_rule(self, email: str, direction: str) -> RateLimitRule:
         """Get rate limit rule for mailbox with domain and organization inheritance"""
         try:
             conn = self.db_pool.get_connection()
             cursor = conn.cursor(dictionary=True)
-            
+
             query = """
                 SELECT ea.rate_limits, ea.status, ea.created_at, ea.updated_at,
                        d.rate_limits as domain_rate_limits, d.domain,
@@ -329,101 +334,101 @@ class RateLimitConfigService:
             """
             cursor.execute(query, (email,))
             result = cursor.fetchone()
-            
+
             cursor.close()
             conn.close()
-            
+
             if result:
                 # Start with organization defaults
                 org_limits = {}
-                if result['org_rate_limits'] and result['org_active']:
-                    org_limits = result['org_rate_limits'].get(direction, {})
-                
+                if result["org_rate_limits"] and result["org_active"]:
+                    org_limits = result["org_rate_limits"].get(direction, {})
+
                 # Override with domain limits
                 domain_limits = {}
-                if result['domain_rate_limits']:
-                    domain_limits = result['domain_rate_limits'].get(direction, {})
-                
+                if result["domain_rate_limits"]:
+                    domain_limits = result["domain_rate_limits"].get(direction, {})
+
                 # Override with mailbox-specific limits
                 mailbox_limits = {}
-                if result['rate_limits']:
-                    mailbox_limits = result['rate_limits'].get(direction, {})
-                
+                if result["rate_limits"]:
+                    mailbox_limits = result["rate_limits"].get(direction, {})
+
                 # Merge limits (mailbox > domain > organization)
                 merged_limits = {**org_limits, **domain_limits, **mailbox_limits}
-                
+
                 return RateLimitRule(
-                    entity_type='mailbox',
+                    entity_type="mailbox",
                     identifier=email,
                     direction=direction,
-                    second_limit=merged_limits.get('second_limit', 0),
-                    minute_limit=merged_limits.get('minute_limit', 0),
-                    hourly_limit=merged_limits.get('hourly_limit', 0),
-                    daily_limit=merged_limits.get('daily_limit', 0),
-                    monthly_limit=merged_limits.get('monthly_limit', 0),
-                    burst_limit=merged_limits.get('burst_limit', 0),
-                    active=result['status'] == 'ACTIVE',
-                    warning_threshold=merged_limits.get('warning_threshold', 80),
-                    critical_threshold=merged_limits.get('critical_threshold', 95),
-                    created_at=result['created_at'],
-                    updated_at=result['updated_at']
+                    second_limit=merged_limits.get("second_limit", 0),
+                    minute_limit=merged_limits.get("minute_limit", 0),
+                    hourly_limit=merged_limits.get("hourly_limit", 0),
+                    daily_limit=merged_limits.get("daily_limit", 0),
+                    monthly_limit=merged_limits.get("monthly_limit", 0),
+                    burst_limit=merged_limits.get("burst_limit", 0),
+                    active=result["status"] == "ACTIVE",
+                    warning_threshold=merged_limits.get("warning_threshold", 80),
+                    critical_threshold=merged_limits.get("critical_threshold", 95),
+                    created_at=result["created_at"],
+                    updated_at=result["updated_at"],
                 )
-            
-            return self._get_default_rule('mailbox', direction)
-            
+
+            return self._get_default_rule("mailbox", direction)
+
         except Exception as e:
             logger.error(f"Failed to get mailbox rule for {email}: {e}")
-            return self._get_default_rule('mailbox', direction)
+            return self._get_default_rule("mailbox", direction)
 
     def _get_default_rule(self, entity_type: str, direction: str) -> RateLimitRule:
         """Get default rate limit rule from configuration"""
         defaults = config.get_default_limits(entity_type, direction)
-        
+
         return RateLimitRule(
             entity_type=entity_type,
-            identifier='default',
+            identifier="default",
             direction=direction,
-            second_limit=defaults.get('second_limit', 0),
-            minute_limit=defaults.get('minute_limit', 0),
-            hourly_limit=defaults['hourly_limit'],
-            daily_limit=defaults['daily_limit'],
-            monthly_limit=defaults['monthly_limit'],
-            burst_limit=defaults['burst_limit'],
+            second_limit=defaults.get("second_limit", 0),
+            minute_limit=defaults.get("minute_limit", 0),
+            hourly_limit=defaults["hourly_limit"],
+            daily_limit=defaults["daily_limit"],
+            monthly_limit=defaults["monthly_limit"],
+            burst_limit=defaults["burst_limit"],
             active=True,
             warning_threshold=80,
             critical_threshold=95,
-            description=f"Default {entity_type} {direction} limits"
+            description=f"Default {entity_type} {direction} limits",
         )
 
     def create_rate_limit_rule(self, rule: RateLimitRule) -> bool:
         """
         Create or update rate limit rule in the appropriate table.
-        
+
         Args:
             rule: RateLimitRule to create/update
-            
+
         Returns:
             bool: True if successful
         """
         try:
             conn = self.db_pool.get_connection()
             cursor = conn.cursor()
-            
+
             # Prepare rate limits JSON
             rate_limits_data = {
                 rule.direction: {
-                    'second_limit': rule.second_limit,
-                    'minute_limit': rule.minute_limit,
-                    'hourly_limit': rule.hourly_limit,
-                    'daily_limit': rule.daily_limit,
-                    'monthly_limit': rule.monthly_limit,
-                    'burst_limit': rule.burst_limit,
-                    'warning_threshold': rule.warning_threshold,
-                    'critical_threshold': rule.critical_threshold
+                    "second_limit": rule.second_limit,
+                    "minute_limit": rule.minute_limit,
+                    "hourly_limit": rule.hourly_limit,
+                    "daily_limit": rule.daily_limit,
+                    "monthly_limit": rule.monthly_limit,
+                    "burst_limit": rule.burst_limit,
+                    "warning_threshold": rule.warning_threshold,
+                    "critical_threshold": rule.critical_threshold,
                 }
             }
-            
-            if rule.entity_type == 'organization':
+
+            if rule.entity_type == "organization":
                 query = """
                     UPDATE organizations 
                     SET rate_limits = JSON_MERGE_PATCH(COALESCE(rate_limits, '{}'), %s),
@@ -431,8 +436,8 @@ class RateLimitConfigService:
                     WHERE id = %s
                 """
                 cursor.execute(query, (json.dumps(rate_limits_data), rule.identifier))
-                
-            elif rule.entity_type == 'domain':
+
+            elif rule.entity_type == "domain":
                 query = """
                     UPDATE domains 
                     SET rate_limits = JSON_MERGE_PATCH(COALESCE(rate_limits, '{}'), %s),
@@ -440,8 +445,8 @@ class RateLimitConfigService:
                     WHERE domain = %s
                 """
                 cursor.execute(query, (json.dumps(rate_limits_data), rule.identifier))
-                
-            elif rule.entity_type == 'mailbox':
+
+            elif rule.entity_type == "mailbox":
                 query = """
                     UPDATE email_accounts 
                     SET rate_limits = JSON_MERGE_PATCH(COALESCE(rate_limits, '{}'), %s),
@@ -449,16 +454,16 @@ class RateLimitConfigService:
                     WHERE email = %s
                 """
                 cursor.execute(query, (json.dumps(rate_limits_data), rule.identifier))
-            
+
             cursor.close()
             conn.close()
-            
+
             # Invalidate cache
             self._invalidate_cache(rule.entity_type, rule.identifier, rule.direction)
-            
+
             logger.info(f"Rate limit rule created/updated for {rule.entity_type}:{rule.identifier}")
             return True
-            
+
         except Exception as e:
             logger.error(f"Failed to create rate limit rule: {e}")
             return False
@@ -467,48 +472,52 @@ class RateLimitConfigService:
         """Invalidate cached rate limit rule"""
         if not self.redis_client:
             return
-            
+
         try:
             cache_key = f"rate_limit_rule:{entity_type}:{identifier}:{direction}"
             self.redis_client.delete(cache_key)
-            
+
             # Also invalidate organization mapping if it's a domain
-            if entity_type == 'domain':
+            if entity_type == "domain":
                 org_cache_key = f"org_mapping:domain:{identifier}"
                 self.redis_client.delete(org_cache_key)
-                
+
         except Exception as e:
             logger.warning(f"Failed to invalidate cache: {e}")
 
     def get_config_stats(self) -> Dict[str, Any]:
         """Get configuration service statistics"""
         stats = {
-            'service': 'config_service',
-            'status': 'healthy',
-            'database_pool_size': self.db_pool.pool_size if hasattr(self.db_pool, 'pool_size') else 0,
-            'redis_connected': self.redis_client is not None,
-            'cache_ttl': self.cache_ttl
+            "service": "config_service",
+            "status": "healthy",
+            "database_pool_size": self.db_pool.pool_size
+            if hasattr(self.db_pool, "pool_size")
+            else 0,
+            "redis_connected": self.redis_client is not None,
+            "cache_ttl": self.cache_ttl,
         }
-        
+
         # Add database connection test
         try:
             conn = self.db_pool.get_connection()
             conn.close()
-            stats['database_status'] = 'connected'
+            stats["database_status"] = "connected"
         except Exception:
-            stats['database_status'] = 'disconnected'
-        
+            stats["database_status"] = "disconnected"
+
         # Add Redis connection test
         if self.redis_client:
             try:
                 self.redis_client.ping()
-                stats['redis_status'] = 'connected'
+                stats["redis_status"] = "connected"
             except Exception:
-                stats['redis_status'] = 'disconnected'
+                stats["redis_status"] = "disconnected"
         else:
-            stats['redis_status'] = 'disabled'
-        
+            stats["redis_status"] = "disabled"
+
         return stats
+
+
 class RateLimitRule:
     """
     Rate limit rule configuration for a specific entity.
@@ -516,18 +525,19 @@ class RateLimitRule:
     This class encapsulates all rate limiting parameters for an organization,
     domain, or mailbox, including limits, thresholds, and metadata.
     """
+
     # Entity identification
-    entity_type: str      # 'organization', 'domain', 'mailbox'
-    identifier: str       # Actual identifier (org ID, domain name, email address)
-    direction: str        # 'inbound' or 'outbound'
+    entity_type: str  # 'organization', 'domain', 'mailbox'
+    identifier: str  # Actual identifier (org ID, domain name, email address)
+    direction: str  # 'inbound' or 'outbound'
 
     # Rate limits (emails per time window) - 0 means no limit for that window
-    second_limit: int = 0     # Max emails per second (spam prevention)
-    minute_limit: int = 0     # Max emails per minute (burst protection)
+    second_limit: int = 0  # Max emails per second (spam prevention)
+    minute_limit: int = 0  # Max emails per minute (burst protection)
     hourly_limit: int = 0
     daily_limit: int = 0
     monthly_limit: int = 0
-    burst_limit: int = 0      # Legacy field for compatibility
+    burst_limit: int = 0  # Legacy field for compatibility
 
     # Configuration
     active: bool = True
@@ -542,6 +552,7 @@ class RateLimitRule:
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
     created_by: Optional[str] = None
+
 
 class RateLimitConfigService:
     """
@@ -573,20 +584,22 @@ class RateLimitConfigService:
         """
         try:
             pool_config = {
-                'host': self.config.database.host,
-                'port': self.config.database.port,
-                'database': self.config.database.database,
-                'user': self.config.database.user,
-                'password': self.config.database.password,
-                'charset': self.config.database.charset,
-                'autocommit': True,
-                'pool_name': 'rate_limit_config_pool',
-                'pool_size': self.config.database.pool_size,
-                'pool_reset_session': True
+                "host": self.config.database.host,
+                "port": self.config.database.port,
+                "database": self.config.database.database,
+                "user": self.config.database.user,
+                "password": self.config.database.password,
+                "charset": self.config.database.charset,
+                "autocommit": True,
+                "pool_name": "rate_limit_config_pool",
+                "pool_size": self.config.database.pool_size,
+                "pool_reset_session": True,
             }
 
             pool = pooling.MySQLConnectionPool(**pool_config)
-            logger.info(f"Database connection pool created with {self.config.database.pool_size} connections")
+            logger.info(
+                f"Database connection pool created with {self.config.database.pool_size} connections"
+            )
             return pool
 
         except Exception as e:
@@ -613,7 +626,9 @@ class RateLimitConfigService:
             logger.warning(f"Redis connection failed, using database-only mode: {e}")
             return None
 
-    def get_rate_limit_rule(self, entity_type: str, identifier: str, direction: str) -> RateLimitRule:
+    def get_rate_limit_rule(
+        self, entity_type: str, identifier: str, direction: str
+    ) -> RateLimitRule:
         """
         Get rate limit rule for a specific entity with caching.
 
@@ -650,9 +665,7 @@ class RateLimitConfigService:
         if self.redis_client and rule:
             try:
                 self.redis_client.setex(
-                    cache_key, 
-                    self.config_cache_ttl, 
-                    json.dumps(asdict(rule), default=str)
+                    cache_key, self.config_cache_ttl, json.dumps(asdict(rule), default=str)
                 )
                 logger.debug(f"Cached rate limit config for {cache_key}")
             except Exception as e:
@@ -660,7 +673,9 @@ class RateLimitConfigService:
 
         return rule
 
-    def _get_rule_from_database(self, entity_type: str, identifier: str, direction: str) -> RateLimitRule:
+    def _get_rule_from_database(
+        self, entity_type: str, identifier: str, direction: str
+    ) -> RateLimitRule:
         """
         Retrieve rate limit rule from database or return default.
 
@@ -700,23 +715,23 @@ class RateLimitConfigService:
             if result:
                 logger.debug(f"Found database config for {entity_type}:{identifier}:{direction}")
                 return RateLimitRule(
-                    entity_type=result['type'],
-                    identifier=result['identifier'],
-                    direction=result['direction'],
-                    second_limit=result.get('second_limit', 0),
-                    minute_limit=result.get('minute_limit', 0),
-                    hourly_limit=result['hourly_limit'],
-                    daily_limit=result['daily_limit'],
-                    monthly_limit=result['monthly_limit'],
-                    burst_limit=result['burst_limit'],
-                    active=bool(result['active']),
-                    priority=result['priority'],
-                    warning_threshold=result['warning_threshold'],
-                    critical_threshold=result['critical_threshold'],
-                    description=result['description'],
-                    created_at=result['created_at'],
-                    updated_at=result['updated_at'],
-                    created_by=result['created_by']
+                    entity_type=result["type"],
+                    identifier=result["identifier"],
+                    direction=result["direction"],
+                    second_limit=result.get("second_limit", 0),
+                    minute_limit=result.get("minute_limit", 0),
+                    hourly_limit=result["hourly_limit"],
+                    daily_limit=result["daily_limit"],
+                    monthly_limit=result["monthly_limit"],
+                    burst_limit=result["burst_limit"],
+                    active=bool(result["active"]),
+                    priority=result["priority"],
+                    warning_threshold=result["warning_threshold"],
+                    critical_threshold=result["critical_threshold"],
+                    description=result["description"],
+                    created_at=result["created_at"],
+                    updated_at=result["updated_at"],
+                    created_by=result["created_by"],
                 )
 
         except Exception as e:
@@ -745,17 +760,17 @@ class RateLimitConfigService:
             entity_type=entity_type,
             identifier=identifier,
             direction=direction,
-            second_limit=defaults.get('second_limit', 0),  # 0 means no limit
-            minute_limit=defaults.get('minute_limit', 0),
-            hourly_limit=defaults.get('hourly_limit', 0),
-            daily_limit=defaults.get('daily_limit', 0),
-            monthly_limit=defaults.get('monthly_limit', 0),
-            burst_limit=defaults.get('burst_limit', 0),
+            second_limit=defaults.get("second_limit", 0),  # 0 means no limit
+            minute_limit=defaults.get("minute_limit", 0),
+            hourly_limit=defaults.get("hourly_limit", 0),
+            daily_limit=defaults.get("daily_limit", 0),
+            monthly_limit=defaults.get("monthly_limit", 0),
+            burst_limit=defaults.get("burst_limit", 0),
             active=True,
             priority=999,  # Lowest priority for defaults
             warning_threshold=self.config.alerts.warning_threshold,
             critical_threshold=self.config.alerts.critical_threshold,
-            description=f"Default limits for {entity_type}"
+            description=f"Default limits for {entity_type}",
         )
 
     def get_organization_for_domain(self, domain: str) -> str:
@@ -879,13 +894,26 @@ class RateLimitConfigService:
                 updated_at = CURRENT_TIMESTAMP
             """
 
-            cursor.execute(query, (
-                rule.entity_type, rule.identifier, rule.direction,
-                rule.second_limit, rule.minute_limit, rule.hourly_limit, 
-                rule.daily_limit, rule.monthly_limit, rule.burst_limit, 
-                rule.active, rule.priority, rule.warning_threshold, 
-                rule.critical_threshold, rule.description, rule.created_by
-            ))
+            cursor.execute(
+                query,
+                (
+                    rule.entity_type,
+                    rule.identifier,
+                    rule.direction,
+                    rule.second_limit,
+                    rule.minute_limit,
+                    rule.hourly_limit,
+                    rule.daily_limit,
+                    rule.monthly_limit,
+                    rule.burst_limit,
+                    rule.active,
+                    rule.priority,
+                    rule.warning_threshold,
+                    rule.critical_threshold,
+                    rule.description,
+                    rule.created_by,
+                ),
+            )
 
             cursor.close()
             conn.close()
@@ -893,7 +921,9 @@ class RateLimitConfigService:
             # Invalidate cache
             self._invalidate_config_cache(rule.entity_type, rule.identifier, rule.direction)
 
-            logger.info(f"Created/updated rate limit rule for {rule.entity_type}:{rule.identifier}:{rule.direction}")
+            logger.info(
+                f"Created/updated rate limit rule for {rule.entity_type}:{rule.identifier}:{rule.direction}"
+            )
             return True
 
         except Exception as e:
@@ -937,15 +967,18 @@ class RateLimitConfigService:
                 logger.info(f"Deleted rate limit rule for {entity_type}:{identifier}:{direction}")
                 return True
             else:
-                logger.warning(f"No rate limit rule found to delete for {entity_type}:{identifier}:{direction}")
+                logger.warning(
+                    f"No rate limit rule found to delete for {entity_type}:{identifier}:{direction}"
+                )
                 return False
 
         except Exception as e:
             logger.error(f"Failed to delete rate limit rule: {e}")
             return False
 
-    def list_rate_limit_rules(self, entity_type: Optional[str] = None, 
-                             identifier: Optional[str] = None) -> List[RateLimitRule]:
+    def list_rate_limit_rules(
+        self, entity_type: Optional[str] = None, identifier: Optional[str] = None
+    ) -> List[RateLimitRule]:
         """
         List rate limit rules with optional filtering.
 
@@ -995,23 +1028,23 @@ class RateLimitConfigService:
             rules = []
             for result in results:
                 rule = RateLimitRule(
-                    entity_type=result['type'],
-                    identifier=result['identifier'],
-                    direction=result['direction'],
-                    second_limit=result.get('second_limit', 0),
-                    minute_limit=result.get('minute_limit', 0),
-                    hourly_limit=result['hourly_limit'],
-                    daily_limit=result['daily_limit'],
-                    monthly_limit=result['monthly_limit'],
-                    burst_limit=result['burst_limit'],
-                    active=bool(result['active']),
-                    priority=result['priority'],
-                    warning_threshold=result['warning_threshold'],
-                    critical_threshold=result['critical_threshold'],
-                    description=result['description'],
-                    created_at=result['created_at'],
-                    updated_at=result['updated_at'],
-                    created_by=result['created_by']
+                    entity_type=result["type"],
+                    identifier=result["identifier"],
+                    direction=result["direction"],
+                    second_limit=result.get("second_limit", 0),
+                    minute_limit=result.get("minute_limit", 0),
+                    hourly_limit=result["hourly_limit"],
+                    daily_limit=result["daily_limit"],
+                    monthly_limit=result["monthly_limit"],
+                    burst_limit=result["burst_limit"],
+                    active=bool(result["active"]),
+                    priority=result["priority"],
+                    warning_threshold=result["warning_threshold"],
+                    critical_threshold=result["critical_threshold"],
+                    description=result["description"],
+                    created_at=result["created_at"],
+                    updated_at=result["updated_at"],
+                    created_by=result["created_by"],
                 )
                 rules.append(rule)
 
@@ -1049,52 +1082,52 @@ class RateLimitConfigService:
             Dict containing service statistics
         """
         stats = {
-            'service': 'rate_limit_config',
-            'database_available': self.db_pool is not None,
-            'redis_available': self.redis_client is not None,
-            'cache_ttl': self.config_cache_ttl,
-            'org_mapping_ttl': self.org_mapping_ttl
+            "service": "rate_limit_config",
+            "database_available": self.db_pool is not None,
+            "redis_available": self.redis_client is not None,
+            "cache_ttl": self.config_cache_ttl,
+            "org_mapping_ttl": self.org_mapping_ttl,
         }
 
         # Get cache statistics if Redis is available
         if self.redis_client:
             try:
                 info = self.redis_client.info()
-                stats['redis_stats'] = {
-                    'connected_clients': info.get('connected_clients', 0),
-                    'used_memory': info.get('used_memory', 0),
-                    'keyspace_hits': info.get('keyspace_hits', 0),
-                    'keyspace_misses': info.get('keyspace_misses', 0)
+                stats["redis_stats"] = {
+                    "connected_clients": info.get("connected_clients", 0),
+                    "used_memory": info.get("used_memory", 0),
+                    "keyspace_hits": info.get("keyspace_hits", 0),
+                    "keyspace_misses": info.get("keyspace_misses", 0),
                 }
             except Exception as e:
                 logger.warning(f"Failed to get Redis stats: {e}")
 
         return stats
 
-# Default rate limits for different entity types with spam prevention
+        # Default rate limits for different entity types with spam prevention
         self.default_limits = {
-            'organization': {
-                'second_limit': 50,      # Max 50 emails per second org-wide
-                'minute_limit': 1000,    # Max 1000 emails per minute org-wide
-                'hourly_limit': 10000,
-                'daily_limit': 100000,
-                'monthly_limit': 1000000,
-                'burst_limit': 1000
+            "organization": {
+                "second_limit": 50,  # Max 50 emails per second org-wide
+                "minute_limit": 1000,  # Max 1000 emails per minute org-wide
+                "hourly_limit": 10000,
+                "daily_limit": 100000,
+                "monthly_limit": 1000000,
+                "burst_limit": 1000,
             },
-            'domain': {
-                'second_limit': 20,      # Max 20 emails per second per domain
-                'minute_limit': 500,     # Max 500 emails per minute per domain
-                'hourly_limit': 5000,
-                'daily_limit': 50000,
-                'monthly_limit': 500000,
-                'burst_limit': 500
+            "domain": {
+                "second_limit": 20,  # Max 20 emails per second per domain
+                "minute_limit": 500,  # Max 500 emails per minute per domain
+                "hourly_limit": 5000,
+                "daily_limit": 50000,
+                "monthly_limit": 500000,
+                "burst_limit": 500,
             },
-            'mailbox': {
-                'second_limit': 5,       # Max 5 emails per second per mailbox (strict anti-spam)
-                'minute_limit': 100,     # Max 100 emails per minute per mailbox
-                'hourly_limit': 1000,
-                'daily_limit': 10000,
-                'monthly_limit': 100000,
-                'burst_limit': 100
-            }
+            "mailbox": {
+                "second_limit": 5,  # Max 5 emails per second per mailbox (strict anti-spam)
+                "minute_limit": 100,  # Max 100 emails per minute per mailbox
+                "hourly_limit": 1000,
+                "daily_limit": 10000,
+                "monthly_limit": 100000,
+                "burst_limit": 100,
+            },
         }

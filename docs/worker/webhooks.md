@@ -105,13 +105,9 @@ To verify on the receiving end:
 ```python
 import hmac, hashlib
 
-expected = hmac.new(
-    webhook_secret.encode(),
-    payload_json.encode(),
-    hashlib.sha256
-).hexdigest()
+expected = hmac.new(webhook_secret.encode(), payload_json.encode(), hashlib.sha256).hexdigest()
 
-assert request.headers['X-Webhook-Signature'] == f'sha256={expected}'
+assert request.headers["X-Webhook-Signature"] == f"sha256={expected}"
 ```
 
 ## Retry Logic

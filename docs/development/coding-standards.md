@@ -78,14 +78,14 @@ black worker/ shared/ tests/ && isort worker/ shared/ tests/ && flake8 worker/ s
 
 ```python
 # Functions: snake_case, verb phrases
-def get_mailbox(email: str) -> dict:
-    ...
+def get_mailbox(email: str) -> dict: ...
 
-def calculate_storage_usage(domain_id: int) -> int:
-    ...
 
-def send_webhook_notification(event: dict) -> bool:
-    ...
+def calculate_storage_usage(domain_id: int) -> int: ...
+
+
+def send_webhook_notification(event: dict) -> bool: ...
+
 
 # Variables: snake_case, descriptive
 total_storage_bytes = 0
@@ -97,14 +97,13 @@ retry_count = 3
 
 ```python
 # PascalCase
-class EmailTrackingService:
-    ...
+class EmailTrackingService: ...
 
-class WebhookDeliveryWorker:
-    ...
 
-class MailboxExportRequest(BaseModel):
-    ...
+class WebhookDeliveryWorker: ...
+
+
+class MailboxExportRequest(BaseModel): ...
 ```
 
 ### Constants
@@ -164,9 +163,11 @@ Use type hints everywhere. They make the code self-documenting and catch bugs ea
 ```python
 from typing import Optional
 
+
 def get_domain(domain_name: str) -> Optional[dict]:
     """Fetch a domain from the database. Returns None if not found."""
     ...
+
 
 def send_email(
     sender: str,
@@ -174,8 +175,7 @@ def send_email(
     subject: str,
     body: str,
     headers: Optional[dict] = None,
-) -> bool:
-    ...
+) -> bool: ...
 ```
 
 ## Docstrings
@@ -198,6 +198,7 @@ Don't write docstrings for obvious things:
 def get_user_by_email(email: str) -> dict:
     """Get a user by their email address."""
     ...
+
 
 # Better — add useful context
 def get_user_by_email(email: str) -> dict:
@@ -274,7 +275,7 @@ db.execute(f"SELECT * FROM domains WHERE domain = '{domain_name}'")
 # Good — one query
 db.executemany(
     "INSERT INTO aliases (source, destination, domain_id) VALUES (%s, %s, %s)",
-    [(a.source, a.destination, a.domain_id) for a in aliases]
+    [(a.source, a.destination, a.domain_id) for a in aliases],
 )
 
 # Bad — N queries in a loop

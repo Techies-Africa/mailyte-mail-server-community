@@ -253,7 +253,7 @@ def execute_cleanup_policy(policy):
     """Execute storage cleanup based on policy"""
     files_processed = 0
     space_freed = 0
-    
+
     for file in find_files_matching_criteria(policy.criteria):
         if policy.action == "archive":
             archive_file(file)
@@ -261,14 +261,14 @@ def execute_cleanup_policy(policy):
             delete_file(file)
         elif policy.action == "compress":
             compress_file(file)
-        
+
         files_processed += 1
         space_freed += file.size
-    
+
     return {
         "files_processed": files_processed,
         "space_freed": space_freed,
-        "execution_time": execution_time
+        "execution_time": execution_time,
     }
 ```
 

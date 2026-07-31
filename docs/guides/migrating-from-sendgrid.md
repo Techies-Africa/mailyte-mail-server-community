@@ -158,7 +158,7 @@ message = Mail(
     from_email="noreply@mycompany.com",
     to_emails="user@example.com",
     subject="Hello",
-    html_content="<p>Hi there</p>"
+    html_content="<p>Hi there</p>",
 )
 sg.send(message)
 ```
@@ -171,17 +171,18 @@ import requests
 MAILYTE_API = "http://mail.yourdomain.com:8083/api/v1"
 API_KEY = "YOUR_MAILYTE_API_KEY"
 
-headers = {
-    "X-API-Key": API_KEY,
-    "Content-Type": "application/json"
-}
+headers = {"X-API-Key": API_KEY, "Content-Type": "application/json"}
 
-resp = requests.post(f"{MAILYTE_API}/send/email", headers=headers, json={
-    "from": "noreply@mycompany.com",
-    "to": "user@example.com",
-    "subject": "Hello",
-    "html": "<p>Hi there</p>"
-})
+resp = requests.post(
+    f"{MAILYTE_API}/send/email",
+    headers=headers,
+    json={
+        "from": "noreply@mycompany.com",
+        "to": "user@example.com",
+        "subject": "Hello",
+        "html": "<p>Hi there</p>",
+    },
+)
 print(resp.json())
 ```
 

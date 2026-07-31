@@ -290,18 +290,17 @@ The fastest way to verify your API is working and start exploring:
     print(orgs.json())
 
     # Create a domain
-    domain = requests.post(f"{BASE}/domains", headers=HEADERS, json={
-        "domain": "example.com",
-        "organization_id": "acme"
-    })
+    domain = requests.post(
+        f"{BASE}/domains", headers=HEADERS, json={"domain": "example.com", "organization_id": "acme"}
+    )
     print(domain.json())
 
     # Create a mailbox
-    mailbox = requests.post(f"{BASE}/mailboxes", headers=HEADERS, json={
-        "username": "alice",
-        "domain": "example.com",
-        "password": "secure-pass-123"
-    })
+    mailbox = requests.post(
+        f"{BASE}/mailboxes",
+        headers=HEADERS,
+        json={"username": "alice", "domain": "example.com", "password": "secure-pass-123"},
+    )
     print(mailbox.json())
     ```
 

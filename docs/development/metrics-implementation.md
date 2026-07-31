@@ -24,9 +24,9 @@ A value that only goes up. Resets to zero when the service restarts.
 from prometheus_client import Counter
 
 EMAILS_SENT = Counter(
-    "mailyte_emails_sent_total",     # metric name
-    "Total emails sent",              # help text
-    ["organization_id", "domain"],    # labels
+    "mailyte_emails_sent_total",  # metric name
+    "Total emails sent",  # help text
+    ["organization_id", "domain"],  # labels
 )
 
 # Increment by 1
@@ -222,14 +222,10 @@ class QueueProcessor:
     def update_queue_metrics(self):
         """Called periodically to update gauge metrics."""
         for status in ["queued", "sending", "deferred"]:
-            count = self.db.execute(
-                "SELECT COUNT(*) FROM mail_queue WHERE status = %s", (status,)
-            )
+            count = self.db.execute("SELECT COUNT(*) FROM mail_queue WHERE status = %s", (status,))
             QUEUE_DEPTH.labels(status=status).set(count)
 
-        oldest = self.db.execute(
-            "SELECT MIN(created_at) FROM mail_queue WHERE status = 'queued'"
-        )
+        oldest = self.db.execute("SELECT MIN(created_at) FROM mail_queue WHERE status = 'queued'")
         if oldest:
             age = (datetime.now() - oldest).total_seconds()
             OLDEST_MESSAGE_AGE.set(age)

@@ -97,16 +97,8 @@ Organization-level limits apply to the total usage across all domains and email 
 
 ```python
 organization_limits = {
-    "inbound": {
-        "hourly": 5000,
-        "daily": 50000,
-        "monthly": 1000000
-    },
-    "outbound": {
-        "hourly": 10000,
-        "daily": 100000,
-        "monthly": 2000000
-    }
+    "inbound": {"hourly": 5000, "daily": 50000, "monthly": 1000000},
+    "outbound": {"hourly": 10000, "daily": 100000, "monthly": 2000000},
 }
 ```
 
@@ -116,16 +108,8 @@ Domain-level limits apply to all email accounts within a specific domain.
 
 ```python
 domain_limits = {
-    "inbound": {
-        "hourly": 1000,
-        "daily": 10000,
-        "monthly": 200000
-    },
-    "outbound": {
-        "hourly": 2000,
-        "daily": 20000,
-        "monthly": 400000
-    }
+    "inbound": {"hourly": 1000, "daily": 10000, "monthly": 200000},
+    "outbound": {"hourly": 2000, "daily": 20000, "monthly": 400000},
 }
 ```
 
@@ -135,16 +119,8 @@ Individual email account limits provide granular control.
 
 ```python
 email_limits = {
-    "inbound": {
-        "hourly": 100,
-        "daily": 1000,
-        "monthly": 20000
-    },
-    "outbound": {
-        "hourly": 200,
-        "daily": 2000,
-        "monthly": 40000
-    }
+    "inbound": {"hourly": 100, "daily": 1000, "monthly": 20000},
+    "outbound": {"hourly": 200, "daily": 2000, "monthly": 40000},
 }
 ```
 
@@ -282,15 +258,16 @@ import time
 from collections import defaultdict
 from typing import Dict, Tuple
 
+
 class SlidingWindowRateLimiter:
     def __init__(self, redis_client):
         self.redis = redis_client
         self.window_sizes = {
-            'hourly': 3600,
-            'daily': 86400,
-            'monthly': 2592000  # 30 days
+            "hourly": 3600,
+            "daily": 86400,
+            "monthly": 2592000,  # 30 days
         }
-    
+
     def check_limit(self, key: str, limit: int, window: str) -> Tuple[bool, int]:
         """
         Check if request is within rate limit
@@ -299,27 +276,27 @@ class SlidingWindowRateLimiter:
         now = time.time()
         window_size = self.window_sizes[window]
         window_start = now - window_size
-        
+
         # Remove old entries
         self.redis.zremrangebyscore(key, 0, window_start)
-        
+
         # Get current count
         current_count = self.redis.zcard(key)
-        
+
         if current_count < limit:
             # Add current request
             self.redis.zadd(key, {str(now): now})
             self.redis.expire(key, window_size)
             return True, current_count + 1
-        
+
         return False, current_count
-    
+
     def get_usage(self, key: str, window: str) -> int:
         """Get current usage count for a time window"""
         now = time.time()
         window_size = self.window_sizes[window]
         window_start = now - window_size
-        
+
         # Clean old entries and return count
         self.redis.zremrangebyscore(key, 0, window_start)
         return self.redis.zcard(key)
@@ -332,47 +309,47 @@ class UsageTracker:
     def __init__(self, database_service, cache_service):
         self.db = database_service
         self.cache = cache_service
-    
+
     def record_usage(self, email: str, direction: str, count: int = 1):
         """Record email usage"""
         now = datetime.utcnow()
-        
+
         # Get email account details
         account = self.db.get_email_account_by_email(email)
         if not account:
             raise ValueError(f"Email account not found: {email}")
-        
+
         # Update usage counters
         self._update_usage_counters(account, direction, count, now)
-        
+
         # Check if alert thresholds are exceeded
         self._check_alert_thresholds(account, direction)
-    
+
     def _update_usage_counters(self, account, direction, count, timestamp):
         """Update usage counters at all levels"""
         # Update email account usage
-        self._update_email_usage(account['id'], direction, count, timestamp)
-        
+        self._update_email_usage(account["id"], direction, count, timestamp)
+
         # Update domain usage
-        self._update_domain_usage(account['domain_id'], direction, count, timestamp)
-        
+        self._update_domain_usage(account["domain_id"], direction, count, timestamp)
+
         # Update organization usage
-        self._update_organization_usage(account['organization_id'], direction, count, timestamp)
-    
+        self._update_organization_usage(account["organization_id"], direction, count, timestamp)
+
     def _check_alert_thresholds(self, account, direction):
         """Check if usage exceeds alert thresholds"""
-        limits = self.get_effective_limits(account['email'])
-        usage = self.get_current_usage(account['email'])
-        
-        for window in ['hourly', 'daily', 'monthly']:
+        limits = self.get_effective_limits(account["email"])
+        usage = self.get_current_usage(account["email"])
+
+        for window in ["hourly", "daily", "monthly"]:
             limit = limits[direction][window]
             current = usage[window][direction]
             percentage = (current / limit) * 100
-            
+
             if percentage >= RATE_LIMIT_CRITICAL_THRESHOLD:
-                self._send_alert('critical', account, direction, window, percentage)
+                self._send_alert("critical", account, direction, window, percentage)
             elif percentage >= RATE_LIMIT_WARNING_THRESHOLD:
-                self._send_alert('warning', account, direction, window, percentage)
+                self._send_alert("warning", account, direction, window, percentage)
 ```
 
 ## Caching Strategy
@@ -384,59 +361,52 @@ import redis
 import json
 import hashlib
 
+
 class RateLimiterCache:
     def __init__(self, redis_url):
         self.redis = redis.from_url(redis_url)
         self.default_ttl = 300  # 5 minutes
-    
+
     def get_limits(self, email: str) -> Dict:
         """Get cached limits for email account"""
         cache_key = f"limits:{email}"
         cached_data = self.redis.get(cache_key)
-        
+
         if cached_data:
             return json.loads(cached_data)
-        
+
         return None
-    
+
     def set_limits(self, email: str, limits: Dict, ttl: int = None):
         """Cache limits for email account"""
         cache_key = f"limits:{email}"
         ttl = ttl or self.default_ttl
-        
-        self.redis.setex(
-            cache_key, 
-            ttl, 
-            json.dumps(limits)
-        )
-    
+
+        self.redis.setex(cache_key, ttl, json.dumps(limits))
+
     def get_usage(self, email: str, window: str) -> int:
         """Get cached usage count"""
         cache_key = f"usage:{email}:{window}"
         usage = self.redis.get(cache_key)
-        
+
         return int(usage) if usage else 0
-    
+
     def increment_usage(self, email: str, window: str, count: int = 1):
         """Increment usage counter"""
         cache_key = f"usage:{email}:{window}"
-        
+
         # Get window TTL
         ttl = self._get_window_ttl(window)
-        
+
         # Increment counter
         pipeline = self.redis.pipeline()
         pipeline.incrby(cache_key, count)
         pipeline.expire(cache_key, ttl)
         pipeline.execute()
-    
+
     def _get_window_ttl(self, window: str) -> int:
         """Get TTL for time window"""
-        window_ttls = {
-            'hourly': 3600,
-            'daily': 86400,
-            'monthly': 2592000
-        }
+        window_ttls = {"hourly": 3600, "daily": 86400, "monthly": 2592000}
         return window_ttls.get(window, 3600)
 ```
 
@@ -446,30 +416,30 @@ class RateLimiterCache:
 
 ```python
 ALERT_THRESHOLDS = {
-    'warning': 80,    # 80% of limit
-    'critical': 95,   # 95% of limit
-    'exceeded': 100   # Limit exceeded
+    "warning": 80,  # 80% of limit
+    "critical": 95,  # 95% of limit
+    "exceeded": 100,  # Limit exceeded
 }
 
 ALERT_TYPES = {
-    'rate_limit_warning': {
-        'level': 'warning',
-        'message': 'Rate limit warning: {percentage}% of {direction} {window} limit used for {email}',
-        'webhook_enabled': True,
-        'email_enabled': True
+    "rate_limit_warning": {
+        "level": "warning",
+        "message": "Rate limit warning: {percentage}% of {direction} {window} limit used for {email}",
+        "webhook_enabled": True,
+        "email_enabled": True,
     },
-    'rate_limit_critical': {
-        'level': 'critical',
-        'message': 'Rate limit critical: {percentage}% of {direction} {window} limit used for {email}',
-        'webhook_enabled': True,
-        'email_enabled': True
+    "rate_limit_critical": {
+        "level": "critical",
+        "message": "Rate limit critical: {percentage}% of {direction} {window} limit used for {email}",
+        "webhook_enabled": True,
+        "email_enabled": True,
     },
-    'rate_limit_exceeded': {
-        'level': 'critical',
-        'message': 'Rate limit exceeded: {direction} {window} limit exceeded for {email}',
-        'webhook_enabled': True,
-        'email_enabled': True
-    }
+    "rate_limit_exceeded": {
+        "level": "critical",
+        "message": "Rate limit exceeded: {direction} {window} limit exceeded for {email}",
+        "webhook_enabled": True,
+        "email_enabled": True,
+    },
 }
 ```
 
@@ -480,47 +450,42 @@ class AlertService:
     def __init__(self, webhook_service, email_service):
         self.webhook_service = webhook_service
         self.email_service = email_service
-    
+
     def send_alert(self, alert_type: str, context: Dict):
         """Send rate limit alert"""
         alert_config = ALERT_TYPES.get(alert_type)
         if not alert_config:
             return
-        
+
         # Format alert message
-        message = alert_config['message'].format(**context)
-        
+        message = alert_config["message"].format(**context)
+
         # Create alert payload
         alert_data = {
-            'type': alert_type,
-            'level': alert_config['level'],
-            'message': message,
-            'context': context,
-            'timestamp': datetime.utcnow().isoformat()
+            "type": alert_type,
+            "level": alert_config["level"],
+            "message": message,
+            "context": context,
+            "timestamp": datetime.utcnow().isoformat(),
         }
-        
+
         # Send webhook notification
-        if alert_config['webhook_enabled']:
-            self.webhook_service.send_webhook({
-                'event': 'rate_limit.alert',
-                'data': alert_data
-            })
-        
+        if alert_config["webhook_enabled"]:
+            self.webhook_service.send_webhook({"event": "rate_limit.alert", "data": alert_data})
+
         # Send email notification
-        if alert_config['email_enabled']:
+        if alert_config["email_enabled"]:
             self._send_email_alert(alert_data)
-    
+
     def _send_email_alert(self, alert_data):
         """Send email alert to administrators"""
         subject = f"Rate Limit Alert: {alert_data['level'].upper()}"
-        
-        admin_emails = self._get_admin_emails(alert_data['context'])
-        
+
+        admin_emails = self._get_admin_emails(alert_data["context"])
+
         for admin_email in admin_emails:
             self.email_service.send_email(
-                to=admin_email,
-                subject=subject,
-                body=self._format_alert_email(alert_data)
+                to=admin_email, subject=subject, body=self._format_alert_email(alert_data)
             )
 ```
 
@@ -612,21 +577,21 @@ from worker.rate_limiter.services.usage_service import UsageService
 # Check rate limit before sending email
 rate_limiter = UsageService()
 
+
 def send_email(from_email, to_email, message):
     # Check outbound rate limit
-    result = rate_limiter.check_limit(from_email, 'outbound', 1)
-    
-    if not result['allowed']:
+    result = rate_limiter.check_limit(from_email, "outbound", 1)
+
+    if not result["allowed"]:
         raise RateLimitExceeded(
-            f"Rate limit exceeded for {from_email}. "
-            f"Try again at {result['reset_time']}"
+            f"Rate limit exceeded for {from_email}. Try again at {result['reset_time']}"
         )
-    
+
     # Send email
     email_service.send(from_email, to_email, message)
-    
+
     # Record usage
-    rate_limiter.record_usage(from_email, 'outbound', 1)
+    rate_limiter.record_usage(from_email, "outbound", 1)
 ```
 
 ## Monitoring & Health
@@ -656,10 +621,10 @@ GET /health
 from prometheus_client import Counter, Histogram, Gauge
 
 # Rate limiter metrics
-rate_limit_checks_total = Counter('rate_limit_checks_total', 'Total rate limit checks', ['result'])
-rate_limit_check_duration = Histogram('rate_limit_check_duration_seconds', 'Check duration')
-rate_limit_cache_hits = Counter('rate_limit_cache_hits_total', 'Cache hits')
-active_rate_limits = Gauge('active_rate_limits', 'Active rate limits')
+rate_limit_checks_total = Counter("rate_limit_checks_total", "Total rate limit checks", ["result"])
+rate_limit_check_duration = Histogram("rate_limit_check_duration_seconds", "Check duration")
+rate_limit_cache_hits = Counter("rate_limit_cache_hits_total", "Cache hits")
+active_rate_limits = Gauge("active_rate_limits", "Active rate limits")
 ```
 
 ## Best Practices

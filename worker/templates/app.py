@@ -40,12 +40,12 @@ app = FastAPI(title="Email Templates Service", version="1.0.0")
 # Config
 # ---------------------------------------------------------------------------
 DB_CONFIG = {
-    'host': os.getenv('DB_HOST', 'mysql'),
-    'port': int(os.getenv('DB_PORT', 3306)),
-    'database': os.getenv('DB_NAME', 'mailserver'),
-    'user': os.getenv('DB_USER', 'mailuser'),
-    'password': os.getenv('DB_PASSWORD', 'mailpassword'),
-    'charset': 'utf8mb4',
+    "host": os.getenv("DB_HOST", "mysql"),
+    "port": int(os.getenv("DB_PORT", 3306)),
+    "database": os.getenv("DB_NAME", "mailserver"),
+    "user": os.getenv("DB_USER", "mailuser"),
+    "password": os.getenv("DB_PASSWORD", "mailpassword"),
+    "charset": "utf8mb4",
 }
 
 jinja_env = Environment(loader=BaseLoader(), autoescape=True)
@@ -55,6 +55,7 @@ jinja_env = Environment(loader=BaseLoader(), autoescape=True)
 # HTML → Plaintext converter
 # ---------------------------------------------------------------------------
 
+
 class HTMLStripper(HTMLParser):
     def __init__(self):
         super().__init__()
@@ -62,22 +63,22 @@ class HTMLStripper(HTMLParser):
         self._skip = False
 
     def handle_starttag(self, tag, attrs):
-        if tag in ('script', 'style'):
+        if tag in ("script", "style"):
             self._skip = True
-        elif tag == 'br':
-            self.result.write('\n')
-        elif tag in ('p', 'div', 'tr', 'li'):
-            self.result.write('\n')
-        elif tag == 'a':
+        elif tag == "br":
+            self.result.write("\n")
+        elif tag in ("p", "div", "tr", "li"):
+            self.result.write("\n")
+        elif tag == "a":
             for attr_name, attr_val in attrs:
-                if attr_name == 'href':
-                    self.result.write(f' [{attr_val}] ')
+                if attr_name == "href":
+                    self.result.write(f" [{attr_val}] ")
 
     def handle_endtag(self, tag):
-        if tag in ('script', 'style'):
+        if tag in ("script", "style"):
             self._skip = False
-        elif tag in ('p', 'div', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6'):
-            self.result.write('\n')
+        elif tag in ("p", "div", "h1", "h2", "h3", "h4", "h5", "h6"):
+            self.result.write("\n")
 
     def handle_data(self, data):
         if not self._skip:
@@ -97,16 +98,24 @@ def html_to_plaintext(html: str) -> str:
 # Pydantic Models
 # ---------------------------------------------------------------------------
 
+
 class TemplateCreate(BaseModel):
     organization_id: str
     name: str = Field(..., description="Template name")
     description: Optional[str] = None
-    category: str = Field("general", description="Category: transactional, marketing, notification, general")
+    category: str = Field(
+        "general", description="Category: transactional, marketing, notification, general"
+    )
     subject_template: str = Field(..., description="Subject line (supports Jinja2 variables)")
     html_content: str = Field(..., description="HTML body (supports Jinja2 variables)")
-    plaintext_content: Optional[str] = Field(None, description="Plaintext body (auto-generated from HTML if empty)")
-    variables: List[str] = Field(default_factory=list, description="List of variable names used in template")
+    plaintext_content: Optional[str] = Field(
+        None, description="Plaintext body (auto-generated from HTML if empty)"
+    )
+    variables: List[str] = Field(
+        default_factory=list, description="List of variable names used in template"
+    )
     metadata: Optional[Dict[str, Any]] = None
+
 
 class TemplateUpdate(BaseModel):
     name: Optional[str] = None
@@ -118,9 +127,11 @@ class TemplateUpdate(BaseModel):
     variables: Optional[List[str]] = None
     metadata: Optional[Dict[str, Any]] = None
 
+
 class RenderRequest(BaseModel):
     variables: Dict[str, Any] = Field(..., description="Template variable values")
     format: str = Field("both", description="Output format: html, plaintext, both")
+
 
 class TemplateResponse(BaseModel):
     id: int
@@ -196,7 +207,15 @@ TEMPLATE_LIBRARY = [
   </table>
   <a href="{{ invoice_url }}" style="display: inline-block; padding: 10px 20px; background: #059669; color: white; text-decoration: none; border-radius: 6px;">View Invoice</a>
 </div>""",
-        "variables": ["invoice_number", "customer_name", "company_name", "plan_name", "billing_period", "amount", "invoice_url"],
+        "variables": [
+            "invoice_number",
+            "customer_name",
+            "company_name",
+            "plan_name",
+            "billing_period",
+            "amount",
+            "invoice_url",
+        ],
     },
     {
         "id": "newsletter",
@@ -219,7 +238,17 @@ TEMPLATE_LIBRARY = [
     <a href="{{ unsubscribe_url }}">Unsubscribe</a>
   </p>
 </div>""",
-        "variables": ["subject_line", "company_name", "logo_url", "headline", "body_text", "cta_text", "cta_url", "company_address", "unsubscribe_url"],
+        "variables": [
+            "subject_line",
+            "company_name",
+            "logo_url",
+            "headline",
+            "body_text",
+            "cta_text",
+            "cta_url",
+            "company_address",
+            "unsubscribe_url",
+        ],
     },
     {
         "id": "notification",
@@ -247,6 +276,7 @@ TEMPLATE_LIBRARY = [
 # ---------------------------------------------------------------------------
 # Database initialization
 # ---------------------------------------------------------------------------
+
 
 def _ensure_tables():
     conn = mysql.connector.connect(**DB_CONFIG)
@@ -320,6 +350,7 @@ def _content_hash(subject: str, html: str) -> str:
 # Endpoints
 # ---------------------------------------------------------------------------
 
+
 @app.post("/templates", response_model=TemplateResponse)
 async def create_template(tpl: TemplateCreate):
     """Create a new email template."""
@@ -336,26 +367,44 @@ async def create_template(tpl: TemplateCreate):
     conn = mysql.connector.connect(**DB_CONFIG)
     cursor = conn.cursor(dictionary=True)
 
-    cursor.execute("""
+    cursor.execute(
+        """
         INSERT INTO email_templates
         (organization_id, name, description, category, subject_template,
          html_content, plaintext_content, variables, metadata, content_hash)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-    """, (
-        tpl.organization_id, tpl.name, tpl.description, tpl.category,
-        tpl.subject_template, tpl.html_content, plaintext,
-        json.dumps(tpl.variables), json.dumps(tpl.metadata) if tpl.metadata else None,
-        content_h,
-    ))
+    """,
+        (
+            tpl.organization_id,
+            tpl.name,
+            tpl.description,
+            tpl.category,
+            tpl.subject_template,
+            tpl.html_content,
+            plaintext,
+            json.dumps(tpl.variables),
+            json.dumps(tpl.metadata) if tpl.metadata else None,
+            content_h,
+        ),
+    )
     tpl_id = cursor.lastrowid
 
     # Save initial version
-    cursor.execute("""
+    cursor.execute(
+        """
         INSERT INTO email_template_versions
         (template_id, version, subject_template, html_content, plaintext_content, variables, content_hash)
         VALUES (%s, 1, %s, %s, %s, %s, %s)
-    """, (tpl_id, tpl.subject_template, tpl.html_content, plaintext,
-          json.dumps(tpl.variables), content_h))
+    """,
+        (
+            tpl_id,
+            tpl.subject_template,
+            tpl.html_content,
+            plaintext,
+            json.dumps(tpl.variables),
+            content_h,
+        ),
+    )
 
     conn.commit()
 
@@ -427,17 +476,31 @@ async def update_template(template_id: int, update: TemplateUpdate):
         raise HTTPException(status_code=404, detail="Template not found")
 
     # Merge updates
-    name = update.name or existing['name']
-    desc = update.description if update.description is not None else existing.get('description')
-    cat = update.category or existing['category']
-    subject = update.subject_template or existing['subject_template']
-    html = update.html_content or existing['html_content']
-    plaintext = update.plaintext_content or (html_to_plaintext(html) if update.html_content else existing.get('plaintext_content'))
-    variables = update.variables if update.variables is not None else (
-        json.loads(existing['variables']) if isinstance(existing.get('variables'), str) else existing.get('variables') or []
+    name = update.name or existing["name"]
+    desc = update.description if update.description is not None else existing.get("description")
+    cat = update.category or existing["category"]
+    subject = update.subject_template or existing["subject_template"]
+    html = update.html_content or existing["html_content"]
+    plaintext = update.plaintext_content or (
+        html_to_plaintext(html) if update.html_content else existing.get("plaintext_content")
     )
-    metadata = update.metadata if update.metadata is not None else (
-        json.loads(existing['metadata']) if isinstance(existing.get('metadata'), str) else existing.get('metadata')
+    variables = (
+        update.variables
+        if update.variables is not None
+        else (
+            json.loads(existing["variables"])
+            if isinstance(existing.get("variables"), str)
+            else existing.get("variables") or []
+        )
+    )
+    metadata = (
+        update.metadata
+        if update.metadata is not None
+        else (
+            json.loads(existing["metadata"])
+            if isinstance(existing.get("metadata"), str)
+            else existing.get("metadata")
+        )
     )
 
     # Validate
@@ -447,25 +510,41 @@ async def update_template(template_id: int, update: TemplateUpdate):
     except TemplateSyntaxError as e:
         raise HTTPException(status_code=400, detail=f"Template syntax error: {e}")
 
-    new_version = existing['version'] + 1
+    new_version = existing["version"] + 1
     content_h = _content_hash(subject, html)
 
-    cursor.execute("""
+    cursor.execute(
+        """
         UPDATE email_templates SET
             name=%s, description=%s, category=%s, subject_template=%s,
             html_content=%s, plaintext_content=%s, variables=%s, metadata=%s,
             version=%s, content_hash=%s, updated_at=NOW()
         WHERE id=%s
-    """, (name, desc, cat, subject, html, plaintext,
-          json.dumps(variables), json.dumps(metadata) if metadata else None,
-          new_version, content_h, template_id))
+    """,
+        (
+            name,
+            desc,
+            cat,
+            subject,
+            html,
+            plaintext,
+            json.dumps(variables),
+            json.dumps(metadata) if metadata else None,
+            new_version,
+            content_h,
+            template_id,
+        ),
+    )
 
     # Save version
-    cursor.execute("""
+    cursor.execute(
+        """
         INSERT INTO email_template_versions
         (template_id, version, subject_template, html_content, plaintext_content, variables, content_hash)
         VALUES (%s, %s, %s, %s, %s, %s, %s)
-    """, (template_id, new_version, subject, html, plaintext, json.dumps(variables), content_h))
+    """,
+        (template_id, new_version, subject, html, plaintext, json.dumps(variables), content_h),
+    )
 
     conn.commit()
 
@@ -503,17 +582,17 @@ async def render_template(template_id: int, req: RenderRequest):
         raise HTTPException(status_code=404, detail="Template not found")
 
     try:
-        subject_tpl = jinja_env.from_string(tpl['subject_template'])
+        subject_tpl = jinja_env.from_string(tpl["subject_template"])
         subject = subject_tpl.render(**req.variables)
 
         result = {"subject": subject}
 
-        if req.format in ('html', 'both'):
-            html_tpl = jinja_env.from_string(tpl['html_content'])
+        if req.format in ("html", "both"):
+            html_tpl = jinja_env.from_string(tpl["html_content"])
             result["html"] = html_tpl.render(**req.variables)
 
-        if req.format in ('plaintext', 'both'):
-            pt_content = tpl.get('plaintext_content') or html_to_plaintext(tpl['html_content'])
+        if req.format in ("plaintext", "both"):
+            pt_content = tpl.get("plaintext_content") or html_to_plaintext(tpl["html_content"])
             pt_tpl = jinja_env.from_string(pt_content)
             result["plaintext"] = pt_tpl.render(**req.variables)
 
@@ -523,14 +602,22 @@ async def render_template(template_id: int, req: RenderRequest):
         raise HTTPException(status_code=500, detail=f"Template syntax error: {e}")
 
     # Increment render count
-    cursor.execute("UPDATE email_templates SET render_count = render_count + 1 WHERE id = %s",
-                   (template_id,))
+    cursor.execute(
+        "UPDATE email_templates SET render_count = render_count + 1 WHERE id = %s", (template_id,)
+    )
 
     # Log render
-    cursor.execute("""
+    cursor.execute(
+        """
         INSERT INTO template_render_log (template_id, organization_id, recipient)
         VALUES (%s, %s, %s)
-    """, (template_id, tpl['organization_id'], req.variables.get('email', req.variables.get('recipient'))))
+    """,
+        (
+            template_id,
+            tpl["organization_id"],
+            req.variables.get("email", req.variables.get("recipient")),
+        ),
+    )
 
     conn.commit()
     cursor.close()
@@ -550,25 +637,33 @@ async def duplicate_template(template_id: int, new_name: str = Query(...)):
     if not original:
         raise HTTPException(status_code=404, detail="Template not found")
 
-    content_h = _content_hash(original['subject_template'], original['html_content'])
-    variables = original.get('variables')
+    content_h = _content_hash(original["subject_template"], original["html_content"])
+    variables = original.get("variables")
     if isinstance(variables, str):
         variables = variables
     else:
         variables = json.dumps(variables or [])
 
-    cursor.execute("""
+    cursor.execute(
+        """
         INSERT INTO email_templates
         (organization_id, name, description, category, subject_template,
          html_content, plaintext_content, variables, metadata, content_hash)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-    """, (
-        original['organization_id'], new_name,
-        f"Copy of {original['name']}", original['category'],
-        original['subject_template'], original['html_content'],
-        original.get('plaintext_content'), variables,
-        original.get('metadata'), content_h,
-    ))
+    """,
+        (
+            original["organization_id"],
+            new_name,
+            f"Copy of {original['name']}",
+            original["category"],
+            original["subject_template"],
+            original["html_content"],
+            original.get("plaintext_content"),
+            variables,
+            original.get("metadata"),
+            content_h,
+        ),
+    )
     new_id = cursor.lastrowid
     conn.commit()
 
@@ -593,10 +688,15 @@ async def get_template_versions(template_id: int):
     cursor.close()
     conn.close()
 
-    return [{
-        "id": r['id'], "version": r['version'], "content_hash": r['content_hash'],
-        "created_at": r['created_at'].isoformat() if r.get('created_at') else '',
-    } for r in rows]
+    return [
+        {
+            "id": r["id"],
+            "version": r["version"],
+            "content_hash": r["content_hash"],
+            "created_at": r["created_at"].isoformat() if r.get("created_at") else "",
+        }
+        for r in rows
+    ]
 
 
 @app.get("/templates/{template_id}/stats")
@@ -605,18 +705,23 @@ async def get_template_stats(template_id: int):
     conn = mysql.connector.connect(**DB_CONFIG)
     cursor = conn.cursor(dictionary=True)
 
-    cursor.execute("SELECT render_count, created_at FROM email_templates WHERE id = %s", (template_id,))
+    cursor.execute(
+        "SELECT render_count, created_at FROM email_templates WHERE id = %s", (template_id,)
+    )
     tpl = cursor.fetchone()
     if not tpl:
         raise HTTPException(status_code=404, detail="Template not found")
 
     # Recent renders (last 30 days by day)
-    cursor.execute("""
+    cursor.execute(
+        """
         SELECT DATE(rendered_at) as day, COUNT(*) as count
         FROM template_render_log
         WHERE template_id = %s AND rendered_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
         GROUP BY DATE(rendered_at) ORDER BY day
-    """, (template_id,))
+    """,
+        (template_id,),
+    )
     daily = cursor.fetchall()
 
     cursor.close()
@@ -624,9 +729,9 @@ async def get_template_stats(template_id: int):
 
     return {
         "template_id": template_id,
-        "total_renders": tpl['render_count'],
-        "created_at": tpl['created_at'].isoformat() if tpl.get('created_at') else '',
-        "daily_renders": [{"date": str(d['day']), "count": d['count']} for d in daily],
+        "total_renders": tpl["render_count"],
+        "created_at": tpl["created_at"].isoformat() if tpl.get("created_at") else "",
+        "daily_renders": [{"date": str(d["day"]), "count": d["count"]} for d in daily],
     }
 
 
@@ -634,19 +739,25 @@ async def get_template_stats(template_id: int):
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _row_to_response(r: dict) -> TemplateResponse:
-    variables = r.get('variables')
+    variables = r.get("variables")
     if isinstance(variables, str):
         variables = json.loads(variables)
     return TemplateResponse(
-        id=r['id'], organization_id=r['organization_id'], name=r['name'],
-        description=r.get('description'), category=r['category'],
-        subject_template=r['subject_template'], html_content=r['html_content'],
-        plaintext_content=r.get('plaintext_content'),
+        id=r["id"],
+        organization_id=r["organization_id"],
+        name=r["name"],
+        description=r.get("description"),
+        category=r["category"],
+        subject_template=r["subject_template"],
+        html_content=r["html_content"],
+        plaintext_content=r.get("plaintext_content"),
         variables=variables or [],
-        version=r.get('version', 1), render_count=r.get('render_count', 0),
-        created_at=r['created_at'].isoformat() if r.get('created_at') else '',
-        updated_at=r['updated_at'].isoformat() if r.get('updated_at') else '',
+        version=r.get("version", 1),
+        render_count=r.get("render_count", 0),
+        created_at=r["created_at"].isoformat() if r.get("created_at") else "",
+        updated_at=r["updated_at"].isoformat() if r.get("updated_at") else "",
     )
 
 
@@ -654,10 +765,10 @@ def _row_to_response(r: dict) -> TemplateResponse:
 # Health & Startup
 # ---------------------------------------------------------------------------
 
+
 @app.get("/health")
 async def health_check():
-    return {"status": "healthy", "service": "templates",
-            "library_templates": len(TEMPLATE_LIBRARY)}
+    return {"status": "healthy", "service": "templates", "library_templates": len(TEMPLATE_LIBRARY)}
 
 
 @app.on_event("startup")
@@ -668,5 +779,6 @@ async def startup():
 
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.getenv('PORT', 8089))
+
+    port = int(os.getenv("PORT", 8089))
     uvicorn.run("app:app", host="0.0.0.0", port=port, reload=False)

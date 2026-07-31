@@ -240,20 +240,13 @@ The API implements multiple rate limiting strategies:
 ### Per-User Limits
 ```python
 # Default limits per user
-{
-    "requests_per_minute": 100,
-    "requests_per_hour": 1000,
-    "requests_per_day": 10000
-}
+{"requests_per_minute": 100, "requests_per_hour": 1000, "requests_per_day": 10000}
 ```
 
 ### Per-IP Limits
 ```python
 # Default limits per IP address
-{
-    "requests_per_minute": 200,
-    "requests_per_hour": 2000
-}
+{"requests_per_minute": 200, "requests_per_hour": 2000}
 ```
 
 ### Rate Limit Headers
@@ -271,6 +264,7 @@ All requests are validated using Marshmallow schemas:
 
 ```python
 from marshmallow import Schema, fields, validate
+
 
 class OrganizationSchema(Schema):
     name = fields.Str(required=True, validate=validate.Length(min=2, max=100))
@@ -298,10 +292,11 @@ class OrganizationSchema(Schema):
 ```python
 from worker.api.utils.database import get_db_connection
 
+
 def get_organizations(page=1, per_page=20):
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
-    
+
     offset = (page - 1) * per_page
     query = """
         SELECT o.*, 
@@ -313,7 +308,7 @@ def get_organizations(page=1, per_page=20):
         GROUP BY o.id
         LIMIT %s OFFSET %s
     """
-    
+
     cursor.execute(query, (per_page, offset))
     return cursor.fetchall()
 ```
@@ -322,13 +317,12 @@ def get_organizations(page=1, per_page=20):
 ```python
 from worker.webhooks.services.notification_sender import WebhookSender
 
+
 def trigger_webhook(event_type, data):
     webhook_sender = WebhookSender()
-    webhook_sender.send_webhook({
-        "event": event_type,
-        "data": data,
-        "timestamp": datetime.utcnow().isoformat()
-    })
+    webhook_sender.send_webhook(
+        {"event": event_type, "data": data, "timestamp": datetime.utcnow().isoformat()}
+    )
 ```
 
 ## Error Handling
@@ -336,13 +330,13 @@ def trigger_webhook(event_type, data):
 ### Standard Error Codes
 ```python
 ERROR_CODES = {
-    'VALIDATION_ERROR': 400,
-    'UNAUTHORIZED': 401,
-    'FORBIDDEN': 403,
-    'NOT_FOUND': 404,
-    'CONFLICT': 409,
-    'RATE_LIMITED': 429,
-    'INTERNAL_ERROR': 500
+    "VALIDATION_ERROR": 400,
+    "UNAUTHORIZED": 401,
+    "FORBIDDEN": 403,
+    "NOT_FOUND": 404,
+    "CONFLICT": 409,
+    "RATE_LIMITED": 429,
+    "INTERNAL_ERROR": 500,
 }
 ```
 
@@ -354,7 +348,7 @@ def format_error(code, message, details=None):
             "code": code,
             "message": message,
             "details": details or {},
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.utcnow().isoformat(),
         }
     }
 ```
@@ -386,9 +380,11 @@ GET /health
 from prometheus_client import Counter, Histogram, Gauge
 
 # Request metrics
-REQUEST_COUNT = Counter('api_requests_total', 'Total API requests', ['method', 'endpoint', 'status'])
-REQUEST_DURATION = Histogram('api_request_duration_seconds', 'Request duration')
-ACTIVE_CONNECTIONS = Gauge('api_active_connections', 'Active connections')
+REQUEST_COUNT = Counter(
+    "api_requests_total", "Total API requests", ["method", "endpoint", "status"]
+)
+REQUEST_DURATION = Histogram("api_request_duration_seconds", "Request duration")
+ACTIVE_CONNECTIONS = Gauge("api_active_connections", "Active connections")
 ```
 
 ## Configuration Files
@@ -398,16 +394,17 @@ ACTIVE_CONNECTIONS = Gauge('api_active_connections', 'Active connections')
 # worker/api/config.py
 import os
 
+
 class Config:
     # Flask configuration
-    SECRET_KEY = os.getenv('SECRET_KEY', 'dev-secret-key')
-    
+    SECRET_KEY = os.getenv("SECRET_KEY", "dev-secret-key")
+
     # Database configuration
     DATABASE_URL = f"mysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}/{os.getenv('DB_NAME')}"
-    
+
     # Rate limiting
-    RATELIMIT_STORAGE_URL = os.getenv('RATE_LIMIT_STORAGE_URL', 'redis://localhost:6379')
-    
+    RATELIMIT_STORAGE_URL = os.getenv("RATE_LIMIT_STORAGE_URL", "redis://localhost:6379")
+
     # Pagination
     DEFAULT_PAGE_SIZE = 20
     MAX_PAGE_SIZE = 100
@@ -420,13 +417,13 @@ class Config:
 # Production settings
 DEBUG = False
 TESTING = False
-LOG_LEVEL = 'INFO'
+LOG_LEVEL = "INFO"
 
 # Security headers
 SECURITY_HEADERS = {
-    'X-Content-Type-Options': 'nosniff',
-    'X-Frame-Options': 'DENY',
-    'X-XSS-Protection': '1; mode=block'
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "X-XSS-Protection": "1; mode=block",
 }
 ```
 
@@ -446,17 +443,18 @@ gunicorn -w 4 -b 0.0.0.0:5000 worker.api.app:app
 import pytest
 from worker.api.app import create_app
 
+
 @pytest.fixture
 def client():
     app = create_app(testing=True)
     with app.test_client() as client:
         yield client
 
+
 def test_create_organization(client):
-    response = client.post('/api/v1/organizations', json={
-        'name': 'Test Org',
-        'external_id': 'test-org'
-    })
+    response = client.post(
+        "/api/v1/organizations", json={"name": "Test Org", "external_id": "test-org"}
+    )
     assert response.status_code == 201
 ```
 

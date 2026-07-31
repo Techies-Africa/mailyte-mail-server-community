@@ -12,14 +12,15 @@ logger = logging.getLogger(__name__)
 
 # Database configuration
 DB_CONFIG = {
-    'host': os.getenv('DB_HOST'),
-    'port': int(os.getenv('DB_PORT', 3306)),
-    'database': os.getenv('DB_NAME'),
-    'user': os.getenv('DB_USER'),
-    'password': os.getenv('DB_PASSWORD'),
-    'autocommit': True,
-    'charset': 'utf8mb4'
+    "host": os.getenv("DB_HOST"),
+    "port": int(os.getenv("DB_PORT", 3306)),
+    "database": os.getenv("DB_NAME"),
+    "user": os.getenv("DB_USER"),
+    "password": os.getenv("DB_PASSWORD"),
+    "autocommit": True,
+    "charset": "utf8mb4",
 }
+
 
 def get_db_connection():
     """Get database connection with proper error handling"""
@@ -29,6 +30,7 @@ def get_db_connection():
     except mysql.connector.Error as e:
         logger.error(f"Database connection failed: {e}")
         return None
+
 
 def init_database():
     """Initialize database tables if they don't exist"""
@@ -126,7 +128,10 @@ def init_database():
     finally:
         conn.close()
 
-def log_api_usage(api_key, endpoint, method, ip_address, user_agent, response_code, response_time_ms):
+
+def log_api_usage(
+    api_key, endpoint, method, ip_address, user_agent, response_code, response_time_ms
+):
     """Log API usage for monitoring and analytics"""
     conn = get_db_connection()
     if not conn:
@@ -134,15 +139,19 @@ def log_api_usage(api_key, endpoint, method, ip_address, user_agent, response_co
 
     try:
         cursor = conn.cursor()
-        cursor.execute("""
+        cursor.execute(
+            """
             INSERT INTO api_usage_logs 
             (api_key, endpoint, method, ip_address, user_agent, response_code, response_time_ms)
             VALUES (%s, %s, %s, %s, %s, %s, %s)
-        """, (api_key, endpoint, method, ip_address, user_agent, response_code, response_time_ms))
+        """,
+            (api_key, endpoint, method, ip_address, user_agent, response_code, response_time_ms),
+        )
     except Exception as e:
         logger.error(f"Failed to log API usage: {e}")
     finally:
         conn.close()
+
 
 def check_rate_limit(api_key, limit_per_hour=1000):
     """Check if API key has exceeded rate limit"""
@@ -157,10 +166,13 @@ def check_rate_limit(api_key, limit_per_hour=1000):
         current_hour = datetime.now().replace(minute=0, second=0, microsecond=0)
 
         # Get current usage for this hour
-        cursor.execute("""
+        cursor.execute(
+            """
             SELECT request_count FROM api_rate_limits 
             WHERE api_key = %s AND hour_bucket = %s
-        """, (api_key, current_hour))
+        """,
+            (api_key, current_hour),
+        )
 
         result = cursor.fetchone()
         current_count = result[0] if result else 0
@@ -169,11 +181,14 @@ def check_rate_limit(api_key, limit_per_hour=1000):
             return False
 
         # Increment counter
-        cursor.execute("""
+        cursor.execute(
+            """
             INSERT INTO api_rate_limits (api_key, hour_bucket, request_count)
             VALUES (%s, %s, 1)
             ON DUPLICATE KEY UPDATE request_count = request_count + 1
-        """, (api_key, current_hour))
+        """,
+            (api_key, current_hour),
+        )
 
         return True
 

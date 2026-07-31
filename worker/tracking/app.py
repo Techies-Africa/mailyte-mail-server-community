@@ -22,7 +22,7 @@ from datetime import datetime
 
 # Add shared directory and database models to path
 project_root = Path(__file__).parent.parent.parent
-sys.path.append(str(project_root / 'shared'))
+sys.path.append(str(project_root / "shared"))
 
 from shared.logging_config import get_service_logger, get_performance_logger, LogTimer
 from database.models import Base
@@ -40,7 +40,8 @@ from api.health_api import health_api
 from api.stats_api import stats_api
 
 # Configure service-specific logging
-logger, log_performance = get_performance_logger('tracking')
+logger, log_performance = get_performance_logger("tracking")
+
 
 def create_app():
     """
@@ -65,7 +66,7 @@ def create_app():
 
         # Validate configuration before proceeding
         try:
-            if hasattr(config_manager, 'validate_config'):
+            if hasattr(config_manager, "validate_config"):
                 config_manager.validate_config()
                 logger.info("Configuration validation passed")
             else:
@@ -115,7 +116,7 @@ def create_app():
             app.include_router(tracking_api)
 
             # Stats and analytics API
-            app.include_router(stats_api, prefix='/api')
+            app.include_router(stats_api, prefix="/api")
 
             logger.info("API routers registered successfully")
         except Exception as e:
@@ -137,29 +138,34 @@ def create_app():
 
     return app
 
+
 # Create the FastAPI application using factory pattern
 app = create_app()
+
 
 # Global exception handlers for better error reporting
 @app.exception_handler(404)
 async def not_found_error(request: Request, exc):
     """Handle 404 errors gracefully"""
     logger.warning(f"404 error: {exc}")
-    return JSONResponse({'error': 'Endpoint not found', 'status': 404}, status_code=404)
+    return JSONResponse({"error": "Endpoint not found", "status": 404}, status_code=404)
+
 
 @app.exception_handler(500)
 async def internal_error(request: Request, exc):
     """Handle 500 errors gracefully"""
     logger.error(f"500 error: {exc}")
-    return JSONResponse({'error': 'Internal server error', 'status': 500}, status_code=500)
+    return JSONResponse({"error": "Internal server error", "status": 500}, status_code=500)
+
 
 @app.exception_handler(Exception)
 async def handle_exception(request: Request, exc: Exception):
     """Handle unexpected exceptions"""
     logger.error(f"Unhandled exception: {exc}", exc_info=True)
-    return JSONResponse({'error': 'An unexpected error occurred', 'status': 500}, status_code=500)
+    return JSONResponse({"error": "An unexpected error occurred", "status": 500}, status_code=500)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     """
     Main entry point for the tracking service.
 
@@ -184,7 +190,8 @@ if __name__ == '__main__':
         logger.info("  - GET  /api/tracking/tenant/<tenant_id>/stats - Get tenant statistics")
 
         import uvicorn
-        uvicorn.run(app, host='0.0.0.0', port=8086)
+
+        uvicorn.run(app, host="0.0.0.0", port=8086)
     except Exception as e:
         logger.error(f"Failed to start Email Tracking Service: {e}")
         sys.exit(1)

@@ -29,6 +29,7 @@ service_completed_successfully). So a freshly initdb.d'd volume stamps to
 already has that table (any instance running before this phase shipped)
 stamps straight to 0002 -- replaying it would fail the same way.
 """
+
 import logging
 import os
 import sys
@@ -42,7 +43,9 @@ from sqlalchemy import create_engine, inspect, text
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-5.5s [%(name)s] %(message)s")
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s %(levelname)-5.5s [%(name)s] %(message)s"
+)
 logger = logging.getLogger("run_migrations")
 
 # Tables that exist once the frozen SQL chain has run, but before any
@@ -85,7 +88,9 @@ def main() -> None:
                 current = row[0] if row else None
 
         if current in known_revisions:
-            logger.info(f"Schema already tracked at revision {current!r} -- proceeding to upgrade normally.")
+            logger.info(
+                f"Schema already tracked at revision {current!r} -- proceeding to upgrade normally."
+            )
         else:
             stamp_target = (
                 "0002_adhoc_table_tracking" if _ADHOC_SENTINEL_TABLES <= tables else "0001_baseline"
@@ -100,13 +105,18 @@ def main() -> None:
             # the row directly is exactly what conventions.md SS4 rule 9
             # prescribes for this table: DELETE then INSERT, never UPDATE.
             with engine.begin() as conn:
-                conn.execute(text(
-                    "CREATE TABLE IF NOT EXISTS alembic_version ("
-                    "version_num VARCHAR(32) NOT NULL, PRIMARY KEY (version_num)"
-                    ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
-                ))
+                conn.execute(
+                    text(
+                        "CREATE TABLE IF NOT EXISTS alembic_version ("
+                        "version_num VARCHAR(32) NOT NULL, PRIMARY KEY (version_num)"
+                        ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci"
+                    )
+                )
                 conn.execute(text("DELETE FROM alembic_version"))
-                conn.execute(text("INSERT INTO alembic_version (version_num) VALUES (:v)"), {"v": stamp_target})
+                conn.execute(
+                    text("INSERT INTO alembic_version (version_num) VALUES (:v)"),
+                    {"v": stamp_target},
+                )
 
     command.upgrade(alembic_cfg, "head")
     logger.info("Migrations complete -- database is at head.")

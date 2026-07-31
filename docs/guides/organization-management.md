@@ -61,10 +61,14 @@ customers = [
 ]
 
 for customer in customers:
-    resp = requests.post(f"{API}/add/organization", headers=HEADERS, json={
-        **customer,
-        "admin_email": f"admin@{customer['id']}.com",
-    })
+    resp = requests.post(
+        f"{API}/add/organization",
+        headers=HEADERS,
+        json={
+            **customer,
+            "admin_email": f"admin@{customer['id']}.com",
+        },
+    )
     print(f"{customer['name']}: {resp.json()}")
 ```
 
@@ -120,28 +124,44 @@ A common pattern is defining tiers:
 TIERS = {
     "free": {
         "rate_limits": {"emails_per_day": 100, "emails_per_month": 1000},
-        "storage_quotas": {"max_storage_bytes": 1 * 1024**3, "max_domains": 1, "max_mailboxes_per_domain": 5}
+        "storage_quotas": {
+            "max_storage_bytes": 1 * 1024**3,
+            "max_domains": 1,
+            "max_mailboxes_per_domain": 5,
+        },
     },
     "starter": {
         "rate_limits": {"emails_per_day": 5000, "emails_per_month": 50000},
-        "storage_quotas": {"max_storage_bytes": 10 * 1024**3, "max_domains": 3, "max_mailboxes_per_domain": 25}
+        "storage_quotas": {
+            "max_storage_bytes": 10 * 1024**3,
+            "max_domains": 3,
+            "max_mailboxes_per_domain": 25,
+        },
     },
     "business": {
         "rate_limits": {"emails_per_day": 50000, "emails_per_month": 500000},
-        "storage_quotas": {"max_storage_bytes": 100 * 1024**3, "max_domains": 10, "max_mailboxes_per_domain": 100}
+        "storage_quotas": {
+            "max_storage_bytes": 100 * 1024**3,
+            "max_domains": 10,
+            "max_mailboxes_per_domain": 100,
+        },
     },
     "enterprise": {
         "rate_limits": {"emails_per_day": 500000, "emails_per_month": 5000000},
-        "storage_quotas": {"max_storage_bytes": 1024 * 1024**3, "max_domains": 50, "max_mailboxes_per_domain": 1000}
-    }
+        "storage_quotas": {
+            "max_storage_bytes": 1024 * 1024**3,
+            "max_domains": 50,
+            "max_mailboxes_per_domain": 1000,
+        },
+    },
 }
+
 
 def apply_tier(org_id: str, tier: str):
     config = TIERS[tier]
-    requests.post(f"{API}/edit/organization", headers=HEADERS, json={
-        "items": [org_id],
-        "attr": config
-    })
+    requests.post(
+        f"{API}/edit/organization", headers=HEADERS, json={"items": [org_id], "attr": config}
+    )
 ```
 
 ## Monitoring Organization Usage
@@ -168,23 +188,26 @@ def generate_usage_report():
     report = []
     for org in orgs:
         org_id = org["id"]
-        domains = requests.get(f"{API}/get/domain/all",
-            headers=HEADERS, params={"organization_id": org_id}).json()
+        domains = requests.get(
+            f"{API}/get/domain/all", headers=HEADERS, params={"organization_id": org_id}
+        ).json()
 
         total_storage = sum(d.get("total_storage_used", 0) for d in domains)
         total_mailboxes = sum(d.get("total_email_accounts", 0) for d in domains)
         total_emails = sum(d.get("total_emails", 0) for d in domains)
 
-        report.append({
-            "org_id": org_id,
-            "name": org.get("name"),
-            "external_id": org.get("external_id"),
-            "domains": len(domains),
-            "mailboxes": total_mailboxes,
-            "emails_total": total_emails,
-            "storage_gb": round(total_storage / (1024**3), 2),
-            "active": org.get("active", True),
-        })
+        report.append(
+            {
+                "org_id": org_id,
+                "name": org.get("name"),
+                "external_id": org.get("external_id"),
+                "domains": len(domains),
+                "mailboxes": total_mailboxes,
+                "emails_total": total_emails,
+                "storage_gb": round(total_storage / (1024**3), 2),
+                "active": org.get("active", True),
+            }
+        )
 
     return sorted(report, key=lambda x: x["storage_gb"], reverse=True)
 ```
@@ -201,11 +224,15 @@ def on_customer_created(billing_customer_id: str, name: str, plan: str):
     org_id = f"org-{billing_customer_id}"
 
     # Create org in Mailyte
-    requests.post(f"{API}/add/organization", headers=HEADERS, json={
-        "id": org_id,
-        "name": name,
-        "external_id": billing_customer_id,
-    })
+    requests.post(
+        f"{API}/add/organization",
+        headers=HEADERS,
+        json={
+            "id": org_id,
+            "name": name,
+            "external_id": billing_customer_id,
+        },
+    )
 
     # Apply plan quotas
     apply_tier(org_id, plan)

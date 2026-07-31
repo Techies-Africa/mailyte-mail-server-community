@@ -23,16 +23,18 @@ from pathlib import Path
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
+
 def load_env_file():
     """Load environment variables from .env file"""
-    env_file = project_root / '.env'
+    env_file = project_root / ".env"
     if env_file.exists():
-        with open(env_file, 'r') as f:
+        with open(env_file, "r") as f:
             for line in f:
                 line = line.strip()
-                if line and not line.startswith('#') and '=' in line:
-                    key, value = line.split('=', 1)
+                if line and not line.startswith("#") and "=" in line:
+                    key, value = line.split("=", 1)
                     os.environ.setdefault(key.strip(), value.strip())
+
 
 def run_alembic_command(args):
     """Run alembic command with proper environment"""
@@ -41,7 +43,7 @@ def run_alembic_command(args):
     # Ensure we're in the project root
     os.chdir(project_root)
 
-    cmd = ['alembic'] + args
+    cmd = ["alembic"] + args
     print(f"Running: {' '.join(cmd)}")
 
     try:
@@ -57,19 +59,21 @@ def run_alembic_command(args):
             print("STDERR:", e.stderr)
         return False
 
+
 def status():
     """Show current migration status"""
     print("=== Database Migration Status ===\n")
 
     # Show current revision
     print("Current revision:")
-    run_alembic_command(['current', '-v'])
+    run_alembic_command(["current", "-v"])
 
     print("\nPending migrations:")
-    run_alembic_command(['heads'])
+    run_alembic_command(["heads"])
 
     print("\nMigration history:")
-    run_alembic_command(['history', '--indicate-current'])
+    run_alembic_command(["history", "--indicate-current"])
+
 
 def generate_migration(message):
     """Generate a new migration based on model changes"""
@@ -78,43 +82,50 @@ def generate_migration(message):
         return False
 
     print(f"Generating migration: {message}")
-    return run_alembic_command(['revision', '--autogenerate', '-m', message])
+    return run_alembic_command(["revision", "--autogenerate", "-m", message])
+
 
 def upgrade():
     """Apply all pending migrations"""
     print("Applying pending migrations...")
-    return run_alembic_command(['upgrade', 'head'])
+    return run_alembic_command(["upgrade", "head"])
+
 
 def downgrade():
     """Rollback the last migration"""
     print("Rolling back last migration...")
-    return run_alembic_command(['downgrade', '-1'])
+    return run_alembic_command(["downgrade", "-1"])
+
 
 def reset_database():
     """Reset database to base (removes all data!)"""
-    response = input("⚠️  WARNING: This will reset the entire database and remove ALL data!\n"
-                    "Are you sure you want to continue? Type 'RESET' to confirm: ")
+    response = input(
+        "⚠️  WARNING: This will reset the entire database and remove ALL data!\n"
+        "Are you sure you want to continue? Type 'RESET' to confirm: "
+    )
 
-    if response != 'RESET':
+    if response != "RESET":
         print("Reset cancelled.")
         return False
 
     print("Resetting database to base...")
-    return run_alembic_command(['downgrade', 'base'])
+    return run_alembic_command(["downgrade", "base"])
+
 
 def init_alembic():
     """Initialize Alembic (if not already done)"""
-    alembic_dir = project_root / 'alembic'
+    alembic_dir = project_root / "alembic"
     if alembic_dir.exists():
         print("Alembic already initialized.")
         return True
 
     print("Initializing Alembic...")
-    return run_alembic_command(['init', 'alembic'])
+    return run_alembic_command(["init", "alembic"])
+
 
 def check_environment():
     """Check if required environment variables are set"""
-    required_vars = ['DB_HOST', 'DB_NAME', 'DB_USER', 'DB_PASSWORD']
+    required_vars = ["DB_HOST", "DB_NAME", "DB_USER", "DB_PASSWORD"]
     missing_vars = []
 
     load_env_file()
@@ -130,6 +141,7 @@ def check_environment():
 
     print("✅ Environment variables validation passed")
     return True
+
 
 def main():
     if len(sys.argv) < 2:
@@ -148,37 +160,37 @@ def main():
     command = sys.argv[1]
 
     # Check environment for most commands
-    if command not in ['init', 'check-env']:
+    if command not in ["init", "check-env"]:
         if not check_environment():
             sys.exit(1)
 
     success = True
 
-    if command == 'status':
+    if command == "status":
         status()
 
-    elif command == 'generate':
+    elif command == "generate":
         if len(sys.argv) < 3:
             print("Error: Migration message required")
             print("Usage: python migrate.py generate <message>")
             sys.exit(1)
 
-        message = ' '.join(sys.argv[2:])
+        message = " ".join(sys.argv[2:])
         success = generate_migration(message)
 
-    elif command == 'upgrade':
+    elif command == "upgrade":
         success = upgrade()
 
-    elif command == 'downgrade':
+    elif command == "downgrade":
         success = downgrade()
 
-    elif command == 'reset':
+    elif command == "reset":
         success = reset_database()
 
-    elif command == 'init':
+    elif command == "init":
         success = init_alembic()
 
-    elif command == 'check-env':
+    elif command == "check-env":
         success = check_environment()
 
     else:
@@ -191,5 +203,6 @@ def main():
     else:
         print(f"\n✅ Command '{command}' completed successfully")
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()

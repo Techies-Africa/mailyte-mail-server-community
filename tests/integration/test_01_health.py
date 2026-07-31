@@ -4,6 +4,7 @@ Integration tests -- Infrastructure health checks.
 Verifies that all services (Redis, MySQL, HTTP microservices, mail ports)
 are reachable and responding before the heavier functional tests run.
 """
+
 import os
 import socket
 
@@ -40,6 +41,7 @@ TIMEOUT = 10  # seconds for HTTP / socket operations
 # Infrastructure
 # ---------------------------------------------------------------------------
 
+
 class TestInfrastructure:
     """Redis and MySQL connectivity."""
 
@@ -62,6 +64,7 @@ class TestInfrastructure:
 # ---------------------------------------------------------------------------
 # HTTP service health endpoints
 # ---------------------------------------------------------------------------
+
 
 class TestHTTPHealth:
     """Every microservice exposes GET /health -> 200."""
@@ -123,6 +126,7 @@ class TestHTTPHealth:
 # Mail port checks
 # ---------------------------------------------------------------------------
 
+
 def _port_open(host: str, port: int, timeout: float = TIMEOUT) -> bool:
     """Return True if a TCP connection can be established."""
     with socket.create_connection((host, port), timeout=timeout):
@@ -161,6 +165,7 @@ class TestMailPorts:
 # SMTP banner / EHLO
 # ---------------------------------------------------------------------------
 
+
 class TestSMTPBanner:
     """Basic SMTP protocol checks on port 587."""
 
@@ -183,9 +188,7 @@ class TestSMTPBanner:
                 # Multi-line SMTP responses use "250-" for continuation;
                 # the final line starts with "250 ".
                 if b"\r\n" in chunk and any(
-                    line.startswith(b"250 ")
-                    for line in response.split(b"\r\n")
-                    if line
+                    line.startswith(b"250 ") for line in response.split(b"\r\n") if line
                 ):
                     break
             capabilities = response.decode("utf-8", errors="replace")

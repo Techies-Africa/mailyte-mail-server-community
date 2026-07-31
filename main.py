@@ -14,6 +14,7 @@ sys.path.insert(0, str(project_root))
 
 from shared.logging_config import setup_logging
 
+
 def main():
     """Main entry point for the Mailyte Mail Server"""
 
@@ -25,8 +26,8 @@ def main():
     from dotenv import load_dotenv
 
     # Load development environment if in development mode
-    if os.getenv('DEVELOPMENT_MODE', 'false').lower() == 'true':
-        env_file = '.env.development'
+    if os.getenv("DEVELOPMENT_MODE", "false").lower() == "true":
+        env_file = ".env.development"
         if os.path.exists(env_file):
             load_dotenv(env_file)
             logger.info(f"Loaded development environment from {env_file}")
@@ -41,8 +42,8 @@ def main():
         import uvicorn
 
         # Use 0.0.0.0 for Replit compatibility
-        host = os.getenv('HOST', '0.0.0.0')
-        port = int(os.getenv('PORT', 5000))
+        host = os.getenv("HOST", "0.0.0.0")
+        port = int(os.getenv("PORT", 5000))
 
         logger.info(f"Starting API server on {host}:{port}")
         uvicorn.run(app, host=host, port=port, reload=True)
@@ -54,6 +55,7 @@ def main():
     except Exception as e:
         logger.error(f"Failed to start server: {e}")
         sys.exit(1)
+
 
 if __name__ == "__main__":
     main()

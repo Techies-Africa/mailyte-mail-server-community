@@ -143,28 +143,27 @@ from config import Config
 app = Flask(__name__)
 logger = logging.getLogger(__name__)
 
-@app.route('/health', methods=['GET'])
+
+@app.route("/health", methods=["GET"])
 def health_check():
     """Health check endpoint"""
-    return jsonify({
-        'status': 'healthy',
-        'service': 'your_service',
-        'version': '1.0.0'
-    })
+    return jsonify({"status": "healthy", "service": "your_service", "version": "1.0.0"})
 
-@app.route('/api/v1/your-endpoint', methods=['POST'])
+
+@app.route("/api/v1/your-endpoint", methods=["POST"])
 def your_endpoint():
     """Your feature endpoint"""
     try:
         data = request.get_json()
         # Implement your logic here
-        return jsonify({'status': 'success', 'data': data})
+        return jsonify({"status": "success", "data": data})
     except Exception as e:
         logger.error(f"Error in your_endpoint: {e}")
-        return jsonify({'error': str(e)}), 500
+        return jsonify({"error": str(e)}), 500
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=Config.PORT, debug=Config.DEBUG)
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=Config.PORT, debug=Config.DEBUG)
 ```
 
 #### **5. Add Configuration**
@@ -172,18 +171,19 @@ Create `config.py`:
 ```python
 import os
 
+
 class Config:
-    PORT = int(os.getenv('YOUR_SERVICE_PORT', 8090))
-    DEBUG = os.getenv('DEBUG_MODE', 'false').lower() == 'true'
-    
+    PORT = int(os.getenv("YOUR_SERVICE_PORT", 8090))
+    DEBUG = os.getenv("DEBUG_MODE", "false").lower() == "true"
+
     # Database
-    DB_HOST = os.getenv('DB_HOST', 'localhost')
-    DB_USER = os.getenv('DB_USER', 'root')
-    DB_PASSWORD = os.getenv('DB_PASSWORD', '')
-    DB_NAME = os.getenv('DB_NAME', 'mailserver')
-    
+    DB_HOST = os.getenv("DB_HOST", "localhost")
+    DB_USER = os.getenv("DB_USER", "root")
+    DB_PASSWORD = os.getenv("DB_PASSWORD", "")
+    DB_NAME = os.getenv("DB_NAME", "mailserver")
+
     # Your service specific config
-    YOUR_SETTING = os.getenv('YOUR_SETTING', 'default_value')
+    YOUR_SETTING = os.getenv("YOUR_SETTING", "default_value")
 ```
 
 #### **6. Add to Main Deployment**
@@ -195,10 +195,10 @@ def deploy_worker_services():
     services = [
         # ... existing services
         {
-            'name': 'your_service',
-            'path': 'worker/your_service',
-            'port': 8090,
-            'health_endpoint': '/health'
+            "name": "your_service",
+            "path": "worker/your_service",
+            "port": 8090,
+            "health_endpoint": "/health",
         }
     ]
     # ... rest of deployment logic
@@ -213,24 +213,25 @@ import unittest
 import requests
 import time
 
+
 class TestYourService(unittest.TestCase):
     def setUp(self):
         self.base_url = "http://localhost:8090"
         # Wait for service to start
         time.sleep(2)
-    
+
     def test_health_endpoint(self):
         response = requests.get(f"{self.base_url}/health")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()['status'], 'healthy')
-    
+        self.assertEqual(response.json()["status"], "healthy")
+
     def test_your_endpoint(self):
         data = {"test": "data"}
-        response = requests.post(f"{self.base_url}/api/v1/your-endpoint", 
-                               json=data)
+        response = requests.post(f"{self.base_url}/api/v1/your-endpoint", json=data)
         self.assertEqual(response.status_code, 200)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     unittest.main()
 ```
 
@@ -263,9 +264,10 @@ from flask import Blueprint, request, jsonify, current_app
 import requests
 from ..utils.auth import require_api_key
 
-your_service_bp = Blueprint('your_service', __name__)
+your_service_bp = Blueprint("your_service", __name__)
 
-@your_service_bp.route('/api/v1/your-service/<action>', methods=['POST'])
+
+@your_service_bp.route("/api/v1/your-service/<action>", methods=["POST"])
 @require_api_key
 def your_service_proxy(action):
     """Proxy requests to your service"""
@@ -275,13 +277,14 @@ def your_service_proxy(action):
         response = requests.post(service_url, json=request.get_json())
         return jsonify(response.json()), response.status_code
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        return jsonify({"error": str(e)}), 500
 ```
 
 #### **2. Register Blueprint**
 In `worker/api/routes/__init__.py`:
 ```python
 from .your_service import your_service_bp
+
 
 def register_blueprints(app):
     """Register all route blueprints"""
@@ -329,15 +332,15 @@ Test service interactions:
 def test_email_tracking_flow():
     # Send email with tracking
     response = self.send_email_with_tracking()
-    tracking_id = response['tracking_id']
-    
+    tracking_id = response["tracking_id"]
+
     # Simulate email open
     open_response = self.simulate_email_open(tracking_id)
     assert open_response.status_code == 200
-    
+
     # Check tracking stats
     stats = self.get_tracking_stats(tracking_id)
-    assert stats['opens'] == 1
+    assert stats["opens"] == 1
 ```
 
 #### **3. End-to-End Tests**
@@ -436,6 +439,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
 def your_function():
     try:
         # Your logic here
@@ -461,8 +465,7 @@ import logging
 
 # Configure logging
 logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 
 logger = logging.getLogger(__name__)
@@ -524,7 +527,9 @@ logger.critical("Critical error")
 ### **Debugging**
 ```python
 # Add to any service for debugging
-import pdb; pdb.set_trace()
+import pdb
+
+pdb.set_trace()
 
 # Or use logging for non-blocking debugging
 logger.debug(f"Variable value: {variable}")
@@ -544,15 +549,16 @@ logger.debug(f"Variable value: {variable}")
 import cProfile
 import pstats
 
+
 def profile_function():
     pr = cProfile.Profile()
     pr.enable()
-    
+
     # Your code here
-    
+
     pr.disable()
     stats = pstats.Stats(pr)
-    stats.sort_stats('cumulative')
+    stats.sort_stats("cumulative")
     stats.print_stats()
 ```
 
@@ -570,8 +576,10 @@ def profile_function():
 # Input validation
 def validate_email(email):
     import re
-    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+
+    pattern = r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
     return re.match(pattern, email) is not None
+
 
 # SQL injection prevention
 def safe_database_query(email):

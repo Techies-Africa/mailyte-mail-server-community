@@ -4,6 +4,7 @@ Integration tests for DKIM, SPF, and DMARC configuration.
 Validates DKIM key setup, rspamd reachability, outbound email headers,
 and spam scanning behaviour against the live mail server.
 """
+
 import email
 import uuid
 
@@ -21,17 +22,15 @@ TIMEOUT = 10
 RSPAMD_WEB_URL = "http://rspamd:11334/"
 RSPAMD_SCAN_URL = "http://rspamd:11333/checkv2"
 
-GTUBE_STRING = (
-    "XJS*C4JDBQADN1.NSBN3*2IDNEN*GTUBE-STANDARD-ANTI-UBE-TEST-EMAIL*C.34X"
-)
+GTUBE_STRING = "XJS*C4JDBQADN1.NSBN3*2IDNEN*GTUBE-STANDARD-ANTI-UBE-TEST-EMAIL*C.34X"
 
 
 # ---------------------------------------------------------------------------
 # Rspamd reachability
 # ---------------------------------------------------------------------------
 
-class TestRspamdReachability:
 
+class TestRspamdReachability:
     def test_rspamd_reachable(self):
         """Rspamd web interface on port 11334 should respond."""
         try:
@@ -46,16 +45,14 @@ class TestRspamdReachability:
 # DKIM database configuration
 # ---------------------------------------------------------------------------
 
-class TestDKIMConfiguration:
 
+class TestDKIMConfiguration:
     def test_dkim_keys_directory_exists(self, db_connection):
         """Verify the domains table contains DKIM-related data."""
         cursor = db_connection.cursor()
         try:
             # Check if dkim_enabled column exists by querying it
-            cursor.execute(
-                "SELECT COUNT(*) FROM domains WHERE dkim_enabled = 1"
-            )
+            cursor.execute("SELECT COUNT(*) FROM domains WHERE dkim_enabled = 1")
             (count,) = cursor.fetchone()
             assert count >= 0, "dkim_enabled column query failed"
         except Exception as exc:
@@ -63,9 +60,7 @@ class TestDKIMConfiguration:
             cursor.execute("SHOW TABLES LIKE 'dkim_keys'")
             result = cursor.fetchone()
             if result is None:
-                pytest.skip(
-                    f"Neither dkim_enabled column nor dkim_keys table found: {exc}"
-                )
+                pytest.skip(f"Neither dkim_enabled column nor dkim_keys table found: {exc}")
         finally:
             cursor.close()
 
@@ -73,10 +68,7 @@ class TestDKIMConfiguration:
         """Domains with DKIM enabled must have a non-empty selector."""
         cursor = db_connection.cursor()
         try:
-            cursor.execute(
-                "SELECT domain, dkim_selector FROM domains "
-                "WHERE dkim_enabled = 1"
-            )
+            cursor.execute("SELECT domain, dkim_selector FROM domains WHERE dkim_enabled = 1")
             rows = cursor.fetchall()
         except Exception as exc:
             pytest.skip(f"Cannot query dkim_selector: {exc}")
@@ -96,8 +88,8 @@ class TestDKIMConfiguration:
 # Outbound email headers
 # ---------------------------------------------------------------------------
 
-class TestOutboundEmailHeaders:
 
+class TestOutboundEmailHeaders:
     @pytest.fixture(autouse=True)
     def empty_inbox(self):
         """Ensure the inbox is empty before and after this test."""
@@ -124,9 +116,7 @@ class TestOutboundEmailHeaders:
                 found = True
                 required_headers = ["From", "To", "Subject", "Date", "Message-ID"]
                 for hdr in required_headers:
-                    assert msg[hdr] is not None, (
-                        f"Missing required header: {hdr}"
-                    )
+                    assert msg[hdr] is not None, f"Missing required header: {hdr}"
                 break
 
         assert found, f"Message with subject {subject!r} not found in inbox"
@@ -136,8 +126,8 @@ class TestOutboundEmailHeaders:
 # Rspamd scanning
 # ---------------------------------------------------------------------------
 
-class TestRspamdScanning:
 
+class TestRspamdScanning:
     @pytest.mark.xfail(reason="rspamd scanning depends on full config")
     def test_rspamd_scan_clean_message(self):
         """A clean message should receive a low spam score from rspamd."""
@@ -158,14 +148,10 @@ class TestRspamdScanning:
         except requests.ConnectionError:
             pytest.skip("Rspamd scan port 11333 not reachable")
 
-        assert resp.status_code == 200, (
-            f"Rspamd checkv2 returned {resp.status_code}"
-        )
+        assert resp.status_code == 200, f"Rspamd checkv2 returned {resp.status_code}"
         result = resp.json()
         score = result.get("score", 0)
-        assert score < 15, (
-            f"Clean message scored too high: {score}"
-        )
+        assert score < 15, f"Clean message scored too high: {score}"
 
     @pytest.mark.xfail(reason="rspamd scanning depends on full config")
     def test_rspamd_scan_gtube_spam(self):
@@ -187,9 +173,7 @@ class TestRspamdScanning:
         except requests.ConnectionError:
             pytest.skip("Rspamd scan port 11333 not reachable")
 
-        assert resp.status_code == 200, (
-            f"Rspamd checkv2 returned {resp.status_code}"
-        )
+        assert resp.status_code == 200, f"Rspamd checkv2 returned {resp.status_code}"
         result = resp.json()
         action = result.get("action", "")
         score = result.get("score", 0)
@@ -202,8 +186,8 @@ class TestRspamdScanning:
 # Spam scoring
 # ---------------------------------------------------------------------------
 
-class TestSpamScoring:
 
+class TestSpamScoring:
     @pytest.mark.xfail(reason="rspamd API may not be directly reachable")
     def test_rspamd_action_thresholds(self):
         """Rspamd has 4 action levels: greylist(4), add-header(6),
@@ -214,9 +198,7 @@ class TestSpamScoring:
         except requests.ConnectionError:
             pytest.fail("Rspamd API is not reachable")
         # Any successful response verifies the rspamd API is accessible.
-        assert resp.status_code == 200, (
-            f"Rspamd stat endpoint returned {resp.status_code}"
-        )
+        assert resp.status_code == 200, f"Rspamd stat endpoint returned {resp.status_code}"
 
     @pytest.mark.xfail(reason="rspamd API may not be directly reachable")
     def test_rspamd_bayes_status(self):
@@ -239,8 +221,8 @@ class TestSpamScoring:
 # Greylisting
 # ---------------------------------------------------------------------------
 
-class TestGreylisting:
 
+class TestGreylisting:
     @pytest.mark.xfail(reason="rspamd API may not be directly reachable")
     def test_greylisting_config_exists(self):
         """Greylisting delays first-time senders by 5 minutes to filter
@@ -272,8 +254,8 @@ class TestGreylisting:
 # Phishing detection
 # ---------------------------------------------------------------------------
 
-class TestPhishingDetection:
 
+class TestPhishingDetection:
     @pytest.mark.xfail(reason="rspamd API may not be directly reachable")
     def test_rspamd_phishing_module_active(self):
         """Phishing detection uses OpenPhish and PhishTank feeds to identify
@@ -293,8 +275,8 @@ class TestPhishingDetection:
 # ARC signing
 # ---------------------------------------------------------------------------
 
-class TestARCSigning:
 
+class TestARCSigning:
     def test_arc_config_present(self, db_connection):
         """ARC (Authenticated Received Chain) preserves authentication across
         mail forwarding hops."""
@@ -302,9 +284,7 @@ class TestARCSigning:
         try:
             # ARC signing reuses DKIM keys. Verify at least one domain has
             # DKIM enabled, which means ARC signing infrastructure is in place.
-            cursor.execute(
-                "SELECT COUNT(*) FROM domains WHERE dkim_enabled = 1"
-            )
+            cursor.execute("SELECT COUNT(*) FROM domains WHERE dkim_enabled = 1")
             (count,) = cursor.fetchone()
             assert count >= 0, "Cannot query DKIM-enabled domains for ARC check"
         except Exception as exc:

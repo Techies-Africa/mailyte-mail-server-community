@@ -40,11 +40,11 @@ The archiver module is designed to handle high-volume email archiving with featu
 ```python
 # Configuration example
 ARCHIVER_CONFIG = {
-    'enabled': True,
-    'capture_mode': 'real_time',  # or 'scheduled'
-    'storage_tier': 'standard',
-    'compression': True,
-    'encryption': True
+    "enabled": True,
+    "capture_mode": "real_time",  # or 'scheduled'
+    "storage_tier": "standard",
+    "compression": True,
+    "encryption": True,
 }
 ```
 
@@ -86,18 +86,15 @@ SEARCH_INDEX_PREFIX=email_archive_
 ### Retention Policy Configuration
 ```python
 RETENTION_POLICIES = {
-    'default': {
-        'retention_days': 2555,  # 7 years
-        'storage_tier': 'standard'
+    "default": {
+        "retention_days": 2555,  # 7 years
+        "storage_tier": "standard",
     },
-    'legal': {
-        'retention_days': -1,  # Indefinite
-        'storage_tier': 'cold'
+    "legal": {
+        "retention_days": -1,  # Indefinite
+        "storage_tier": "cold",
     },
-    'temporary': {
-        'retention_days': 90,
-        'storage_tier': 'hot'
-    }
+    "temporary": {"retention_days": 90, "storage_tier": "hot"},
 }
 ```
 
@@ -231,13 +228,13 @@ CREATE TABLE archive_metadata (
 ### Health Checks
 ```python
 # Health check endpoint
-GET /health
+GET / health
 {
     "status": "healthy",
     "storage_usage": "75%",
     "last_archive": "2024-01-15T10:30:00Z",
     "search_engine": "connected",
-    "database": "connected"
+    "database": "connected",
 }
 ```
 

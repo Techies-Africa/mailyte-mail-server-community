@@ -157,6 +157,7 @@ def get_mx_records_for_domain(domain: str) -> List[str]:
 # XML builders
 # ---------------------------------------------------------------------------
 
+
 def build_autoconfig_xml(email: str, mx_hostname: str) -> bytes:
     """Build Mozilla Autoconfig XML for the given email address."""
     local_part = email.split("@")[0] if "@" in email else email
@@ -262,6 +263,7 @@ app = FastAPI(
 
 # ----- Mozilla Autoconfig ------------------------------------------------
 
+
 @app.get("/mail/config-v1.1.xml")
 @app.get("/.well-known/autoconfig/mail/config-v1.1.xml")
 async def mozilla_autoconfig(emailaddress: str = Query(..., description="Full email address")):
@@ -282,6 +284,7 @@ async def mozilla_autoconfig(emailaddress: str = Query(..., description="Full em
 
 
 # ----- Microsoft Autodiscover POX ----------------------------------------
+
 
 @app.post("/autodiscover/autodiscover.xml")
 async def autodiscover_pox(request: Request):
@@ -306,6 +309,7 @@ async def autodiscover_pox(request: Request):
 
 # ----- Microsoft Autodiscover V2 (JSON) ----------------------------------
 
+
 @app.post("/autodiscover/autodiscover.json")
 async def autodiscover_v2(request: Request):
     """
@@ -328,24 +332,22 @@ async def autodiscover_v2(request: Request):
     domain = email.split("@")[1]
     mx_hostname = get_mx_hostname(domain)
 
-    return JSONResponse(content={
-        "Protocol": "IMAP",
-        "Url": f"imaps://{mx_hostname}:993",
-    })
+    return JSONResponse(
+        content={
+            "Protocol": "IMAP",
+            "Url": f"imaps://{mx_hostname}:993",
+        }
+    )
 
 
 # ----- MTA-STS policy ----------------------------------------------------
+
 
 def _build_mta_sts_body(domain: str) -> str:
     """Build the MTA-STS policy plain-text body."""
     mx_hosts = get_mx_records_for_domain(domain)
     mx_lines = "\n".join(f"mx: {mx}" for mx in mx_hosts)
-    return (
-        f"version: STSv1\n"
-        f"mode: {MTA_STS_MODE}\n"
-        f"{mx_lines}\n"
-        f"max_age: 86400\n"
-    )
+    return f"version: STSv1\nmode: {MTA_STS_MODE}\n{mx_lines}\nmax_age: 86400\n"
 
 
 @app.get("/mta-sts.txt")
@@ -363,7 +365,7 @@ async def mta_sts_policy(request: Request):
     # Strip port if present and remove mta-sts. prefix
     domain = host.split(":")[0]
     if domain.startswith("mta-sts."):
-        domain = domain[len("mta-sts."):]
+        domain = domain[len("mta-sts.") :]
 
     body = _build_mta_sts_body(domain)
     return Response(content=body, media_type="text/plain")
@@ -371,8 +373,11 @@ async def mta_sts_policy(request: Request):
 
 # ----- DNS record generator ----------------------------------------------
 
+
 @app.get("/dns-records/{domain}")
-async def dns_records(domain: str = PathParam(..., description="Domain name to generate DNS records for")):
+async def dns_records(
+    domain: str = PathParam(..., description="Domain name to generate DNS records for"),
+):
     """
     Generate all required DNS records for a domain.
 
@@ -391,8 +396,7 @@ async def dns_records(domain: str = PathParam(..., description="Domain name to g
         # Strip PEM headers/footers and whitespace for DNS record
         pub_key = dkim["public_key"]
         pub_key_clean = (
-            pub_key
-            .replace("-----BEGIN PUBLIC KEY-----", "")
+            pub_key.replace("-----BEGIN PUBLIC KEY-----", "")
             .replace("-----END PUBLIC KEY-----", "")
             .replace("\n", "")
             .replace("\r", "")
@@ -422,7 +426,9 @@ async def dns_records(domain: str = PathParam(..., description="Domain name to g
         {
             "type": "TXT",
             "name": f"{dkim_selector}._domainkey.{domain}",
-            "value": dkim_txt_value if dkim_txt_value else "(DKIM key not found -- generate one first)",
+            "value": dkim_txt_value
+            if dkim_txt_value
+            else "(DKIM key not found -- generate one first)",
             "ttl": 3600,
             "description": "DKIM public key for email signing verification",
         },
@@ -543,15 +549,18 @@ async def dns_records(domain: str = PathParam(..., description="Domain name to g
         },
     ]
 
-    return JSONResponse(content={
-        "domain": domain,
-        "mx_hostname": mx_hostname,
-        "records": records,
-        "total": len(records),
-    })
+    return JSONResponse(
+        content={
+            "domain": domain,
+            "mx_hostname": mx_hostname,
+            "records": records,
+            "total": len(records),
+        }
+    )
 
 
 # ----- Health check -------------------------------------------------------
+
 
 @app.get("/health")
 async def health():

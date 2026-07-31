@@ -75,12 +75,16 @@ Verify in Python:
 ```python
 import hmac, hashlib
 
+
 def verify_signature(raw_body: bytes, header: str, secret: str) -> bool:
-    expected = "sha256=" + hmac.new(
-        secret.encode("utf-8"),
-        raw_body,
-        hashlib.sha256,
-    ).hexdigest()
+    expected = (
+        "sha256="
+        + hmac.new(
+            secret.encode("utf-8"),
+            raw_body,
+            hashlib.sha256,
+        ).hexdigest()
+    )
     return hmac.compare_digest(expected, header)
 ```
 
@@ -100,6 +104,7 @@ and lets you reject replays by checking the timestamp age.
 
 ```python
 import hmac, hashlib, time
+
 
 def verify_inline(payload: dict, secret: str, max_age_seconds: int = 900) -> bool:
     sig_block = payload.get("signature", {})
@@ -617,6 +622,7 @@ duplicate deliveries — network retries can deliver the same event more than on
 
 ```python
 processed_ids = set()
+
 
 def handle_webhook(payload: dict):
     event_id = payload["id"]

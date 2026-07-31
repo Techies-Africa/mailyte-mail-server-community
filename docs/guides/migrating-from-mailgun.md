@@ -100,22 +100,23 @@ MAILYTE_API = "http://mail.yourdomain.com:8083/api/v1"
 API_KEY = "YOUR_MAILYTE_API_KEY"
 ORG_ID = "my-company"
 
-headers = {
-    "X-API-Key": API_KEY,
-    "Content-Type": "application/json"
-}
+headers = {"X-API-Key": API_KEY, "Content-Type": "application/json"}
 
 # Domains exported from Mailgun
 domains = ["domain1.com", "domain2.com", "domain3.com"]
 
 for domain in domains:
-    resp = requests.post(f"{MAILYTE_API}/add/domain", headers=headers, json={
-        "domain": domain,
-        "organization_id": ORG_ID,
-        "description": "Migrated from Mailgun",
-        "mailboxes": 100,
-        "aliases": 400,
-    })
+    resp = requests.post(
+        f"{MAILYTE_API}/add/domain",
+        headers=headers,
+        json={
+            "domain": domain,
+            "organization_id": ORG_ID,
+            "description": "Migrated from Mailgun",
+            "mailboxes": 100,
+            "aliases": 400,
+        },
+    )
     result = resp.json()
     print(f"{domain}: {result.get('type', 'unknown')} - {result.get('msg', '')}")
 ```

@@ -6,6 +6,7 @@ seeded by the dev environment is present. Script existence checks
 are performed via database metadata since the test container does
 not mount the host scripts directory.
 """
+
 import pytest
 
 
@@ -28,7 +29,6 @@ CRITICAL_TABLES = [
 
 
 class TestBackupInfrastructure:
-
     def test_backup_script_exists(self, db_connection):
         """Verify backup infrastructure is in place by checking for a
         backup-related table or configuration in the database."""
@@ -38,9 +38,7 @@ class TestBackupInfrastructure:
         cursor.close()
         # The presence of audit_logs confirms the schema supports
         # operational logging which is a prerequisite for backup auditing.
-        assert "audit_logs" in tables, (
-            "audit_logs table missing — backup infrastructure incomplete"
-        )
+        assert "audit_logs" in tables, "audit_logs table missing — backup infrastructure incomplete"
 
     def test_restore_script_exists(self, db_connection):
         """Verify restore infrastructure is in place by checking that
@@ -76,17 +74,15 @@ class TestBackupInfrastructure:
 # Database completeness
 # ---------------------------------------------------------------------------
 
-class TestDatabaseCompleteness:
 
+class TestDatabaseCompleteness:
     def test_database_tables_complete(self, db_connection):
         """The database must contain at least 40 tables."""
         cursor = db_connection.cursor()
         cursor.execute("SHOW TABLES")
         tables = [row[0] for row in cursor.fetchall()]
         cursor.close()
-        assert len(tables) >= 40, (
-            f"Expected at least 40 tables, found {len(tables)}: {tables}"
-        )
+        assert len(tables) >= 40, f"Expected at least 40 tables, found {len(tables)}: {tables}"
 
     def test_critical_tables_exist(self, db_connection):
         """All critical tables required for mail operations must exist."""

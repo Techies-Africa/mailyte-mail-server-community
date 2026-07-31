@@ -45,10 +45,10 @@ Domain Registration → Validation → Issuance → Deployment → Monitoring �
 ```python
 # Certificate configuration
 domains = [
-    "mail.example.com",      # Primary mail server
-    "smtp.example.com",      # SMTP service
-    "imap.example.com",      # IMAP service
-    "webmail.example.com"    # Webmail interface
+    "mail.example.com",  # Primary mail server
+    "smtp.example.com",  # SMTP service
+    "imap.example.com",  # IMAP service
+    "webmail.example.com",  # Webmail interface
 ]
 ```
 

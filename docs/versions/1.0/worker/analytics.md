@@ -75,7 +75,7 @@ GET /analytics/system/usage
     "status": "delivered",
     "delivery_time": 1.2,
     "size_bytes": 2048,
-    "tracking_enabled": true
+    "tracking_enabled": true,
 }
 ```
 
@@ -87,12 +87,8 @@ GET /analytics/system/usage
     "timestamp": "2024-01-01T12:00:00Z",
     "ip_address": "192.168.1.1",
     "user_agent": "Mozilla/5.0...",
-    "location": {
-        "country": "US",
-        "region": "CA",
-        "city": "San Francisco"
-    },
-    "device_type": "mobile"
+    "location": {"country": "US", "region": "CA", "city": "San Francisco"},
+    "device_type": "mobile",
 }
 ```
 
@@ -237,11 +233,11 @@ GET /analytics/metrics/system
 Receives real-time events from all services:
 
 ```python
-@app.route('/webhook/email-event', methods=['POST'])
+@app.route("/webhook/email-event", methods=["POST"])
 def process_email_event():
     event = request.get_json()
     analytics_processor.process_event(event)
-    return jsonify({'status': 'processed'})
+    return jsonify({"status": "processed"})
 ```
 
 ### API Integration
@@ -250,8 +246,7 @@ External systems can query analytics:
 ```python
 # Get domain performance
 response = requests.get(
-    f'{ANALYTICS_API}/analytics/dashboard/example.com',
-    headers={'X-API-Key': api_key}
+    f"{ANALYTICS_API}/analytics/dashboard/example.com", headers={"X-API-Key": api_key}
 )
 ```
 

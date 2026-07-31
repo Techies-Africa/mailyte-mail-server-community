@@ -2,6 +2,7 @@
 """
 Pytest configuration and shared fixtures for Mailyte tests.
 """
+
 import json
 import sys
 import os
@@ -14,17 +15,17 @@ project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
 # Set test environment variables before importing anything
-os.environ.setdefault('DB_HOST', 'localhost')
-os.environ.setdefault('DB_PORT', '3306')
-os.environ.setdefault('DB_NAME', 'test_mailserver')
-os.environ.setdefault('DB_USER', 'test')
-os.environ.setdefault('DB_PASSWORD', 'test')
-os.environ.setdefault('REDIS_HOST', 'localhost')
-os.environ.setdefault('REDIS_PORT', '6379')
-os.environ.setdefault('WEBHOOK_URL', '')
-os.environ.setdefault('WEBHOOK_SECRET', 'test-secret-key')
-os.environ.setdefault('SERVICE_NAME', 'test')
-os.environ.setdefault('ADMIN_TOKEN_SECRET', 'test-admin-token')
+os.environ.setdefault("DB_HOST", "localhost")
+os.environ.setdefault("DB_PORT", "3306")
+os.environ.setdefault("DB_NAME", "test_mailserver")
+os.environ.setdefault("DB_USER", "test")
+os.environ.setdefault("DB_PASSWORD", "test")
+os.environ.setdefault("REDIS_HOST", "localhost")
+os.environ.setdefault("REDIS_PORT", "6379")
+os.environ.setdefault("WEBHOOK_URL", "")
+os.environ.setdefault("WEBHOOK_SECRET", "test-secret-key")
+os.environ.setdefault("SERVICE_NAME", "test")
+os.environ.setdefault("ADMIN_TOKEN_SECRET", "test-admin-token")
 
 
 @pytest.fixture
@@ -43,6 +44,7 @@ def mock_redis():
     """Mock Redis client."""
     try:
         import fakeredis
+
         return fakeredis.FakeRedis(decode_responses=True)
     except ImportError:
         return MagicMock()
@@ -52,10 +54,10 @@ def mock_redis():
 def sample_org():
     """Sample organization data."""
     return {
-        'id': 'test-org-001',
-        'name': 'Test Organization',
-        'admin_email': 'admin@testorg.com',
-        'active': True,
+        "id": "test-org-001",
+        "name": "Test Organization",
+        "admin_email": "admin@testorg.com",
+        "active": True,
     }
 
 
@@ -63,10 +65,10 @@ def sample_org():
 def sample_domain(sample_org):
     """Sample domain data."""
     return {
-        'id': 1,
-        'domain': 'testorg.com',
-        'organization_id': sample_org['id'],
-        'active': True,
+        "id": 1,
+        "domain": "testorg.com",
+        "organization_id": sample_org["id"],
+        "active": True,
     }
 
 
@@ -74,10 +76,10 @@ def sample_domain(sample_org):
 def sample_api_key():
     """Sample API key data."""
     return {
-        'id': 1,
-        'api_key': 'test-api-key-12345',
-        'organization_id': 'test-org-001',
-        'active': 1,
-        'admin_access': 0,
-        'read_only': 0,
+        "id": 1,
+        "api_key": "test-api-key-12345",
+        "organization_id": "test-org-001",
+        "active": 1,
+        "admin_access": 0,
+        "read_only": 0,
     }

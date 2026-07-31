@@ -5,6 +5,7 @@ Verifies storage usage endpoints, quota configuration,
 and database schema for quota-related columns against
 the live Docker services.
 """
+
 import pytest
 import requests
 
@@ -22,8 +23,8 @@ TIMEOUT = 10
 # Storage service health
 # ---------------------------------------------------------------------------
 
-class TestStorageHealth:
 
+class TestStorageHealth:
     def test_storage_usage_health(self):
         """Storage service health endpoint returns 200."""
         resp = requests.get(f"{STORAGE_BASE}/health", timeout=TIMEOUT)
@@ -34,8 +35,8 @@ class TestStorageHealth:
 # Storage usage API
 # ---------------------------------------------------------------------------
 
-class TestStorageUsageAPI:
 
+class TestStorageUsageAPI:
     def test_get_domain_storage_usage(self, api_headers):
         """Domain storage usage endpoint is reachable."""
         resp = requests.get(
@@ -77,8 +78,8 @@ class TestStorageUsageAPI:
 # Database-level quota checks
 # ---------------------------------------------------------------------------
 
-class TestQuotaDatabase:
 
+class TestQuotaDatabase:
     def test_default_quota_exists(self, db_connection):
         """Test user's email account has a storage_quota greater than zero."""
         cursor = db_connection.cursor()
@@ -102,12 +103,8 @@ class TestQuotaDatabase:
         columns = {row[0] for row in cursor.fetchall()}
         cursor.close()
 
-        assert "storage_quota" in columns, (
-            "Missing storage_quota column in email_accounts"
-        )
-        assert "storage_used" in columns, (
-            "Missing storage_used column in email_accounts"
-        )
+        assert "storage_quota" in columns, "Missing storage_quota column in email_accounts"
+        assert "storage_used" in columns, "Missing storage_used column in email_accounts"
 
     def test_domain_max_users_configured(self, db_connection):
         """Test domain has max_users configured and greater than zero."""
@@ -121,6 +118,4 @@ class TestQuotaDatabase:
 
         assert row is not None, f"No domain record found for {TEST_DOMAIN}"
         max_users = row[0]
-        assert max_users is not None and max_users > 0, (
-            f"Expected max_users > 0, got {max_users}"
-        )
+        assert max_users is not None and max_users > 0, f"Expected max_users > 0, got {max_users}"

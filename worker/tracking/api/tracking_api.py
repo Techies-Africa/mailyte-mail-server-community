@@ -1,4 +1,3 @@
-
 #!/usr/bin/env python3
 """
 Email Tracking Service - Tracking API Endpoints
@@ -34,7 +33,8 @@ logger = logging.getLogger(__name__)
 # Create router for tracking endpoints
 tracking_api = APIRouter()
 
-@tracking_api.get('/open/{tracking_id}')
+
+@tracking_api.get("/open/{tracking_id}")
 async def track_open(tracking_id: str, request: Request):
     """
     Handle email open tracking via tracking pixel.
@@ -51,7 +51,7 @@ async def track_open(tracking_id: str, request: Request):
     try:
         # Rate limiting check
         try:
-            request.app.rate_limiter.check_rate_limit(request.client.host, 'open')
+            request.app.rate_limiter.check_rate_limit(request.client.host, "open")
         except RateLimitExceeded:
             logger.warning(f"Rate limit exceeded for IP {request.client.host}")
             # Still serve pixel but don't log the event
@@ -65,18 +65,18 @@ async def track_open(tracking_id: str, request: Request):
 
         # Collect request metadata
         request_info = {
-            'timestamp': datetime.utcnow(),
-            'ip_address': request.client.host,
-            'user_agent': request.headers.get('User-Agent', ''),
-            'referer': request.headers.get('Referer', ''),
-            'accept_language': request.headers.get('Accept-Language', ''),
-            'x_forwarded_for': request.headers.get('X-Forwarded-For', ''),
-            'x_real_ip': request.headers.get('X-Real-IP', '')
+            "timestamp": datetime.utcnow(),
+            "ip_address": request.client.host,
+            "user_agent": request.headers.get("User-Agent", ""),
+            "referer": request.headers.get("Referer", ""),
+            "accept_language": request.headers.get("Accept-Language", ""),
+            "x_forwarded_for": request.headers.get("X-Forwarded-For", ""),
+            "x_real_ip": request.headers.get("X-Real-IP", ""),
         }
 
         # Log tracking event
         success = request.app.database_service.log_tracking_event(
-            'opened', tracking_data, request_info
+            "opened", tracking_data, request_info
         )
 
         if success:
@@ -100,7 +100,8 @@ async def track_open(tracking_id: str, request: Request):
         logger.error(f"Error processing open tracking: {e}")
         return _serve_tracking_pixel()
 
-@tracking_api.get('/click/{tracking_id}')
+
+@tracking_api.get("/click/{tracking_id}")
 async def track_click(tracking_id: str, request: Request, url: str = Query(default=None)):
     """
     Handle email click tracking and redirect to original URL.
@@ -117,26 +118,26 @@ async def track_click(tracking_id: str, request: Request, url: str = Query(defau
     try:
         # Rate limiting check
         try:
-            request.app.rate_limiter.check_rate_limit(request.client.host, 'click')
+            request.app.rate_limiter.check_rate_limit(request.client.host, "click")
         except RateLimitExceeded:
             logger.warning(f"Rate limit exceeded for IP {request.client.host}")
             # Still redirect but don't log the event
             if url:
                 return RedirectResponse(url=unquote(url))
-            return JSONResponse({'error': 'Rate limit exceeded'}, status_code=429)
+            return JSONResponse({"error": "Rate limit exceeded"}, status_code=429)
 
         # Get original URL from query parameters
         original_url = url
         if not original_url:
             logger.warning("Missing original URL in click tracking")
-            return JSONResponse({'error': 'Missing destination URL'}, status_code=400)
+            return JSONResponse({"error": "Missing destination URL"}, status_code=400)
 
         # Decode and sanitize URL
         try:
             original_url = unquote(original_url)
         except Exception as e:
             logger.warning(f"Failed to decode URL: {e}")
-            return JSONResponse({'error': 'Invalid URL encoding'}, status_code=400)
+            return JSONResponse({"error": "Invalid URL encoding"}, status_code=400)
 
         # Decode tracking information
         tracking_data = request.app.tracking_service.decode_tracking_id(tracking_id)
@@ -146,24 +147,21 @@ async def track_click(tracking_id: str, request: Request, url: str = Query(defau
 
         # Collect request metadata
         request_info = {
-            'timestamp': datetime.utcnow(),
-            'ip_address': request.client.host,
-            'user_agent': request.headers.get('User-Agent', ''),
-            'referer': request.headers.get('Referer', ''),
-            'accept_language': request.headers.get('Accept-Language', ''),
-            'x_forwarded_for': request.headers.get('X-Forwarded-For', ''),
-            'x_real_ip': request.headers.get('X-Real-IP', '')
+            "timestamp": datetime.utcnow(),
+            "ip_address": request.client.host,
+            "user_agent": request.headers.get("User-Agent", ""),
+            "referer": request.headers.get("Referer", ""),
+            "accept_language": request.headers.get("Accept-Language", ""),
+            "x_forwarded_for": request.headers.get("X-Forwarded-For", ""),
+            "x_real_ip": request.headers.get("X-Real-IP", ""),
         }
 
         # Additional click data
-        additional_data = {
-            'original_url': original_url,
-            'query_params': dict(request.query_params)
-        }
+        additional_data = {"original_url": original_url, "query_params": dict(request.query_params)}
 
         # Log tracking event
         success = request.app.database_service.log_tracking_event(
-            'clicked', tracking_data, request_info, additional_data
+            "clicked", tracking_data, request_info, additional_data
         )
 
         if success:
@@ -193,9 +191,10 @@ async def track_click(tracking_id: str, request: Request, url: str = Query(defau
                 return RedirectResponse(url=unquote(url))
             except:
                 pass
-        return JSONResponse({'error': 'Tracking error'}, status_code=500)
+        return JSONResponse({"error": "Tracking error"}, status_code=500)
 
-@tracking_api.post('/api/tracking/bounce')
+
+@tracking_api.post("/api/tracking/bounce")
 async def track_bounce(request: Request):
     """
     Handle bounce tracking from mail server.
@@ -211,24 +210,24 @@ async def track_bounce(request: Request):
     try:
         data = await request.json()
         if not data:
-            return JSONResponse({'error': 'No JSON data provided'}, status_code=400)
+            return JSONResponse({"error": "No JSON data provided"}, status_code=400)
 
-        required_fields = ['recipient', 'bounce_type', 'bounce_reason']
+        required_fields = ["recipient", "bounce_type", "bounce_reason"]
         for field in required_fields:
             if field not in data:
-                return JSONResponse({'error': f'Missing required field: {field}'}, status_code=400)
+                return JSONResponse({"error": f"Missing required field: {field}"}, status_code=400)
 
         # Extract tracking information if available
-        tracking_info = data.get('tracking_info', {})
+        tracking_info = data.get("tracking_info", {})
 
         # Create bounce event data
         bounce_event = {
-            'recipient': data['recipient'],
-            'event_type': 'BOUNCED',
-            'bounce_type': data['bounce_type'],
-            'bounce_reason': data['bounce_reason'],
-            'timestamp': datetime.utcnow(),
-            'additional_data': tracking_info
+            "recipient": data["recipient"],
+            "event_type": "BOUNCED",
+            "bounce_type": data["bounce_type"],
+            "bounce_reason": data["bounce_reason"],
+            "timestamp": datetime.utcnow(),
+            "additional_data": tracking_info,
         }
 
         # Log bounce event
@@ -237,10 +236,10 @@ async def track_bounce(request: Request):
         if success:
             # Add to suppression list if needed
             request.app.suppression_service.add_bounce_suppression(
-                email=data['recipient'],
-                bounce_type=data['bounce_type'],
-                bounce_reason=data['bounce_reason'],
-                organization_id=tracking_info.get('organization_id', 'default')
+                email=data["recipient"],
+                bounce_type=data["bounce_type"],
+                bounce_reason=data["bounce_reason"],
+                organization_id=tracking_info.get("organization_id", "default"),
             )
 
             # Send webhook notification via centralized dispatcher
@@ -255,41 +254,40 @@ async def track_bounce(request: Request):
             )
 
             logger.info(f"Bounce event logged for {data['recipient']}")
-            return JSONResponse({'status': 'success'}, status_code=200)
+            return JSONResponse({"status": "success"}, status_code=200)
         else:
-            return JSONResponse({'error': 'Failed to log bounce event'}, status_code=500)
+            return JSONResponse({"error": "Failed to log bounce event"}, status_code=500)
 
     except Exception as e:
         logger.error(f"Error processing bounce tracking: {e}")
-        return JSONResponse({'error': 'Internal server error'}, status_code=500)
+        return JSONResponse({"error": "Internal server error"}, status_code=500)
 
-@tracking_api.post('/api/tracking/complaint')
+
+@tracking_api.post("/api/tracking/complaint")
 async def track_complaint(request: Request):
     """Handle spam complaint tracking."""
     try:
         data = await request.json()
-        if not data or 'recipient' not in data:
-            return JSONResponse({'error': 'Missing recipient'}, status_code=400)
+        if not data or "recipient" not in data:
+            return JSONResponse({"error": "Missing recipient"}, status_code=400)
 
         # Log complaint event
         complaint_event = {
-            'recipient': data['recipient'],
-            'event_type': 'COMPLAINED',
-            'complaint_type': data.get('complaint_type', 'spam'),
-            'timestamp': datetime.utcnow(),
-            'additional_data': data.get('additional_data', {})
+            "recipient": data["recipient"],
+            "event_type": "COMPLAINED",
+            "complaint_type": data.get("complaint_type", "spam"),
+            "timestamp": datetime.utcnow(),
+            "additional_data": data.get("additional_data", {}),
         }
 
-        success = request.app.database_service.log_tracking_event(
-            'complained', complaint_event, {}
-        )
+        success = request.app.database_service.log_tracking_event("complained", complaint_event, {})
 
         if success:
             # Add to suppression list
             request.app.suppression_service.add_complaint_suppression(
-                email=data['recipient'],
-                complaint_reason=data.get('complaint_type', 'spam'),
-                organization_id=data.get('organization_id', 'default')
+                email=data["recipient"],
+                complaint_reason=data.get("complaint_type", "spam"),
+                organization_id=data.get("organization_id", "default"),
             )
 
             # Send webhook notification via centralized dispatcher
@@ -302,13 +300,14 @@ async def track_complaint(request: Request):
                 source_service="tracking",
             )
 
-            return JSONResponse({'status': 'success'}, status_code=200)
+            return JSONResponse({"status": "success"}, status_code=200)
         else:
-            return JSONResponse({'error': 'Failed to log complaint'}, status_code=500)
+            return JSONResponse({"error": "Failed to log complaint"}, status_code=500)
 
     except Exception as e:
         logger.error(f"Error processing complaint: {e}")
-        return JSONResponse({'error': 'Internal server error'}, status_code=500)
+        return JSONResponse({"error": "Internal server error"}, status_code=500)
+
 
 def _serve_tracking_pixel():
     """
@@ -318,15 +317,15 @@ def _serve_tracking_pixel():
         Response: PNG image response with appropriate headers
     """
     # 1x1 transparent PNG pixel (base64 encoded)
-    pixel_data = b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xdb\x00\x00\x00\x00IEND\xaeB`\x82'
+    pixel_data = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xdb\x00\x00\x00\x00IEND\xaeB`\x82"
 
     return Response(
         content=pixel_data,
-        media_type='image/png',
+        media_type="image/png",
         headers={
-            'Cache-Control': 'no-cache, no-store, must-revalidate',
-            'Pragma': 'no-cache',
-            'Expires': '0',
-            'Content-Length': str(len(pixel_data)),
-        }
+            "Cache-Control": "no-cache, no-store, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+            "Content-Length": str(len(pixel_data)),
+        },
     )

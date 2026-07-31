@@ -7,6 +7,7 @@ against the live mail server.
 NOTE: This entire module runs serially (no xdist parallelism) because
 delivery tests share a single mailbox and race on inbox state.
 """
+
 import email
 import smtplib
 import uuid
@@ -35,6 +36,7 @@ TIMEOUT = 15  # seconds for SMTP operations
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture(autouse=False)
 def empty_inbox():
     """Ensure the inbox is empty before and after a test that inspects it."""
@@ -46,6 +48,7 @@ def empty_inbox():
 # ---------------------------------------------------------------------------
 # TLS and Authentication
 # ---------------------------------------------------------------------------
+
 
 class TestSMTPConnection:
     """STARTTLS negotiation and credential validation."""
@@ -88,6 +91,7 @@ class TestSMTPConnection:
 # ---------------------------------------------------------------------------
 # Sending and Delivery
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.slow
 class TestSMTPDelivery:
@@ -152,6 +156,7 @@ class TestSMTPDelivery:
 # Relay / Security
 # ---------------------------------------------------------------------------
 
+
 class TestSMTPSecurity:
     """Unauthenticated relay must be rejected."""
 
@@ -180,6 +185,7 @@ class TestSMTPSecurity:
 # EHLO capabilities
 # ---------------------------------------------------------------------------
 
+
 class TestSMTPCapabilities:
     """Verify expected EHLO extensions are advertised."""
 
@@ -191,10 +197,7 @@ class TestSMTPCapabilities:
             advertised = {k.upper() for k in server.esmtp_features}
             expected = {"STARTTLS", "SIZE", "8BITMIME", "DSN", "PIPELINING"}
             missing = expected - advertised
-            assert not missing, (
-                f"Missing EHLO capabilities: {missing}. "
-                f"Advertised: {advertised}"
-            )
+            assert not missing, f"Missing EHLO capabilities: {missing}. Advertised: {advertised}"
         finally:
             try:
                 server.quit()
@@ -205,6 +208,7 @@ class TestSMTPCapabilities:
 # ---------------------------------------------------------------------------
 # TLS version and cipher validation
 # ---------------------------------------------------------------------------
+
 
 class TestSMTPTLS:
     """Validate TLS protocol versions and cipher strength on the SMTP port."""
@@ -266,9 +270,7 @@ class TestSMTPTLS:
         try:
             server.ehlo()
             advertised = {k.upper() for k in server.esmtp_features}
-            assert "SIZE" in advertised, (
-                f"SIZE extension not advertised. Features: {advertised}"
-            )
+            assert "SIZE" in advertised, f"SIZE extension not advertised. Features: {advertised}"
         finally:
             try:
                 server.quit()
@@ -279,6 +281,7 @@ class TestSMTPTLS:
 # ---------------------------------------------------------------------------
 # Attachment handling
 # ---------------------------------------------------------------------------
+
 
 class TestSMTPAttachments:
     """Verify the server handles MIME multipart messages with attachments."""
@@ -313,9 +316,7 @@ class TestSMTPAttachments:
         attachment = MIMEBase("application", "octet-stream")
         attachment.set_payload(b"Hello from attachment content.")
         encoders.encode_base64(attachment)
-        attachment.add_header(
-            "Content-Disposition", "attachment", filename="testfile.txt"
-        )
+        attachment.add_header("Content-Disposition", "attachment", filename="testfile.txt")
         msg.attach(attachment)
 
         server = smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=TIMEOUT)
@@ -345,6 +346,7 @@ class TestSMTPAttachments:
 # ---------------------------------------------------------------------------
 # Rate limiting / resilience
 # ---------------------------------------------------------------------------
+
 
 class TestSMTPRateLimiting:
     """Ensure the SMTP server stays stable under rapid connection bursts."""
@@ -378,6 +380,5 @@ class TestSMTPRateLimiting:
         # one must succeed to prove the server is still alive.
         successful = len(connections)
         assert successful >= 1, (
-            f"All 5 rapid connections failed — server may have crashed. "
-            f"Errors: {errors}"
+            f"All 5 rapid connections failed — server may have crashed. Errors: {errors}"
         )

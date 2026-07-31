@@ -56,6 +56,7 @@ REINJECT_TIMEOUT = 30
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _clean_email_address(raw: str) -> str:
     """Extract a bare email address from a header value like 'Name <a@b.com>'."""
     if not raw:
@@ -153,13 +154,18 @@ def post_webhook(direction: str, metadata: Dict[str, Any]) -> bool:
         if resp.status_code < 300:
             logger.info(
                 "Webhook delivered: %s -> %s (HTTP %d)",
-                event_name, url, resp.status_code,
+                event_name,
+                url,
+                resp.status_code,
             )
             return True
 
         logger.warning(
             "Webhook HTTP error: %s -> %s (HTTP %d): %s",
-            event_name, url, resp.status_code, resp.text[:300],
+            event_name,
+            url,
+            resp.status_code,
+            resp.text[:300],
         )
         return False
 
@@ -192,7 +198,10 @@ def reinject_email(
 
     logger.info(
         "Reinjecting to %s:%d  sender=%s  recipients=%s",
-        REINJECT_HOST, REINJECT_PORT, sender, recipients,
+        REINJECT_HOST,
+        REINJECT_PORT,
+        sender,
+        recipients,
     )
 
     try:
@@ -208,6 +217,7 @@ def reinject_email(
 # ---------------------------------------------------------------------------
 # CLI argument parsing
 # ---------------------------------------------------------------------------
+
 
 def parse_args():
     """
@@ -238,13 +248,13 @@ def parse_args():
         if idx + 1 < len(remaining):
             cli_sender = remaining[idx + 1]
         # Remove -f and its argument from the list
-        remaining = remaining[:idx] + remaining[idx + 2:]
+        remaining = remaining[:idx] + remaining[idx + 2 :]
 
     # Everything after "--" is recipient addresses
     cli_recipients: List[str] = []
     if "--" in remaining:
         idx = remaining.index("--")
-        cli_recipients = remaining[idx + 1:]
+        cli_recipients = remaining[idx + 1 :]
 
     return direction, cli_sender, cli_recipients
 
@@ -252,6 +262,7 @@ def parse_args():
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
 
 def main():
     """

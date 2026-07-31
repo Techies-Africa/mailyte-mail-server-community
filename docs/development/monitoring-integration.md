@@ -21,6 +21,7 @@ from fastapi import FastAPI
 
 app = FastAPI()
 
+
 @app.get("/health")
 async def health():
     return {
@@ -98,6 +99,7 @@ Expose the metrics endpoint:
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 from starlette.responses import Response
 
+
 @app.get("/metrics")
 async def metrics():
     return Response(
@@ -143,6 +145,7 @@ REQUEST_DURATION = Histogram(
     buckets=[0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0],
 )
 
+
 # Use them in your route
 @app.post("/api/v1/add/domain")
 async def add_domain(request: DomainRequest):
@@ -177,6 +180,7 @@ Instead of instrumenting every route, use middleware:
 from starlette.middleware.base import BaseHTTPMiddleware
 import time
 
+
 class MetricsMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         start = time.time()
@@ -195,6 +199,7 @@ class MetricsMiddleware(BaseHTTPMiddleware):
         ).observe(duration)
 
         return response
+
 
 app.add_middleware(MetricsMiddleware)
 ```
@@ -218,12 +223,16 @@ Add your service to the Prometheus scrape config:
 ```python
 from prometheus_client import REGISTRY
 
+
 def test_request_counter_increments(client, api_key_header):
     # Get current count
-    before = REGISTRY.get_sample_value(
-        "mailyte_api_requests_total",
-        {"method": "POST", "endpoint": "/api/v1/add/domain", "status": "200"}
-    ) or 0
+    before = (
+        REGISTRY.get_sample_value(
+            "mailyte_api_requests_total",
+            {"method": "POST", "endpoint": "/api/v1/add/domain", "status": "200"},
+        )
+        or 0
+    )
 
     # Make a request
     client.post("/api/v1/add/domain", headers=api_key_header, json={...})
@@ -231,7 +240,7 @@ def test_request_counter_increments(client, api_key_header):
     # Check count increased
     after = REGISTRY.get_sample_value(
         "mailyte_api_requests_total",
-        {"method": "POST", "endpoint": "/api/v1/add/domain", "status": "200"}
+        {"method": "POST", "endpoint": "/api/v1/add/domain", "status": "200"},
     )
     assert after == before + 1
 ```
@@ -245,6 +254,7 @@ from prometheus_client import Gauge
 
 DB_HEALTHY = Gauge("mailyte_db_healthy", "Database connection health (1=up, 0=down)")
 DB_CONNECTIONS = Gauge("mailyte_db_connections_active", "Active database connections")
+
 
 # Update periodically
 def update_db_metrics():

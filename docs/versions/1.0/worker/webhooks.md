@@ -233,23 +233,18 @@ import hmac
 import hashlib
 import json
 
+
 def verify_webhook_signature(payload, signature, secret):
     """Verify webhook signature"""
-    expected_signature = hmac.new(
-        secret.encode(),
-        payload.encode(),
-        hashlib.sha256
-    ).hexdigest()
-    
-    return hmac.compare_digest(
-        f"sha256={expected_signature}",
-        signature
-    )
+    expected_signature = hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
+
+    return hmac.compare_digest(f"sha256={expected_signature}", signature)
+
 
 # Usage example
 webhook_secret = "your-webhook-secret"
 payload = request.get_data(as_text=True)
-signature = request.headers.get('X-Webhook-Signature')
+signature = request.headers.get("X-Webhook-Signature")
 
 if verify_webhook_signature(payload, signature, webhook_secret):
     # Process webhook
@@ -318,11 +313,9 @@ WEBHOOK_ENABLED_EVENTS=quota.exceeded,security.intrusion.detected,email.smtp.bou
 webhook_conditions = {
     "email.smtp.inbound": {
         "spam_score": {"$lt": 5.0},
-        "size": {"$lt": 10485760}  # 10MB
+        "size": {"$lt": 10485760},  # 10MB
     },
-    "quota.warning": {
-        "usage_percentage": {"$gte": 80}
-    }
+    "quota.warning": {"usage_percentage": {"$gte": 80}},
 }
 ```
 
@@ -339,32 +332,30 @@ from flask import Flask, request
 app = Flask(__name__)
 WEBHOOK_SECRET = "your-webhook-secret"
 
-@app.route('/webhook', methods=['POST'])
+
+@app.route("/webhook", methods=["POST"])
 def handle_webhook():
     # Verify signature
-    signature = request.headers.get('X-Webhook-Signature')
+    signature = request.headers.get("X-Webhook-Signature")
     payload = request.get_data(as_text=True)
-    
+
     if not verify_signature(payload, signature):
         return "Invalid signature", 401
-    
+
     # Process event
     event_data = json.loads(payload)
-    event_type = event_data['event']
-    
-    if event_type == 'email.smtp.inbound':
+    event_type = event_data["event"]
+
+    if event_type == "email.smtp.inbound":
         handle_inbound_email(event_data)
-    elif event_type == 'quota.warning':
+    elif event_type == "quota.warning":
         handle_quota_warning(event_data)
-    
+
     return "OK", 200
 
+
 def verify_signature(payload, signature):
-    expected = hmac.new(
-        WEBHOOK_SECRET.encode(),
-        payload.encode(),
-        hashlib.sha256
-    ).hexdigest()
+    expected = hmac.new(WEBHOOK_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
     return hmac.compare_digest(f"sha256={expected}", signature)
 ```
 
@@ -466,10 +457,14 @@ The webhook service exposes Prometheus metrics:
 
 ```python
 # Webhook delivery metrics
-webhook_deliveries_total = Counter('webhook_deliveries_total', 'Total webhook deliveries', ['status', 'url'])
-webhook_delivery_duration = Histogram('webhook_delivery_duration_seconds', 'Webhook delivery duration')
-webhook_queue_size = Gauge('webhook_queue_size', 'Current webhook queue size')
-webhook_retry_count = Counter('webhook_retries_total', 'Total webhook retries')
+webhook_deliveries_total = Counter(
+    "webhook_deliveries_total", "Total webhook deliveries", ["status", "url"]
+)
+webhook_delivery_duration = Histogram(
+    "webhook_delivery_duration_seconds", "Webhook delivery duration"
+)
+webhook_queue_size = Gauge("webhook_queue_size", "Current webhook queue size")
+webhook_retry_count = Counter("webhook_retries_total", "Total webhook retries")
 ```
 
 ## Administration

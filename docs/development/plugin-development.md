@@ -52,6 +52,7 @@ PLUGIN_NAME = "my_plugin"
 PLUGIN_VERSION = "1.0.0"
 PLUGIN_DESCRIPTION = "Syncs email events to an external CRM"
 
+
 def register(app, event_bus):
     """Called by Mailyte during startup."""
     plugin = MyPlugin()
@@ -67,6 +68,7 @@ import logging
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
 
 class MyPlugin:
     def __init__(self):
@@ -114,6 +116,7 @@ class MyPlugin:
 
     def register_routes(self, app):
         """Add custom API routes."""
+
         @app.get("/api/v1/plugins/my_plugin/status")
         async def plugin_status():
             return {
@@ -158,9 +161,7 @@ for event in ["email.smtp.inbound", "email.smtp.outbound"]:
     event_bus.subscribe(event, self.handler)
 
 # Subscribe with a filter
-event_bus.subscribe("email.smtp.inbound", self.handler, filter={
-    "organization_id": "specific-org"
-})
+event_bus.subscribe("email.smtp.inbound", self.handler, filter={"organization_id": "specific-org"})
 ```
 
 ### Event Handler Signature
@@ -192,6 +193,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+
 class AuditLogMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         start = time.time()
@@ -216,6 +218,7 @@ Register it in your plugin setup:
 ```python
 def setup(self, app, event_bus):
     from .middleware import AuditLogMiddleware
+
     app.add_middleware(AuditLogMiddleware)
 ```
 
@@ -251,6 +254,7 @@ class ComplianceFilterPlugin:
 # plugins/my_plugin/config.py
 import os
 
+
 class PluginConfig:
     ENABLED = os.environ.get("PLUGIN_MY_PLUGIN_ENABLED", "true").lower() == "true"
     CRM_API_URL = os.environ.get("PLUGIN_MY_PLUGIN_CRM_URL", "")
@@ -273,6 +277,7 @@ PLUGIN_MY_PLUGIN_CRM_KEY=secret
 import pytest
 from plugins.my_plugin.plugin import MyPlugin
 
+
 class TestMyPlugin:
     def setup_method(self):
         self.plugin = MyPlugin()
@@ -286,9 +291,9 @@ class TestMyPlugin:
                 "metadata": {
                     "from": "sender@example.com",
                     "to": "recipient@test.com",
-                    "subject": "Test"
+                    "subject": "Test",
                 }
-            }
+            },
         }
         # Should not raise
         await self.plugin.on_email_received(event)

@@ -24,6 +24,7 @@ from config import config
 
 logger = logging.getLogger(__name__)
 
+
 class RateLimitDatabaseService:
     """
     Database service for rate limiting persistent storage and fallback operations.
@@ -54,19 +55,19 @@ class RateLimitDatabaseService:
         """
         try:
             pool_config = {
-                'host': self.config.database.host,
-                'port': self.config.database.port,
-                'database': self.config.database.database,
-                'user': self.config.database.user,
-                'password': self.config.database.password,
-                'charset': self.config.database.charset,
-                'autocommit': True,
-                'pool_name': 'rate_limit_db_pool',
-                'pool_size': self.config.database.pool_size,
-                'pool_reset_session': True,
-                'use_unicode': True,
-                'sql_mode': 'TRADITIONAL',
-                'time_zone': '+00:00'  # Use UTC
+                "host": self.config.database.host,
+                "port": self.config.database.port,
+                "database": self.config.database.database,
+                "user": self.config.database.user,
+                "password": self.config.database.password,
+                "charset": self.config.database.charset,
+                "autocommit": True,
+                "pool_name": "rate_limit_db_pool",
+                "pool_size": self.config.database.pool_size,
+                "pool_reset_session": True,
+                "use_unicode": True,
+                "sql_mode": "TRADITIONAL",
+                "time_zone": "+00:00",  # Use UTC
             }
 
             pool = pooling.MySQLConnectionPool(**pool_config)
@@ -75,15 +76,18 @@ class RateLimitDatabaseService:
             test_conn = pool.get_connection()
             test_conn.close()
 
-            logger.info(f"Database connection pool created successfully with {self.config.database.pool_size} connections")
+            logger.info(
+                f"Database connection pool created successfully with {self.config.database.pool_size} connections"
+            )
             return pool
 
         except Exception as e:
             logger.error(f"Failed to create database connection pool: {e}")
             return None
 
-    def _execute_query(self, query: str, params: tuple = None, fetch_one: bool = False, 
-                       fetch_all: bool = False) -> Any:
+    def _execute_query(
+        self, query: str, params: tuple = None, fetch_one: bool = False, fetch_all: bool = False
+    ) -> Any:
         """
         Execute a database query with connection management and error handling.
 
@@ -137,8 +141,15 @@ class RateLimitDatabaseService:
             logger.error(f"Unexpected database error: {e}")
             return None
 
-    def store_usage_data(self, entity_type: str, identifier: str, direction: str,
-                        period: str, timestamp: datetime, count: int) -> bool:
+    def store_usage_data(
+        self,
+        entity_type: str,
+        identifier: str,
+        direction: str,
+        period: str,
+        timestamp: datetime,
+        count: int,
+    ) -> bool:
         """
         Store usage data in the database using the new organization structure.
 
@@ -178,19 +189,33 @@ class RateLimitDatabaseService:
             """
 
             # Generate different time keys
-            day_key = timestamp.strftime('%Y-%m-%d')
-            hour_key = timestamp.strftime('%Y-%m-%d %H:00:00')
-            minute_key = timestamp.strftime('%Y-%m-%d %H:%M:00')
+            day_key = timestamp.strftime("%Y-%m-%d")
+            hour_key = timestamp.strftime("%Y-%m-%d %H:00:00")
+            minute_key = timestamp.strftime("%Y-%m-%d %H:%M:00")
 
-            cursor.execute(query, (
-                org_id, domain_id, email_account_id, entity_type, identifier,
-                direction, period, day_key, hour_key, minute_key, count
-            ))
+            cursor.execute(
+                query,
+                (
+                    org_id,
+                    domain_id,
+                    email_account_id,
+                    entity_type,
+                    identifier,
+                    direction,
+                    period,
+                    day_key,
+                    hour_key,
+                    minute_key,
+                    count,
+                ),
+            )
 
             cursor.close()
             conn.close()
 
-            logger.debug(f"Stored usage data: {entity_type}:{identifier}:{direction}:{period} = {count}")
+            logger.debug(
+                f"Stored usage data: {entity_type}:{identifier}:{direction}:{period} = {count}"
+            )
             return True
 
         except Exception as e:
@@ -209,17 +234,17 @@ class RateLimitDatabaseService:
         email_account_id = None
 
         try:
-            if entity_type == 'organization':
+            if entity_type == "organization":
                 org_id = identifier
 
-            elif entity_type == 'domain':
+            elif entity_type == "domain":
                 query = "SELECT id, organization_id FROM domains WHERE domain = %s"
                 cursor.execute(query, (identifier,))
                 result = cursor.fetchone()
                 if result:
                     domain_id, org_id = result
 
-            elif entity_type == 'mailbox':
+            elif entity_type == "mailbox":
                 query = """
                     SELECT ea.id, ea.domain_id, ea.organization_id 
                     FROM email_accounts ea 
@@ -235,8 +260,15 @@ class RateLimitDatabaseService:
 
         return org_id, domain_id, email_account_id
 
-    def get_usage_data(self, entity_type: str, identifier: str, direction: str,
-                      period: str, start_time: datetime, end_time: datetime) -> List[Dict[str, Any]]:
+    def get_usage_data(
+        self,
+        entity_type: str,
+        identifier: str,
+        direction: str,
+        period: str,
+        start_time: datetime,
+        end_time: datetime,
+    ) -> List[Dict[str, Any]]:
         """
         Retrieve usage data from database using the new organization structure.
 
@@ -259,27 +291,24 @@ class RateLimitDatabaseService:
             where_conditions = []
             params = []
 
-            if entity_type == 'organization':
+            if entity_type == "organization":
                 where_conditions.append("organization_id = %s")
                 params.append(identifier)
-            elif entity_type == 'domain':
+            elif entity_type == "domain":
                 where_conditions.append("entity_type = 'domain' AND identifier = %s")
                 params.append(identifier)
-            elif entity_type == 'mailbox':
+            elif entity_type == "mailbox":
                 where_conditions.append("entity_type = 'mailbox' AND identifier = %s")
                 params.append(identifier)
 
-            where_conditions.extend([
-                "direction = %s",
-                "usage_type = %s",
-                "created_at >= %s",
-                "created_at <= %s"
-            ])
+            where_conditions.extend(
+                ["direction = %s", "usage_type = %s", "created_at >= %s", "created_at <= %s"]
+            )
             params.extend([direction, period, start_time, end_time])
 
             query = f"""
                 SELECT * FROM usage_history 
-                WHERE {' AND '.join(where_conditions)}
+                WHERE {" AND ".join(where_conditions)}
                 ORDER BY created_at ASC
             """
 
@@ -295,7 +324,9 @@ class RateLimitDatabaseService:
             logger.error(f"Failed to get usage data: {e}")
             return []
 
-    def get_current_usage_stats(self, entity_type: str, identifier: str, direction: str) -> Dict[str, int]:
+    def get_current_usage_stats(
+        self, entity_type: str, identifier: str, direction: str
+    ) -> Dict[str, int]:
         """
         Get current usage statistics for entity using new organization structure.
 
@@ -319,24 +350,24 @@ class RateLimitDatabaseService:
             current_second = now.replace(microsecond=0)
 
             stats = {
-                'second_count': 0,
-                'minute_count': 0,
-                'hourly_count': 0,
-                'daily_count': 0,
-                'monthly_count': 0
+                "second_count": 0,
+                "minute_count": 0,
+                "hourly_count": 0,
+                "daily_count": 0,
+                "monthly_count": 0,
             }
 
             # Build base query conditions
             where_conditions = []
             params = []
 
-            if entity_type == 'organization':
+            if entity_type == "organization":
                 where_conditions.append("organization_id = %s")
                 params.append(identifier)
-            elif entity_type == 'domain':
+            elif entity_type == "domain":
                 where_conditions.append("entity_type = 'domain' AND identifier = %s")
                 params.append(identifier)
-            elif entity_type == 'mailbox':
+            elif entity_type == "mailbox":
                 where_conditions.append("entity_type = 'mailbox' AND identifier = %s")
                 params.append(identifier)
 
@@ -348,36 +379,36 @@ class RateLimitDatabaseService:
             hourly_query = f"""
                 SELECT COALESCE(SUM(usage_count), 0) as count
                 FROM usage_history 
-                WHERE {' AND '.join(where_conditions)} 
+                WHERE {" AND ".join(where_conditions)} 
                 AND usage_type = 'hourly' AND hour_key >= %s
             """
             cursor.execute(hourly_query, hourly_params)
             result = cursor.fetchone()
-            stats['hourly_count'] = result['count'] if result else 0
+            stats["hourly_count"] = result["count"] if result else 0
 
             # Get daily count
             daily_params = params + [current_day]
             daily_query = f"""
                 SELECT COALESCE(SUM(usage_count), 0) as count
                 FROM usage_history 
-                WHERE {' AND '.join(where_conditions)} 
+                WHERE {" AND ".join(where_conditions)} 
                 AND usage_type = 'daily' AND day_key >= %s
             """
             cursor.execute(daily_query, daily_params)
             result = cursor.fetchone()
-            stats['daily_count'] = result['count'] if result else 0
+            stats["daily_count"] = result["count"] if result else 0
 
             # Get monthly count
             monthly_params = params + [current_month]
             monthly_query = f"""
                 SELECT COALESCE(SUM(usage_count), 0) as count
                 FROM usage_history 
-                WHERE {' AND '.join(where_conditions)} 
+                WHERE {" AND ".join(where_conditions)} 
                 AND usage_type = 'monthly' AND created_at >= %s
             """
             cursor.execute(monthly_query, monthly_params)
             result = cursor.fetchone()
-            stats['monthly_count'] = result['count'] if result else 0
+            stats["monthly_count"] = result["count"] if result else 0
 
             cursor.close()
             conn.close()
@@ -386,7 +417,13 @@ class RateLimitDatabaseService:
 
         except Exception as e:
             logger.error(f"Failed to get current usage stats: {e}")
-            return {'second_count': 0, 'minute_count': 0, 'hourly_count': 0, 'daily_count': 0, 'monthly_count': 0}
+            return {
+                "second_count": 0,
+                "minute_count": 0,
+                "hourly_count": 0,
+                "daily_count": 0,
+                "monthly_count": 0,
+            }
 
     def _generate_time_key(self, timestamp: datetime, period: str) -> str:
         """
@@ -399,17 +436,18 @@ class RateLimitDatabaseService:
         Returns:
             str: A formatted time key.
         """
-        if period == 'hourly':
-            return timestamp.strftime('%Y-%m-%d %H:00:00')
-        elif period == 'daily':
-            return timestamp.strftime('%Y-%m-%d')
-        elif period == 'monthly':
-            return timestamp.strftime('%Y-%m-01')  # Consistent for the whole month
+        if period == "hourly":
+            return timestamp.strftime("%Y-%m-%d %H:00:00")
+        elif period == "daily":
+            return timestamp.strftime("%Y-%m-%d")
+        elif period == "monthly":
+            return timestamp.strftime("%Y-%m-01")  # Consistent for the whole month
         else:
             raise ValueError("Invalid period. Must be 'hourly', 'daily', or 'monthly'.")
 
-    def increment_usage_data(self, entity_type: str, identifier: str, direction: str,
-                           amount: int = 1) -> Dict[str, int]:
+    def increment_usage_data(
+        self, entity_type: str, identifier: str, direction: str, amount: int = 1
+    ) -> Dict[str, int]:
         """
         Increment usage counters in database (fallback when Redis unavailable).
 
@@ -424,9 +462,9 @@ class RateLimitDatabaseService:
         """
         try:
             now = datetime.now()
-            hour_key = now.strftime('%Y-%m-%d-%H')
-            day_key = now.strftime('%Y-%m-%d')
-            month_key = now.strftime('%Y-%m')
+            hour_key = now.strftime("%Y-%m-%d-%H")
+            day_key = now.strftime("%Y-%m-%d")
+            month_key = now.strftime("%Y-%m")
 
             # Use INSERT ... ON DUPLICATE KEY UPDATE for atomic increment
             query = """
@@ -443,21 +481,33 @@ class RateLimitDatabaseService:
             """
 
             params = (
-                entity_type, identifier, direction, hour_key, day_key, month_key,
-                amount, amount, amount, now, now
+                entity_type,
+                identifier,
+                direction,
+                hour_key,
+                day_key,
+                month_key,
+                amount,
+                amount,
+                amount,
+                now,
+                now,
             )
 
             self._execute_query(query, params)
 
             # Get updated counts
-            return self.get_usage_data(entity_type, identifier, direction, 'hourly', now - timedelta(hours=1), now)
+            return self.get_usage_data(
+                entity_type, identifier, direction, "hourly", now - timedelta(hours=1), now
+            )
 
         except Exception as e:
             logger.error(f"Error incrementing usage data: {e}")
-            return {'hourly_count': 0, 'daily_count': 0, 'monthly_count': 0}
+            return {"hourly_count": 0, "daily_count": 0, "monthly_count": 0}
 
-    def get_usage_history(self, entity_type: str, identifier: str, direction: str,
-                         days: int = 7) -> List[Dict[str, Any]]:
+    def get_usage_history(
+        self, entity_type: str, identifier: str, direction: str, days: int = 7
+    ) -> List[Dict[str, Any]]:
         """
         Get historical usage data for an entity.
 
@@ -485,8 +535,8 @@ class RateLimitDatabaseService:
 
             results = self._execute_query(
                 query,
-                (entity_type, identifier, direction, cutoff_date.strftime('%Y-%m-%d')),
-                fetch_all=True
+                (entity_type, identifier, direction, cutoff_date.strftime("%Y-%m-%d")),
+                fetch_all=True,
             )
 
             if results:
@@ -511,7 +561,7 @@ class RateLimitDatabaseService:
         """
         try:
             cutoff_date = datetime.now() - timedelta(days=retention_days)
-            cutoff_str = cutoff_date.strftime('%Y-%m-%d')
+            cutoff_str = cutoff_date.strftime("%Y-%m-%d")
 
             # Delete old usage records
             query = """
@@ -522,7 +572,9 @@ class RateLimitDatabaseService:
             deleted_count = self._execute_query(query, (cutoff_str,))
 
             if deleted_count and deleted_count > 0:
-                logger.info(f"Cleaned up {deleted_count} old usage records (older than {retention_days} days)")
+                logger.info(
+                    f"Cleaned up {deleted_count} old usage records (older than {retention_days} days)"
+                )
                 return deleted_count
             else:
                 logger.debug("No old usage records to clean up")
@@ -532,8 +584,9 @@ class RateLimitDatabaseService:
             logger.error(f"Error cleaning up old usage data: {e}")
             return 0
 
-    def get_top_usage_entities(self, entity_type: str, direction: str, 
-                              window: str = 'daily', limit: int = 100) -> List[Dict[str, Any]]:
+    def get_top_usage_entities(
+        self, entity_type: str, direction: str, window: str = "daily", limit: int = 100
+    ) -> List[Dict[str, Any]]:
         """
         Get top entities by usage for monitoring and alerting.
 
@@ -549,9 +602,9 @@ class RateLimitDatabaseService:
         try:
             # Map window to column and time filter
             column_map = {
-                'hourly': 'hourly_count',
-                'daily': 'daily_count', 
-                'monthly': 'monthly_count'
+                "hourly": "hourly_count",
+                "daily": "daily_count",
+                "monthly": "monthly_count",
             }
 
             if window not in column_map:
@@ -571,11 +624,7 @@ class RateLimitDatabaseService:
                 LIMIT %s
             """
 
-            results = self._execute_query(
-                query,
-                (entity_type, direction, limit),
-                fetch_all=True
-            )
+            results = self._execute_query(query, (entity_type, direction, limit), fetch_all=True)
 
             if results:
                 logger.debug(f"Retrieved top {len(results)} entities by {window} usage")
@@ -587,9 +636,16 @@ class RateLimitDatabaseService:
             logger.error(f"Error getting top usage entities: {e}")
             return []
 
-    def create_alert_record(self, entity_type: str, identifier: str, direction: str,
-                           alert_level: str, current_usage: int, limit_value: int,
-                           window_type: str) -> bool:
+    def create_alert_record(
+        self,
+        entity_type: str,
+        identifier: str,
+        direction: str,
+        alert_level: str,
+        current_usage: int,
+        limit_value: int,
+        window_type: str,
+    ) -> bool:
         """
         Create an alert record for rate limit threshold breach.
 
@@ -616,15 +672,24 @@ class RateLimitDatabaseService:
             """
 
             params = (
-                entity_type, identifier, direction, alert_level, current_usage,
-                limit_value, usage_percentage, window_type, False
+                entity_type,
+                identifier,
+                direction,
+                alert_level,
+                current_usage,
+                limit_value,
+                usage_percentage,
+                window_type,
+                False,
             )
 
             result = self._execute_query(query, params)
 
             if result is not None:
-                logger.info(f"Created {alert_level} alert for {entity_type}:{identifier} "
-                           f"({current_usage}/{limit_value} = {usage_percentage:.1f}%)")
+                logger.info(
+                    f"Created {alert_level} alert for {entity_type}:{identifier} "
+                    f"({current_usage}/{limit_value} = {usage_percentage:.1f}%)"
+                )
                 return True
             else:
                 return False
@@ -668,8 +733,9 @@ class RateLimitDatabaseService:
             logger.error(f"Error getting pending webhook alerts: {e}")
             return []
 
-    def update_webhook_alert_status(self, alert_id: int, success: bool, 
-                                  error_message: str = None) -> bool:
+    def update_webhook_alert_status(
+        self, alert_id: int, success: bool, error_message: str = None
+    ) -> bool:
         """
         Update webhook delivery status for an alert.
 
@@ -720,14 +786,16 @@ class RateLimitDatabaseService:
             Dict containing database statistics
         """
         stats = {
-            'service': 'rate_limit_database',
-            'pool_available': self.db_pool is not None,
-            'query_count': self.query_count,
-            'error_count': self.error_count,
-            'average_query_time': (self.total_query_time / self.query_count) 
-                                 if self.query_count > 0 else 0,
-            'error_rate': (self.error_count / self.query_count * 100) 
-                         if self.query_count > 0 else 0
+            "service": "rate_limit_database",
+            "pool_available": self.db_pool is not None,
+            "query_count": self.query_count,
+            "error_count": self.error_count,
+            "average_query_time": (self.total_query_time / self.query_count)
+            if self.query_count > 0
+            else 0,
+            "error_rate": (self.error_count / self.query_count * 100)
+            if self.query_count > 0
+            else 0,
         }
 
         # Get database size information
@@ -742,19 +810,17 @@ class RateLimitDatabaseService:
                 """
 
                 table_stats = self._execute_query(
-                    tables_query, 
-                    (self.config.database.database,), 
-                    fetch_all=True
+                    tables_query, (self.config.database.database,), fetch_all=True
                 )
 
                 if table_stats:
-                    stats['table_stats'] = {
-                        row['table_name']: row['table_rows'] for row in table_stats
+                    stats["table_stats"] = {
+                        row["table_name"]: row["table_rows"] for row in table_stats
                     }
 
             except Exception as e:
                 logger.warning(f"Could not get database stats: {e}")
-                stats['table_stats'] = {'error': str(e)}
+                stats["table_stats"] = {"error": str(e)}
 
         return stats
 
@@ -765,11 +831,7 @@ class RateLimitDatabaseService:
         Returns:
             Dict containing health check results
         """
-        health = {
-            'service': 'rate_limit_database',
-            'status': 'healthy',
-            'checks': {}
-        }
+        health = {"service": "rate_limit_database", "status": "healthy", "checks": {}}
 
         # Check database connectivity
         if self.db_pool:
@@ -779,29 +841,26 @@ class RateLimitDatabaseService:
                 result = self._execute_query(test_query, fetch_one=True)
                 response_time = (time.time() - start_time) * 1000
 
-                if result and result.get('test') == 1:
-                    health['checks']['database'] = {
-                        'status': 'healthy',
-                        'response_time_ms': round(response_time, 2)
+                if result and result.get("test") == 1:
+                    health["checks"]["database"] = {
+                        "status": "healthy",
+                        "response_time_ms": round(response_time, 2),
                     }
                 else:
-                    health['status'] = 'unhealthy'
-                    health['checks']['database'] = {
-                        'status': 'unhealthy',
-                        'error': 'Query test failed'
+                    health["status"] = "unhealthy"
+                    health["checks"]["database"] = {
+                        "status": "unhealthy",
+                        "error": "Query test failed",
                     }
 
             except Exception as e:
-                health['status'] = 'unhealthy'
-                health['checks']['database'] = {
-                    'status': 'unhealthy',
-                    'error': str(e)
-                }
+                health["status"] = "unhealthy"
+                health["checks"]["database"] = {"status": "unhealthy", "error": str(e)}
         else:
-            health['status'] = 'unhealthy'
-            health['checks']['database'] = {
-                'status': 'unavailable',
-                'error': 'Database pool not initialized'
+            health["status"] = "unhealthy"
+            health["checks"]["database"] = {
+                "status": "unavailable",
+                "error": "Database pool not initialized",
             }
 
         return health
