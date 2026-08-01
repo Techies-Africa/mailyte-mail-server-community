@@ -281,10 +281,22 @@ services:
   webhooks:
      build: ./worker/webhooks
      container_name: webhooks
+     # Task 7.0: host.docker.internal needs an explicit mapping on this
+     # custom bridge network -- verified live in the sibling EE repo, same
+     # network setup here. host-gateway is Docker's portable special value.
+     extra_hosts:
+       - "host.docker.internal:host-gateway"
      ports:
        - "8081:8081"
      environment:
        - WEBHOOK_URLS=${WEBHOOK_URLS:-http://0.0.0.0:5000/webhook/test}
+       # Task 7.0 (03-mailyte-api/phase-07-tenant-surface.md, applied to CE
+       # too): shared/webhook_dispatcher.py (imported here for dispatch_event())
+       # reads WEBHOOK_URL, singular -- WEBHOOK_URLS above is a separate var
+       # read directly by this service's own notification_sender.py. Without
+       # this line dispatch_event() silently no-ops regardless of what a
+       # self-hoster sets WEBHOOK_URLS to.
+       - WEBHOOK_URL=${WEBHOOK_URLS:-}
        - WEBHOOK_SECRET=${WEBHOOK_SECRET:-webhooksecret}
        - DB_HOST=mysql
        - DB_PORT=3306
@@ -323,6 +335,9 @@ services:
        context: .
        dockerfile: ./worker/tracking/Dockerfile
      container_name: tracking
+     # Task 7.0: see the identical extra_hosts note on the `webhooks` service.
+     extra_hosts:
+       - "host.docker.internal:host-gateway"
      ports:
        - "8086:8086"
      environment:
@@ -336,6 +351,8 @@ services:
        - TRACKING_DOMAIN=${HOSTNAME:-mail.example.com}
        - WEBHOOK_SECRET=${WEBHOOK_SECRET:-webhooksecret}
        - WEBHOOK_URLS=${WEBHOOK_URLS:-http://0.0.0.0:5000/webhook/test}
+       # Task 7.0: see the identical comment on the `webhooks` service above.
+       - WEBHOOK_URL=${WEBHOOK_URLS:-}
        - FLASK_ENV=${FLASK_ENV:-development}
        - FLASK_DEBUG=${FLASK_DEBUG:-1}
      volumes:
