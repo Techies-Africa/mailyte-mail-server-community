@@ -342,3 +342,35 @@ class Alias(Base):
     active = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime, nullable=False, default=func.now())
     updated_at = Column(DateTime, nullable=False, default=func.now(), onupdate=func.now())
+
+
+class SmtpCredential(Base):
+    """Domain-scoped SMTP credentials table -- distinct from a mailbox
+    password. Checked by a protocol-scoped Dovecot passdb that falls
+    through to email_accounts when a username isn't found here, so
+    mailbox-based SMTP auth is unaffected. See
+    02-mailyte-community/phase-05-smtp-credential-auth-parity.md."""
+
+    __tablename__ = "smtp_credentials"
+
+    id = Column(String(26), primary_key=True, default=generate_ulid)
+    organization_id = Column(String(26), ForeignKey("organizations.id"), nullable=False, index=True)
+    domain_id = Column(String(26), ForeignKey("domains.id"), nullable=False, index=True)
+    username = Column(String(255), nullable=False, unique=True, index=True)
+    password = Column(String(255), nullable=False)  # bcrypt-hashed, same as EmailAccount.password
+    allowed_ips = Column(JSON, nullable=True)
+    active = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, nullable=False, default=func.now())
+    updated_at = Column(DateTime, nullable=False, default=func.now(), onupdate=func.now())
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "organization_id": self.organization_id,
+            "domain_id": self.domain_id,
+            "username": self.username,
+            "allowed_ips": self.allowed_ips,
+            "active": self.active,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }

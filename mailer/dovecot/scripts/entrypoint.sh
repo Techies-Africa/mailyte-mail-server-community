@@ -19,6 +19,20 @@ if [ -f /etc/dovecot/dovecot-sql.conf.ext ]; then
     echo "SQL config: DB_HOST=${DB_HOST:-mysql} DB_PORT=${DB_PORT:-3306} DB_NAME=${DB_NAME:-mailserver}"
 fi
 
+# Same substitution for the SMTP-credential-only passdb (SMTP-credentials
+# workstream) -- a separate file, checked only for SMTP AUTH, never IMAP/POP3.
+if [ -f /etc/dovecot/dovecot-sql-smtp.conf.ext ]; then
+    sed -i \
+        -e "s|\${DB_HOST}|${DB_HOST:-mysql}|g" \
+        -e "s|\${DB_PORT}|${DB_PORT:-3306}|g" \
+        -e "s|\${DB_NAME}|${DB_NAME:-mailserver}|g" \
+        -e "s|\${DB_USER}|${DB_USER:-mailuser}|g" \
+        -e "s|\${DB_PASSWORD}|${DB_PASSWORD:-mailpassword}|g" \
+        /etc/dovecot/dovecot-sql-smtp.conf.ext
+    chmod 640 /etc/dovecot/dovecot-sql-smtp.conf.ext
+    chown root:dovecot /etc/dovecot/dovecot-sql-smtp.conf.ext
+fi
+
 # -------------------------------------------------------
 # 1. SSL Certificate Setup
 # -------------------------------------------------------

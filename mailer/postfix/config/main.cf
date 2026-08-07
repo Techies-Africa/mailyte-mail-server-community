@@ -165,9 +165,32 @@ smtpd_recipient_restrictions =
     check_policy_service unix:private/policy-rate-limit,
     permit
 
+# Named restriction class so the submission service's master.cf override
+# (port 587) can reference the same rate-limit policy check by a
+# whitespace-free name -- ported from mailyte-email-server
+# (01-mailyte-email-server/phase-10-smtp-credential-auth.md), same bug
+# confirmed present here: master.cf's own -o argument parser splits an
+# unquoted value on whitespace, so a literal
+# "check_policy_service unix:private/policy-rate-limit" there becomes two
+# broken tokens and crashes smtpd on every startup. This repo had the exact
+# same never-substituted "${whitespace}" placeholder as EE.
+smtpd_restriction_classes = submission_rate_limit_check
+submission_rate_limit_check = check_policy_service unix:private/policy-rate-limit
+
 # SENDER RESTRICTIONS
+# reject_sender_login_mismatch MUST come before permit_sasl_authenticated --
+# ported fix from mailyte-email-server, same pre-existing bug confirmed
+# present here (permit_sasl_authenticated first made the mismatch check
+# dead for every authenticated sender). See
+# 00-foundation memory note postfix_sender_login_mismatch_not_enforced.md --
+# even with this ordering fixed, live testing on the EE sibling showed the
+# mismatch still isn't rejecting; root cause unresolved. Fixed here anyway
+# since leaving the ordering wrong is strictly worse, but don't treat
+# "authenticated senders can only send as their own address" as a working
+# guarantee on this system yet.
 smtpd_sender_restrictions =
     permit_mynetworks,
+    reject_sender_login_mismatch,
     permit_sasl_authenticated,
     reject_non_fqdn_sender,
     reject_unknown_sender_domain,

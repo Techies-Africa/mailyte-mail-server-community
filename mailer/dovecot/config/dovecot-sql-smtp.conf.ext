@@ -1,0 +1,9 @@
+driver = mysql
+connect = host=${DB_HOST} port=${DB_PORT} dbname=${DB_NAME} user=${DB_USER} password=${DB_PASSWORD}
+
+default_pass_scheme = BLF-CRYPT
+
+# SMTP-only credential, distinct from a mailbox password. This passdb is
+# only reached via the `protocol smtp { passdb { ... } }` block in
+# dovecot.conf -- IMAP/POP3 auth never queries this table.
+password_query = SELECT username as user, password FROM smtp_credentials WHERE username='%u' AND active = 1

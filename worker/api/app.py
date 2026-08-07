@@ -160,6 +160,7 @@ route_modules = [
     ("tracking", "/api/v1/tracking", "Tracking"),
     ("webhooks", "/api/v1/webhooks", "Webhooks"),
     ("ssl", "/api/v1/ssl", "SSL"),
+    ("smtp_credentials", "/api/v1/smtp-credentials", "SMTP Credentials"),
 ]
 
 for module_name, prefix, tag in route_modules:

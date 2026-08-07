@@ -36,11 +36,11 @@ submission inet n       -       y       -       -       smtpd
   -o smtpd_client_connection_count_limit=20
   -o smtpd_client_message_rate_limit=50
   -o smtpd_client_recipient_rate_limit=100
-  -o smtpd_recipient_restrictions=permit_sasl_authenticated,check_policy_service${whitespace}unix:private/policy-rate-limit,reject
+  -o smtpd_recipient_restrictions=permit_sasl_authenticated,submission_rate_limit_check,reject
   -o smtpd_relay_restrictions=permit_sasl_authenticated,reject
   -o smtpd_client_restrictions=permit_sasl_authenticated,reject
   -o smtpd_helo_restrictions=permit_sasl_authenticated,reject_invalid_helo_hostname,reject
-  -o smtpd_sender_restrictions=permit_sasl_authenticated,reject_sender_login_mismatch,reject
+  -o smtpd_sender_restrictions=reject_sender_login_mismatch,permit_sasl_authenticated,reject
   -o milter_macro_daemon_name=ORIGINATING
   -o content_filter=tracking-filter:
 
@@ -186,7 +186,7 @@ smtps     inet  n       -       y       -       -       smtpd
   -o smtpd_relay_restrictions=permit_sasl_authenticated,reject
   -o smtpd_client_restrictions=permit_sasl_authenticated,reject
   -o smtpd_helo_restrictions=permit_sasl_authenticated,reject_invalid_helo_hostname,reject
-  -o smtpd_sender_restrictions=permit_sasl_authenticated,reject_sender_login_mismatch,reject
+  -o smtpd_sender_restrictions=reject_sender_login_mismatch,permit_sasl_authenticated,reject
   -o milter_macro_daemon_name=ORIGINATING
   -o content_filter=tracking-filter:
 
