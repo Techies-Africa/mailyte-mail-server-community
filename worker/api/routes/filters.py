@@ -21,8 +21,9 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
+from utils.auth import require_api_key
 from utils.db import get_db
 
 project_root = Path(__file__).parent.parent.parent.parent
@@ -34,6 +35,32 @@ router = APIRouter()
 
 # Dovecot mail storage base
 VHOSTS_DIR = os.getenv("VHOSTS_DIR", "/var/mail/vhosts")
+
+
+def _email_belongs_to_org(db, ctx, email: str) -> bool:
+    """Check that the mailbox is reachable by the caller.
+
+    Every handler below previously took `email` as a bare query parameter
+    with no authentication and no ownership check at all -- some did not
+    even check the account existed. Sieve scripts decide where mail goes, so
+    an unauthenticated caller could file any mailbox's incoming mail into a
+    forward, or discard it, just by naming the address.
+
+    Organization scope requires the mailbox to be its own. Platform scope
+    reaches every organization (ADR-002 SS8) but the account must still exist
+    and be active, so a bad address is a 404 for operators too. This is the
+    single choke point all six filter handlers share.
+    """
+    cursor = db.cursor(dictionary=True)
+    sql = "SELECT id FROM email_accounts WHERE email = %s AND status = 'active'"
+    params = [email]
+    if ctx["scope"] == "organization":
+        sql += " AND organization_id = %s"
+        params.append(ctx["organization_id"])
+    cursor.execute(sql, tuple(params))
+    result = cursor.fetchone()
+    cursor.close()
+    return result is not None
 
 
 # ---------------------------------------------------------------------------
@@ -149,16 +176,16 @@ def _get_active_link(email: str) -> str:
     summary="List Sieve filter scripts",
     description="List all Sieve scripts for a user, including each script's content, size, creation date, and whether it is the currently active script.",
 )
+@require_api_key("read")
 async def list_filters(
-    email: str = Query(..., description="User email address"), db=Depends(get_db)
+    request: Request,
+    email: str = Query(..., description="User email address"),
+    db=Depends(get_db),
 ):
     """List all Sieve scripts for a user."""
-    # Verify user exists
-    cursor = db.cursor(dictionary=True)
-    cursor.execute("SELECT id FROM email_accounts WHERE email = %s AND status = 'active'", (email,))
-    if not cursor.fetchone():
+    ctx = request.state.auth_context
+    if not _email_belongs_to_org(db, ctx, email):
         raise HTTPException(status_code=404, detail=f"Account {email} not found")
-    cursor.close()
 
     sieve_dir = _get_sieve_dir(email)
     active_link = _get_active_link(email)
@@ -197,6 +224,7 @@ async def list_filters(
     summary="List filter templates",
     description="Return the collection of pre-built Sieve filter templates (forward, auto-reply, move by subject/sender, block sender, attachment filter) that users can customize.",
 )
+@require_api_key("read")
 async def list_templates():
     """List pre-built Sieve filter templates."""
     return FILTER_TEMPLATES
@@ -208,10 +236,18 @@ async def list_templates():
     summary="Get a Sieve script",
     description="Retrieve a specific Sieve script by name, including its content, size, creation date, and active status.",
 )
+@require_api_key("read")
 async def get_filter(
-    name: str, email: str = Query(..., description="User email address"), db=Depends(get_db)
+    name: str,
+    request: Request,
+    email: str = Query(..., description="User email address"),
+    db=Depends(get_db),
 ):
     """Get a specific Sieve script by name."""
+    ctx = request.state.auth_context
+    if not _email_belongs_to_org(db, ctx, email):
+        raise HTTPException(status_code=404, detail=f"Account {email} not found")
+
     sieve_dir = _get_sieve_dir(email)
     filepath = os.path.join(sieve_dir, f"{name}.sieve")
 
@@ -242,18 +278,17 @@ async def get_filter(
     summary="Create or update a Sieve script",
     description="Create or overwrite a Sieve script for the specified user. Script names must be alphanumeric (with hyphens/underscores). If 'active' is true the script is immediately set as the active Dovecot Sieve script.",
 )
+@require_api_key("write")
 async def create_filter(
     script: SieveScript,
+    request: Request,
     email: str = Query(..., description="User email address"),
     db=Depends(get_db),
 ):
     """Create or update a Sieve script for a user."""
-    # Verify user exists
-    cursor = db.cursor(dictionary=True)
-    cursor.execute("SELECT id FROM email_accounts WHERE email = %s AND status = 'active'", (email,))
-    if not cursor.fetchone():
+    ctx = request.state.auth_context
+    if not _email_belongs_to_org(db, ctx, email):
         raise HTTPException(status_code=404, detail=f"Account {email} not found")
-    cursor.close()
 
     # Validate script name (alphanumeric + hyphens + underscores only)
     import re
@@ -295,10 +330,18 @@ async def create_filter(
     summary="Delete a Sieve script",
     description="Delete a Sieve script by name. If the deleted script was the active script, the active symlink is also removed. The compiled .sievec file is cleaned up as well.",
 )
+@require_api_key("write")
 async def delete_filter(
-    name: str, email: str = Query(..., description="User email address"), db=Depends(get_db)
+    name: str,
+    request: Request,
+    email: str = Query(..., description="User email address"),
+    db=Depends(get_db),
 ):
     """Delete a Sieve script."""
+    ctx = request.state.auth_context
+    if not _email_belongs_to_org(db, ctx, email):
+        raise HTTPException(status_code=404, detail=f"Account {email} not found")
+
     sieve_dir = _get_sieve_dir(email)
     filepath = os.path.join(sieve_dir, f"{name}.sieve")
 
@@ -332,10 +375,18 @@ async def delete_filter(
     summary="Activate a Sieve script",
     description="Set the specified Sieve script as the active script for the user by updating the Dovecot .dovecot.sieve symlink.",
 )
+@require_api_key("write")
 async def activate_filter(
-    name: str, email: str = Query(..., description="User email address"), db=Depends(get_db)
+    name: str,
+    request: Request,
+    email: str = Query(..., description="User email address"),
+    db=Depends(get_db),
 ):
     """Set a Sieve script as the active script."""
+    ctx = request.state.auth_context
+    if not _email_belongs_to_org(db, ctx, email):
+        raise HTTPException(status_code=404, detail=f"Account {email} not found")
+
     sieve_dir = _get_sieve_dir(email)
     filepath = os.path.join(sieve_dir, f"{name}.sieve")
 
@@ -362,18 +413,29 @@ async def activate_filter(
     summary="Manage vacation responder",
     description="Enable or disable the vacation auto-reply for a user. When enabled, a Sieve vacation script is generated with optional start/end dates and set as the active script. The database vacation_enabled flag is updated accordingly.",
 )
+@require_api_key("write")
 async def manage_vacation(
     vacation: VacationRequest,
+    request: Request,
     email: str = Query(..., description="User email address"),
     db=Depends(get_db),
 ):
     """Manage vacation responder (auto-reply) via Sieve."""
-    # Verify user exists
+    ctx = request.state.auth_context
+
+    # Verify user exists and belongs to the caller's org. Inline rather than
+    # via _email_belongs_to_org because this one also needs vacation_enabled,
+    # but the scope rule is identical: platform reaches every org (ADR-002
+    # SS8), the account must still exist and be active either way.
     cursor = db.cursor(dictionary=True)
-    cursor.execute(
-        "SELECT id, vacation_enabled FROM email_accounts WHERE email = %s AND status = 'active'",
-        (email,),
+    account_sql = (
+        "SELECT id, vacation_enabled FROM email_accounts WHERE email = %s AND status = 'active'"
     )
+    account_params = [email]
+    if ctx["scope"] == "organization":
+        account_sql += " AND organization_id = %s"
+        account_params.append(ctx["organization_id"])
+    cursor.execute(account_sql, tuple(account_params))
     account = cursor.fetchone()
     if not account:
         raise HTTPException(status_code=404, detail=f"Account {email} not found")

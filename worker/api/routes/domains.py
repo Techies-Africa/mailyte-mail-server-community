@@ -28,7 +28,7 @@ from pydantic import BaseModel, Field
 
 
 def sanitize_text(value):
-    """Sanitize free-text input to prevent stored XSS."""
+    """Sanitize free-text input to prevent stored XSS. Strips all HTML tags."""
     if not value or not isinstance(value, str):
         return value
     import re as _re
@@ -45,16 +45,20 @@ from pathlib import Path
 
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
-from utils.auth import create_api_response, require_api_key
+from utils.auth import create_api_response, org_filter, require_api_key, verify_domain_scope
 from utils.database import get_db_connection
 
 from database.models.certificates import DKIMKey
 from database.models.core import Domain, EmailAccount, Organization
+from shared.envelope_encryption import encrypt_private_key
 
 project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
+
+
 from shared.webhook_dispatcher import Events, dispatch_event
 
 # ---------------------------------------------------------------------------
@@ -290,39 +294,153 @@ def check_dns_record(query_name, record_type):
         return None
 
 
+# Whitelisted ORDER BY targets for GET /domains (console phase-02 SS2.5).
+# Closed mapping for the same reason organizations.py has one: ORDER BY
+# takes no bound parameter, so an un-whitelisted sort key would have to be
+# interpolated into the SQL.
+#
+# There is deliberately no "status" here or in the filters below: `domains`
+# has no status column. Its only state is the `active` boolean (see
+# database/models/core.py and 001_init_schema.sql) -- DNS/DKIM verification
+# state that phase-02 SS2.5 also wants is computed live by
+# POST /{domain_id}/verify-dns, not stored, so it cannot be sorted on.
+_DOMAIN_SORT_KEYS = ("domain", "created_at", "total_storage_used")
+_SORT_DIRECTIONS = ("asc", "desc")
+
+
+def _parse_bool_param(raw: str | None) -> tuple[bool, bool | None]:
+    """"true"/"false" -> (valid, value); unrecognised input is reported
+    invalid rather than coerced, so a typo 422s instead of silently
+    inverting the filter."""
+    if raw is None:
+        return True, None
+    normalised = raw.strip().lower()
+    if normalised in ("true", "1"):
+        return True, True
+    if normalised in ("false", "0"):
+        return True, False
+    return False, None
+
+
 @router.get(
     "/",
     summary="List all domains",
-    description="Retrieve a paginated list of all mail domains. Optionally filter by organization ID to see only domains belonging to a specific organization.",
+    description="Retrieve a paginated list of mail domains, searchable by name and sortable by "
+    "name, creation date or storage used. Platform-scope callers see every organization and may "
+    "narrow to one with `organization_id`; tenant credentials always see only their own.",
 )
 @require_api_key("read")
 async def list_domains(
-    organization_id: str = Query(None), page: int = Query(1), per_page: int = Query(50)
+    request: Request,
+    q: str | None = Query(None, description="Search domain name (LIKE)"),
+    organization_id: str | None = Query(
+        None,
+        description="Platform scope only -- narrow to a single organization. Ignored for tenant "
+        "credentials, which always see only their own org.",
+    ),
+    active: str | None = Query(
+        None, description="true|false -- filter on domains.active (there is no status column)"
+    ),
+    sort_by: str = Query("domain", description="domain | created_at | total_storage_used"),
+    sort_dir: str = Query("asc", description="asc | desc"),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(50, ge=1),
 ):
-    """List all domains with organization context"""
+    """List all domains for the caller's org (or, for a platform-scope
+    credential, every org -- mirrors mailboxes.py's list_email_accounts;
+    domains.py previously hard-scoped every route to get_org_context()'s
+    single organization_id with no platform-scope bypass, so a
+    platform-scope key -- e.g. mailyte-api's single global
+    MAIL_SERVER_API_KEY, which every tenant's domain operations proxy
+    through -- could only ever see the org it happened to be bound to).
+
+    organization_id follows org_filter()'s principle rather than being
+    validated-then-rejected: for tenant scope the caller-supplied value is
+    silently dropped, never honoured, so the most likely escalation attempt
+    (passing someone else's org id and hoping the server trusts it) cannot
+    work regardless of what the client sends.
+    """
     per_page = min(per_page, 200)
+    ctx = request.state.auth_context
+
+    if sort_by not in _DOMAIN_SORT_KEYS:
+        return JSONResponse(
+            content=create_api_response(
+                "error", f"sort_by must be one of {', '.join(_DOMAIN_SORT_KEYS)}"
+            ),
+            status_code=422,
+        )
+    if sort_dir not in _SORT_DIRECTIONS:
+        return JSONResponse(
+            content=create_api_response("error", "sort_dir must be 'asc' or 'desc'"),
+            status_code=422,
+        )
+    active_valid, active_flag = _parse_bool_param(active)
+    if not active_valid:
+        return JSONResponse(
+            content=create_api_response("error", "active must be 'true' or 'false'"),
+            status_code=422,
+        )
 
     session = get_db_session()
     try:
         query = session.query(Domain)
-        if organization_id:
+        if ctx["scope"] == "organization":
+            query = query.filter_by(organization_id=ctx["organization_id"])
+        elif organization_id:
             query = query.filter_by(organization_id=organization_id)
+
+        if q:
+            query = query.filter(Domain.domain.like(f"%{q}%"))
+        if active_flag is not None:
+            query = query.filter(Domain.active.is_(active_flag))
+
+        sort_columns = {
+            "domain": Domain.domain,
+            "created_at": Domain.created_at,
+            "total_storage_used": Domain.total_storage_used,
+        }
+        sort_column = sort_columns[sort_by]
+        ordering = sort_column.asc() if sort_dir == "asc" else sort_column.desc()
+        # id tiebreaker keeps paging stable across non-unique sort columns.
+        query = query.order_by(ordering, Domain.id.asc())
 
         total = query.count()
         domains = query.offset((page - 1) * per_page).limit(per_page).all()
-        result = []
 
+        # Two grouped lookups for the whole page instead of two queries per
+        # row. This loop previously ran a COUNT and an Organization fetch
+        # per domain -- 2 + 2N queries, 402 for a full 200-row page, and
+        # cross-tenant pages made the org fetch a near-guaranteed miss on
+        # any per-session identity map.
+        domain_ids = [domain.id for domain in domains]
+        org_ids = {domain.organization_id for domain in domains}
+
+        account_counts: dict = {}
+        org_names: dict = {}
+        if domain_ids:
+            account_counts = {
+                row.domain_id: int(row.account_count or 0)
+                for row in session.query(
+                    EmailAccount.domain_id.label("domain_id"),
+                    func.count(EmailAccount.id).label("account_count"),
+                )
+                .filter(EmailAccount.domain_id.in_(domain_ids))
+                .group_by(EmailAccount.domain_id)
+                .all()
+            }
+            org_names = {
+                org_id: name
+                for org_id, name in session.query(Organization.id, Organization.name)
+                .filter(Organization.id.in_(org_ids))
+                .all()
+            }
+
+        result = []
         for domain in domains:
             domain_data = domain.to_dict()
-
-            # Add email account count
-            account_count = session.query(EmailAccount).filter_by(domain_id=domain.id).count()
-            domain_data["email_account_count"] = account_count
-
-            # Add organization name
-            org = session.query(Organization).filter_by(id=domain.organization_id).first()
-            domain_data["organization_name"] = org.name if org else "Unknown"
-
+            domain_data["email_account_count"] = account_counts.get(domain.id, 0)
+            domain_data["organization_name"] = org_names.get(domain.organization_id, "Unknown")
             result.append(domain_data)
 
         return create_api_response(
@@ -354,12 +472,16 @@ async def list_domains(
     description="Retrieve detailed information about a specific domain, including its organization, email accounts, and usage statistics.",
 )
 @require_api_key("read")
-async def get_domain(domain_id: str):
+async def get_domain(domain_id: str, request: Request):
     """Get specific domain with detailed information"""
+    ctx = request.state.auth_context
     session = get_db_session()
     try:
         domain = session.query(Domain).filter_by(id=domain_id).first()
-        if not domain:
+        if not domain or (
+            ctx["scope"] == "organization"
+            and domain.organization_id != ctx["organization_id"]
+        ):
             return JSONResponse(
                 content=create_api_response("error", "Domain not found"), status_code=404
             )
@@ -417,6 +539,28 @@ async def create_domain(request: Request):
             status_code=400,
         )
 
+    # A caller-supplied organization_id was previously honoured VERBATIM, with
+    # no check against the caller's own org -- so any tenant credential could
+    # create a domain inside any other organization. utils/auth.py's
+    # org_filter docstring names exactly this shape as "the most likely
+    # escalation vector in the system"; this route was it.
+    #
+    # Organization scope is now forced to the caller's own org and a supplied
+    # value is ignored rather than rejected, matching org_filter's principle
+    # that silently dropping it protects every call site automatically.
+    # Platform scope still chooses freely -- creating a domain for any tenant
+    # is precisely what an operator (and Laravel's provisioning path) does.
+    ctx = request.state.auth_context
+    if ctx["scope"] == "organization":
+        data["organization_id"] = ctx["organization_id"]
+    elif not data.get("organization_id"):
+        return JSONResponse(
+            content=create_api_response(
+                "error", "organization_id is required for a platform-scope caller"
+            ),
+            status_code=400,
+        )
+
     session = get_db_session()
     try:
         # Check if organization exists
@@ -426,11 +570,32 @@ async def create_domain(request: Request):
                 content=create_api_response("error", "Organization not found"), status_code=404
             )
 
-        # Check if domain already exists (case-insensitive)
+        # Check if domain already exists (case-insensitive). Domain names are
+        # globally unique, not per-org (domains.domain has a UNIQUE index --
+        # confirmed live, phase-04 task 4.4), so this can be a collision with
+        # either the caller's own org or a different tenant entirely.
         existing = session.query(Domain).filter(Domain.domain.ilike(data["domain"])).first()
         if existing:
+            if existing.organization_id == data["organization_id"]:
+                # Same org re-claiming its own domain -- safe to hand back
+                # the existing resource (phase-04 task 4.3).
+                return JSONResponse(
+                    content=create_api_response(
+                        "error",
+                        f"Domain {data['domain']} already exists",
+                        {"existing_id": existing.id},
+                        error_code="DOMAIN_ALREADY_CLAIMED",
+                    ),
+                    status_code=409,
+                )
+            # Claimed by another org -- generic message only, no detail that
+            # would confirm which tenant owns it (conventions §8).
             return JSONResponse(
-                content=create_api_response("error", f"Domain {data['domain']} already exists"),
+                content=create_api_response(
+                    "error",
+                    f"Domain {data['domain']} already exists",
+                    error_code="DOMAIN_ALREADY_CLAIMED",
+                ),
                 status_code=409,
             )
 
@@ -463,7 +628,35 @@ async def create_domain(request: Request):
         )
 
         session.add(domain)
-        session.commit()
+        try:
+            session.commit()
+        except IntegrityError:
+            # Race: another request claimed this domain (or external_id)
+            # between our checks above and this commit. The UNIQUE
+            # constraint is the real guard; translate its violation to 409
+            # instead of a raw DB error reaching the client (task 4.4).
+            session.rollback()
+            race_existing = (
+                session.query(Domain).filter(Domain.domain.ilike(data["domain"])).first()
+            )
+            if race_existing and race_existing.organization_id == data["organization_id"]:
+                return JSONResponse(
+                    content=create_api_response(
+                        "error",
+                        f"Domain {data['domain']} already exists",
+                        {"existing_id": race_existing.id},
+                        error_code="DOMAIN_ALREADY_CLAIMED",
+                    ),
+                    status_code=409,
+                )
+            return JSONResponse(
+                content=create_api_response(
+                    "error",
+                    f"Domain {data['domain']} already exists",
+                    error_code="DOMAIN_ALREADY_CLAIMED",
+                ),
+                status_code=409,
+            )
 
         # Generate DKIM keys if DKIM is enabled
         dkim_record = None
@@ -472,10 +665,17 @@ async def create_domain(request: Request):
                 private_pem, public_b64 = generate_dkim_keypair()
                 selector = domain.dkim_selector or "default"
 
+                # private_key stays NULL -- only the encrypted columns are
+                # written (phase-07 C2). private_pem lives in memory only
+                # long enough to encrypt it here.
+                encrypted = encrypt_private_key(private_pem)
                 dkim_key = DKIMKey(
                     domain_id=domain.id,
                     selector=selector,
-                    private_key=private_pem,
+                    private_key=None,
+                    private_key_ciphertext=encrypted.ciphertext,
+                    private_key_nonce=encrypted.nonce,
+                    key_version=encrypted.key_version,
                     public_key=public_b64,
                     active=True,
                 )
@@ -539,6 +739,7 @@ async def create_domain(request: Request):
 @require_api_key("write")
 async def update_domain(domain_id: str, request: Request):
     """Update domain"""
+    ctx = request.state.auth_context
     data = await request.json()
 
     if not data:
@@ -557,7 +758,14 @@ async def update_domain(domain_id: str, request: Request):
     session = get_db_session()
     try:
         domain = session.query(Domain).filter_by(id=domain_id).first()
-        if not domain:
+        # Previously checked only `if not domain` -- any org-scoped write key
+        # could update any other org's domain outright, with no isolation at
+        # all (distinct from, and worse than, the platform-scope bug this
+        # pass otherwise fixes). Closing that gap here too.
+        if not domain or (
+            ctx["scope"] == "organization"
+            and domain.organization_id != ctx["organization_id"]
+        ):
             return JSONResponse(
                 content=create_api_response("error", "Domain not found"), status_code=404
             )
@@ -633,12 +841,16 @@ async def update_domain(domain_id: str, request: Request):
     description="Permanently remove a domain. The domain must have no remaining email accounts; delete those first.",
 )
 @require_api_key("write")
-async def delete_domain_by_id(domain_id: str):
+async def delete_domain_by_id(domain_id: str, request: Request):
     """Delete domain and all related email accounts"""
+    ctx = request.state.auth_context
     session = get_db_session()
     try:
         domain = session.query(Domain).filter_by(id=domain_id).first()
-        if not domain:
+        if not domain or (
+            ctx["scope"] == "organization"
+            and domain.organization_id != ctx["organization_id"]
+        ):
             return JSONResponse(
                 content=create_api_response("error", "Domain not found"), status_code=404
             )
@@ -691,12 +903,16 @@ async def delete_domain_by_id(domain_id: str):
     description="Perform live DNS lookups to check whether MX, SPF, DKIM, and DMARC records are correctly configured for the domain.",
 )
 @require_api_key("read")
-async def verify_domain_dns(domain_id: str):
+async def verify_domain_dns(domain_id: str, request: Request):
     """Verify DNS records for a domain"""
+    ctx = request.state.auth_context
     session = get_db_session()
     try:
         domain = session.query(Domain).filter_by(id=domain_id).first()
-        if not domain:
+        if not domain or (
+            ctx["scope"] == "organization"
+            and domain.organization_id != ctx["organization_id"]
+        ):
             return JSONResponse(
                 content=create_api_response("error", "Domain not found"), status_code=404
             )
@@ -789,12 +1005,16 @@ async def verify_domain_dns(domain_id: str):
     description="Retrieve quota limits and current usage for a domain, including per-account storage breakdowns.",
 )
 @require_api_key("read")
-async def get_domain_quotas(domain_id: str):
+async def get_domain_quotas(domain_id: str, request: Request):
     """Get domain quota and usage information"""
+    ctx = request.state.auth_context
     session = get_db_session()
     try:
         domain = session.query(Domain).filter_by(id=domain_id).first()
-        if not domain:
+        if not domain or (
+            ctx["scope"] == "organization"
+            and domain.organization_id != ctx["organization_id"]
+        ):
             return JSONResponse(
                 content=create_api_response("error", "Domain not found"), status_code=404
             )
@@ -845,6 +1065,7 @@ async def get_domain_quotas(domain_id: str):
 @require_api_key("write")
 async def update_domain_quotas(domain_id: str, request: Request):
     """Update domain quota settings"""
+    ctx = request.state.auth_context
     data = await request.json()
 
     if not data:
@@ -855,7 +1076,10 @@ async def update_domain_quotas(domain_id: str, request: Request):
     session = get_db_session()
     try:
         domain = session.query(Domain).filter_by(id=domain_id).first()
-        if not domain:
+        if not domain or (
+            ctx["scope"] == "organization"
+            and domain.organization_id != ctx["organization_id"]
+        ):
             return JSONResponse(
                 content=create_api_response("error", "Domain not found"), status_code=404
             )
@@ -917,6 +1141,7 @@ async def update_domain_quotas(domain_id: str, request: Request):
 @require_api_key("write")
 async def edit_domain(request: Request):
     """Edit domain settings"""
+    ctx = request.state.auth_context
     data = await request.json()
 
     if not data or "items" not in data or "attr" not in data:
@@ -931,10 +1156,32 @@ async def edit_domain(request: Request):
         )
 
     try:
-        cursor = conn.cursor()
+        cursor = conn.cursor(dictionary=True)
         results = []
 
         for domain in data["items"]:
+            # Previously updated by domain/id alone -- any tenant could
+            # edit another org's domain. Verify ownership before touching it.
+            cursor.execute(
+                "SELECT organization_id FROM domains WHERE domain = %s OR id = %s",
+                (domain, domain),
+            )
+            owner = cursor.fetchone()
+            # Platform scope may edit any org's domain (ADR-002 SS8);
+            # organization scope only its own.
+            if not owner or (
+                ctx["scope"] == "organization"
+                and owner["organization_id"] != ctx["organization_id"]
+            ):
+                results.append(
+                    {"domain": domain, "status": "error", "msg": f"Domain {domain} not found"}
+                )
+                continue
+            # Re-pin the UPDATE to the row's own org rather than the caller's:
+            # a platform caller has none, and this keeps the write narrowed to
+            # exactly the domain whose ownership was just verified.
+            domain_org_id = owner["organization_id"]
+
             update_fields = []
             update_values = []
 
@@ -952,9 +1199,9 @@ async def edit_domain(request: Request):
                     f"""
                     UPDATE domains
                     SET {", ".join(update_fields)}
-                    WHERE domain = %s OR id = %s
+                    WHERE (domain = %s OR id = %s) AND organization_id = %s
                 """,
-                    update_values + [domain],
+                    update_values + [domain, domain_org_id],
                 )
 
                 if cursor.rowcount > 0:
@@ -995,6 +1242,7 @@ async def edit_domain(request: Request):
 @require_api_key("write")
 async def delete_domain(request: Request):
     """Delete domain(s) and associated data"""
+    ctx = request.state.auth_context
     data = await request.json()
 
     if not data or not isinstance(data, list):
@@ -1012,10 +1260,30 @@ async def delete_domain(request: Request):
         )
 
     try:
-        cursor = conn.cursor()
+        cursor = conn.cursor(dictionary=True)
         results = []
 
         for domain in data:
+            # Previously deleted by domain name alone -- any tenant could
+            # delete another org's domain. Verify ownership first.
+            cursor.execute(
+                "SELECT organization_id FROM domains WHERE domain = %s",
+                (domain,),
+            )
+            owner = cursor.fetchone()
+            # Platform scope may delete any org's domain (ADR-002 SS8);
+            # organization scope only its own.
+            if not owner or (
+                ctx["scope"] == "organization"
+                and owner["organization_id"] != ctx["organization_id"]
+            ):
+                results.append(
+                    {"domain": domain, "status": "error", "msg": f"Domain {domain} not found"}
+                )
+                continue
+            # Re-pin the DELETE to the row's own org (see edit_domain).
+            domain_org_id = owner["organization_id"]
+
             try:
                 # Start transaction for each domain
                 cursor.execute("START TRANSACTION")
@@ -1031,7 +1299,10 @@ async def delete_domain(request: Request):
 
                 cursor.execute("DELETE FROM domain_admins WHERE domain = %s", (domain,))
 
-                cursor.execute("DELETE FROM domains WHERE domain = %s", (domain,))
+                cursor.execute(
+                    "DELETE FROM domains WHERE domain = %s AND organization_id = %s",
+                    (domain, domain_org_id),
+                )
                 domain_deleted = cursor.rowcount
 
                 if domain_deleted > 0:
@@ -1090,8 +1361,15 @@ async def delete_domain(request: Request):
     description="Retrieve the spam and security policy settings for a domain, including greylisting, RBL, and blacklist-only flags.",
 )
 @require_api_key("read")
-async def get_domain_policy(domain: str):
-    """Get domain policies and restrictions"""
+async def get_domain_policy(domain: str, request: Request):
+    """Get domain policies and restrictions.
+
+    This route had NO org scoping of any kind: it keyed straight off the
+    `domain` path segment, so any authenticated tenant could read any other
+    domain's spam and security policy by name. verify_domain_scope is the
+    existing helper for exactly this shape -- a route keyed by a raw domain
+    value -- and it passes platform scope through unchanged.
+    """
     conn = get_db_connection()
     if not conn:
         return JSONResponse(
@@ -1100,6 +1378,7 @@ async def get_domain_policy(domain: str):
 
     try:
         cursor = conn.cursor(dictionary=True)
+        verify_domain_scope(cursor, domain, request.state.auth_context)
 
         # Get domain policy information
         cursor.execute(
@@ -1139,7 +1418,13 @@ async def get_domain_policy(domain: str):
 )
 @require_api_key("write")
 async def edit_domain_policy(request: Request):
-    """Edit domain policies and restrictions"""
+    """Edit domain policies and restrictions.
+
+    Same unscoped-by-domain-name bug as get_domain_policy, in the writing
+    direction: any tenant could rewrite any other domain's greylisting, RBL
+    and spam-rejection settings. That is a denial-of-service against another
+    tenant's mail at best, and a way to disable their spam filtering at worst.
+    """
     data = await request.json()
 
     if not data or "domain" not in data:
@@ -1154,6 +1439,9 @@ async def edit_domain_policy(request: Request):
         )
 
     try:
+        cursor = conn.cursor(dictionary=True)
+        verify_domain_scope(cursor, data["domain"], request.state.auth_context)
+        cursor.close()
         cursor = conn.cursor()
 
         # Update or insert domain policy
@@ -1205,8 +1493,9 @@ async def edit_domain_policy(request: Request):
     description="Retrieve aggregate statistics for a domain including mailbox count, alias count, and total quota usage.",
 )
 @require_api_key("read")
-async def get_domain_stats(domain: str):
+async def get_domain_stats(domain: str, request: Request):
     """Get domain statistics"""
+    ctx = request.state.auth_context
     conn = get_db_connection()
     if not conn:
         return JSONResponse(
@@ -1216,8 +1505,16 @@ async def get_domain_stats(domain: str):
     try:
         cursor = conn.cursor(dictionary=True)
 
-        # Get domain details
-        cursor.execute("SELECT * FROM domains WHERE domain = %s", (domain,))
+        # Get domain details, scoped to the caller's org -- previously
+        # matched by domain name alone, so any tenant could pull another
+        # org's domain details, mailbox/alias counts, and storage usage.
+        # org_filter() degrades to "1=1" for platform scope, which reads any
+        # org's stats by design (ADR-002 SS8).
+        org_sql, org_params = org_filter(ctx)
+        cursor.execute(
+            f"SELECT * FROM domains WHERE domain = %s AND {org_sql}",
+            tuple([domain] + org_params),
+        )
         domain_details = cursor.fetchone()
 
         if not domain_details:
@@ -1225,13 +1522,15 @@ async def get_domain_stats(domain: str):
                 content=create_api_response("error", "Domain not found"), status_code=404
             )
 
+        domain_id = domain_details["id"]
+
         # Get mailbox count
         cursor.execute(
             """
             SELECT COUNT(*) AS mailbox_count FROM email_accounts
-            WHERE domain_id = (SELECT id FROM domains WHERE domain = %s LIMIT 1) AND status = 'active'
+            WHERE domain_id = %s AND status = 'active'
         """,
-            (domain,),
+            (domain_id,),
         )
         mailbox_count = cursor.fetchone()["mailbox_count"]
 
@@ -1239,9 +1538,9 @@ async def get_domain_stats(domain: str):
         cursor.execute(
             """
             SELECT COUNT(*) AS alias_count FROM aliases
-            WHERE domain_id = (SELECT id FROM domains WHERE domain = %s LIMIT 1) AND active = 1
+            WHERE domain_id = %s AND active = 1
         """,
-            (domain,),
+            (domain_id,),
         )
         alias_count = cursor.fetchone()["alias_count"]
 
@@ -1249,9 +1548,9 @@ async def get_domain_stats(domain: str):
         cursor.execute(
             """
             SELECT COALESCE(SUM(storage_used), 0) AS total_storage_used FROM email_accounts
-            WHERE domain_id = (SELECT id FROM domains WHERE domain = %s LIMIT 1) AND status = 'active'
+            WHERE domain_id = %s AND status = 'active'
         """,
-            (domain,),
+            (domain_id,),
         )
         total_quota_used = cursor.fetchone()["total_storage_used"]
 
@@ -1274,3 +1573,122 @@ async def get_domain_stats(domain: str):
         )
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# DKIM key read + two-step rotation (Console PRD SS12 gap #8a, SS5.3)
+# ---------------------------------------------------------------------------
+#
+# The console's DKIM manager needs three things this file did not expose:
+# the public key as a copy-pasteable DNS record, a way to mint a new key
+# without breaking the currently-signing one, and a way to cut over once DNS
+# has propagated. Hence generate-then-activate as two separate calls rather
+# than one "rotate" button: a single-step rotation that swaps the signing
+# selector at the same moment it mints the key guarantees a window where
+# outbound mail is signed with a selector whose TXT record does not exist
+# yet -- every message in that window fails DKIM, and therefore DMARC.
+#
+# NONE of these endpoints ever return the private key -- not the plaintext
+# `private_key` column (NULL on every row written since phase-07 C2), not
+# the `private_key_ciphertext`/`private_key_nonce` columns, and not a
+# decrypted copy. There is no operational reason for a private DKIM key to
+# cross the API boundary: possession of it is the entire ability to send
+# DKIM-passing mail as the customer's domain (security-model.md C2), which
+# is precisely the threat envelope encryption was added to contain. The
+# SELECTs below name their columns explicitly so a future `SELECT *` cannot
+# quietly start leaking them.
+
+# `dkim_keys` has no algorithm or key_size column (0001_baseline +
+# 0003_encrypt_private_keys -- verified, not assumed). Both are derived from
+# the stored public key instead of inventing schema for them
+# (conventions.md SS1 rule 5).
+_DKIM_RSPAMD_NOTE = (
+    "This API writes the key to MySQL only. Rspamd signs from "
+    "/var/lib/rspamd/dkim/{domain}.{selector}.key and reads its domain->selector map "
+    "from /etc/rspamd/dkim_selectors.map, and the rspamd container is the only one that "
+    "mounts both (see docker-compose.yml's own comment on the rspamd service) -- the api "
+    "container mounts neither. Signing does not actually move to the new selector until "
+    "`python3 scripts/generate_dkim.py --update-map` has run inside the rspamd container "
+    "and the key file for the new selector exists there."
+)
+
+
+class DKIMRotateRequest(BaseModel):
+    """Request body for DKIM rotate/activate."""
+
+    reason: str = Field(
+        ...,
+        min_length=1,
+        description="Why the key is being rotated or cut over. Recorded by the audit "
+        "middleware (phase-02 cross-cutting: destructive and corrective actions carry a reason).",
+    )
+
+
+def _dkim_public_key_b64(stored: str | None) -> str | None:
+    """Normalise `dkim_keys.public_key` to the bare base64 a DKIM TXT record
+    carries in its p= tag.
+
+    Two writers put two different formats in this one column, which is why
+    this cannot just be returned verbatim:
+      - create_domain() above stores base64-encoded DER (no PEM armour),
+      - scripts/generate_dkim.py stores the full PEM including
+        '-----BEGIN PUBLIC KEY-----' lines.
+    A p= tag containing PEM armour and newlines is not a valid DKIM record,
+    so both shapes are collapsed here rather than at the call sites.
+    """
+    if not stored:
+        return None
+    lines = [line.strip() for line in stored.strip().splitlines()]
+    return "".join(line for line in lines if line and not line.startswith("-----")) or None
+
+
+def _dkim_key_details(public_b64: str | None) -> tuple:
+    """Return (algorithm, key_size) read back off the public key itself.
+
+    Best-effort: a key we cannot parse still has to appear in the list --
+    the operator needs to see the selector exists even if this service's
+    cryptography version cannot decode it -- so failures degrade to
+    (None, None) rather than failing the request.
+    """
+    if not public_b64:
+        return None, None
+    try:
+        public_key = serialization.load_der_public_key(base64.b64decode(public_b64))
+    except Exception:
+        return None, None
+    if isinstance(public_key, rsa.RSAPublicKey):
+        return "rsa", public_key.key_size
+    return type(public_key).__name__, getattr(public_key, "key_size", None)
+
+
+def _dkim_record(domain: str, selector: str, public_b64: str | None) -> dict:
+    """The exact DNS TXT record to publish, split into the name and value a
+    registrar's form asks for separately."""
+    return {
+        "type": "TXT",
+        "name": f"{selector}._domainkey.{domain}",
+        # Same format string generate_dns_records() uses above -- one
+        # spelling of the record in this file, not two that can drift.
+        "value": f"v=DKIM1; k=rsa; p={public_b64}" if public_b64 else None,
+    }
+
+
+def _load_domain_scoped(session, domain_id: str, ctx):
+    """get_domain()'s ownership idiom, factored out for the three DKIM
+    routes below. Platform scope sees every organization; an organization
+    credential sees only its own, and a miss is 404 rather than 403 so the
+    existence of another tenant's domain is not leaked (conventions.md SS8).
+
+    Today the role floor on all three routes means only an operator session
+    reaches them, and operator sessions are always platform scope -- the
+    organization branch is defence-in-depth that becomes load-bearing the
+    moment the floor is relaxed for tenant self-service.
+    """
+    domain = session.query(Domain).filter_by(id=domain_id).first()
+    if not domain or (
+        ctx["scope"] == "organization" and domain.organization_id != ctx["organization_id"]
+    ):
+        return None
+    return domain
+
+

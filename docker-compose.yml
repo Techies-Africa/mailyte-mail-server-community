@@ -1,5 +1,35 @@
 
 services:
+  # Fail-closed secrets validation (C3) -- runs to completion before MySQL
+  # initialises its data directory or the API starts.
+  #
+  # Every `${DB_PASSWORD:-mailpassword}`-style default in this file is a
+  # publicly-known value in a public repository. Without this gate a
+  # `docker compose up` on a fresh host produced a fully functional,
+  # internet-facing mail server whose database root password was
+  # `rootpassword` -- and said nothing about it.
+  #
+  # Ordering is the point. MySQL bakes MYSQL_ROOT_PASSWORD into its data
+  # directory on first boot and ignores the variable on every boot after,
+  # so a weak password caught *after* mysql starts is already permanent.
+  # Hence `service_completed_successfully` on mysql below, not just on api.
+  #
+  # No custom image: worker/api/startup_checks.py is deliberately
+  # stdlib-only, so a stock python:3.11-slim runs it bind-mounted.
+  secrets-check:
+    image: python:3.11-slim
+    container_name: secrets-check
+    environment:
+      - DB_ROOT_PASSWORD=${DB_ROOT_PASSWORD:-}
+      - DB_PASSWORD=${DB_PASSWORD:-}
+      - WEBHOOK_SECRET=${WEBHOOK_SECRET:-}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
+      - ADMIN_TOKEN_SECRET=${ADMIN_TOKEN_SECRET:-}
+    volumes:
+      - ./worker/api/startup_checks.py:/check.py:ro
+    command: ["python3", "/check.py"]
+    restart: "no"
+
   # Redis Service - Caching, rate limiting, queues, Rspamd backend
   redis:
     image: redis:7-alpine
@@ -42,6 +72,13 @@ services:
     volumes:
       - mysql_data:/var/lib/mysql
       - ./database/migrations/sql:/docker-entrypoint-initdb.d
+    # MySQL writes MYSQL_ROOT_PASSWORD into its data directory on first boot
+    # and ignores the variable forever after. Validating secrets after this
+    # container starts would therefore be too late to matter, so the gate is
+    # a hard precondition rather than an advisory sibling.
+    depends_on:
+      secrets-check:
+        condition: service_completed_successfully
     networks:
       - mailserver_network
     restart: unless-stopped
@@ -75,6 +112,47 @@ services:
     networks:
       - mailserver_network
     restart: "no"
+
+  # ========================================================================
+  # Docker socket proxy (C1, 00-foundation/07-security-model.md) -- the *only*
+  # thing in this stack that touches /var/run/docker.sock.
+  #
+  # cert_manager needs to SIGHUP postfix and dovecot after a certificate
+  # rotation so they pick up the new TLS material without dropping
+  # connections (see _reload_services() in
+  # mailer/cert_manager/scripts/cert_manager.py). It needs nothing else the
+  # Docker API exposes.
+  #
+  # It previously got that by bind-mounting the socket itself with `:ro`. That
+  # flag only makes the *socket file* read-only; it does nothing to restrict
+  # which Docker API calls a client can make once connected, so it was full
+  # unrestricted API access -- which is equivalent to root on the host -- while
+  # looking safe. This proxy is what actually narrows the surface, to exactly
+  # "list/inspect containers, POST restart/stop/kill": no exec, no image
+  # pulls, no volume or network access, no creating containers.
+  #
+  # On `internal_only`, not `mailserver_network`, so nothing else in the stack
+  # can reach it even if it wanted to. No published port.
+  # ========================================================================
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:latest
+    container_name: docker-proxy
+    # Upstream's own docs say --privileged is only needed under SELinux or
+    # AppArmor enforcement that would otherwise lock a bind-mounted socket. H1
+    # rules out `privileged: true` stack-wide, and the image starts and proxies
+    # correctly without it. Add it back only if a specific host's mandatory
+    # access control policy actually requires it -- not by default.
+    environment:
+      - CONTAINERS=1
+      - POST=1
+      - ALLOW_RESTARTS=1
+      # Everything else defaults to 0: AUTH, SECRETS, EXEC, IMAGES, BUILD,
+      # NETWORKS, VOLUMES, SERVICES, SWARM, NODES, PLUGINS, ...
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - internal_only
+    restart: unless-stopped
 
   # Postfix - SMTP Server
   postfix:
@@ -126,6 +204,24 @@ services:
      networks:
        - mailserver_network
      restart: unless-stopped
+     # H1 (00-foundation/07-security-model.md): postfix's master process
+     # legitimately needs root to bind port 25 (<1024) and to chown/setuid per
+     # recipient during local delivery -- that's Postfix's own internal
+     # privilege-separation model (queue/pickup/local processes drop to the
+     # postfix/postdrop system users the Dockerfile creates at build time), the
+     # documented alternative to a blanket non-root USER for an MTA. So no
+     # `USER` in mailer/postfix/Dockerfile -- capabilities are narrowed to
+     # exactly what that model needs instead, never `privileged: true`.
+     security_opt: ["no-new-privileges:true"]
+     cap_drop: ["ALL"]
+     # SYS_CHROOT is not optional: Postfix's pickup/tlsmgr/postscreen (and
+     # smtpd, on real connections) all chroot() into /var/spool/postfix as part
+     # of the privilege-separation model above. Without it every one of them
+     # fatals on startup ("chroot(/var/spool/postfix): Operation not
+     # permitted") and the service throttles forever -- found live in
+     # mailyte-email-server, which is why it is listed explicitly here rather
+     # than left to a generic hardening template.
+     cap_add: ["NET_BIND_SERVICE", "CHOWN", "FOWNER", "SETUID", "SETGID", "DAC_OVERRIDE", "SYS_CHROOT"]
 
   # Dovecot - IMAP/POP3 Mail Server
   dovecot:
@@ -168,6 +264,21 @@ services:
      networks:
        - mailserver_network
      restart: unless-stopped
+     # H1: same rationale as postfix -- Dovecot's login process needs root to
+     # bind ports <1024 (110, 143) and to setuid/chown per mailbox owner, then
+     # drops to its own unprivileged users for the actual IMAP/POP3 session.
+     # Hence no `USER` in mailer/dovecot/Dockerfile, capabilities instead.
+     security_opt: ["no-new-privileges:true"]
+     cap_drop: ["ALL"]
+     # SYS_CHROOT is load-bearing here too, and for a *different* reason than
+     # postfix's: imap-login/pop3-login/anvil chroot() into
+     # /run/dovecot/{login,empty} on every start, unconditionally -- not only
+     # when a user logs in. Found live in mailyte-email-server: without it
+     # every login/anvil process crash-loops (Errno 1 Operation not permitted)
+     # and no IMAP/POP3/LMTP session can ever be established. A total outage,
+     # and no healthcheck caught it -- which is exactly why this capability
+     # list is copied from what EE actually settled on rather than derived.
+     cap_add: ["NET_BIND_SERVICE", "CHOWN", "FOWNER", "SETUID", "SETGID", "DAC_OVERRIDE", "SYS_CHROOT"]
 
   # Rspamd - Anti-spam and Email Filtering
   rspamd:
@@ -196,6 +307,34 @@ services:
      networks:
        - mailserver_network
      restart: unless-stopped
+     # H1: rspamd binds no port <1024 and doesn't need to change file
+     # ownership by uid the way postfix/dovecot do -- but the three
+     # capabilities below are each required by something that was found live
+     # in mailyte-email-server under `cap_drop: ALL` with no additions:
+     #
+     #   SETUID/SETGID -- rsyslogd (runs alongside rspamd via supervisord,
+     #     mailer/rspamd/supervisord.conf) drops privileges internally the
+     #     same way postfix/dovecot's own processes do. It looped "could not
+     #     remove supplemental group IDs" without these.
+     #   CHOWN -- entrypoint.sh chowns /var/log/rspamd and /var/lib/rspamd to
+     #     _rspamd before dropping privileges, since both are bind-mounted
+     #     from the host and shadow the ownership baked in at build time.
+     #     Under cap_drop: ALL, UID 0 by itself does NOT gate that syscall --
+     #     CAP_CHOWN does. Symptom: "cannot chown desired log file:
+     #     /var/log/rspamd/rspamd.log, Operation not permitted", crash-looping
+     #     to FATAL.
+     #   DAC_OVERRIDE -- rspamd opens its own log file while still briefly
+     #     root. Under cap_drop: ALL, plain UID 0 does not bypass permission
+     #     bits; that bypass is specifically what CAP_DAC_OVERRIDE grants.
+     #     Symptom: "cannot open desired log file ... Permission denied", and
+     #     it persisted even with ownership and mode both already correct.
+     #
+     # The imklog module is disabled in the Dockerfile rather than re-granting
+     # CAP_SYSLOG -- reading the *host* kernel ring buffer is not something
+     # this container should be able to do at all.
+     security_opt: ["no-new-privileges:true"]
+     cap_drop: ["ALL"]
+     cap_add: ["SETUID", "SETGID", "CHOWN", "DAC_OVERRIDE"]
 
   # Certificate Manager - Let's Encrypt SSL
   cert_manager:
@@ -218,7 +357,13 @@ services:
        - CERT_RENEWAL_DAYS=${CERT_RENEWAL_DAYS:-30}
        - CERT_CHECK_INTERVAL=${CERT_CHECK_INTERVAL:-21600}
        - SNI_CONFIG_PATH=/etc/ssl/sni
+       # Live reload — send SIGHUP to Postfix/Dovecot after cert changes, via
+       # the docker-proxy service above (C1) rather than a socket mount. The
+       # `/var/run/docker.sock:...:ro` bind that used to be in the volumes list
+       # below did not actually restrict anything — see the comment on
+       # docker-proxy for why.
        - DOCKER_RELOAD_ENABLED=${DOCKER_RELOAD_ENABLED:-true}
+       - DOCKER_PROXY_URL=http://docker-proxy:2375
        - POSTFIX_CONTAINER=postfix
        - DOVECOT_CONTAINER=dovecot
      volumes:
@@ -226,14 +371,21 @@ services:
        - ./storage/ssl_private:/etc/ssl/private
        - ./storage/sni_config:/etc/ssl/sni
        - letsencrypt_data:/etc/letsencrypt
-       - /var/run/docker.sock:/var/run/docker.sock:ro
      depends_on:
        mysql:
          condition: service_healthy
        migrate:
          condition: service_completed_successfully
+       # Not condition: service_healthy -- docker-proxy is a thin HAProxy
+       # image with no HTTP tooling on board to build a meaningful healthcheck
+       # from, and cert_manager doesn't need it up front anyway:
+       # _reload_services() only calls it on demand when a cert actually
+       # changes, and logs-and-continues on failure rather than crashing.
+       docker-proxy:
+         condition: service_started
      networks:
        - mailserver_network
+       - internal_only
      restart: unless-stopped
 
   # API - Management REST API
@@ -283,10 +435,63 @@ services:
        retries: 3
        start_period: 15s
      volumes:
+       # ── HOST OWNERSHIP REQUIREMENT (H1) ─────────────────────────────────
+       # This mount, and the identical ones on webhooks, tracking and
+       # rate_limiter, MUST be writable by UID 10001 -- the unprivileged user
+       # those four Dockerfiles now run as. They stay host bind mounts rather
+       # than named volumes on purpose: the fail2ban jail in
+       # docs/security/intrusion-detection.md and the logrotate config in
+       # docs/guides/troubleshooting/service-failures.md both read these paths
+       # from the host, so moving them into Docker volumes would break
+       # documented, security-relevant integration.
+       #
+       # shared/logging_config.py's ServiceLogger creates /app/logs/<service>/
+       # at import time. It now degrades to stdout-only logging when that
+       # directory is not writable, instead of raising out of the constructor
+       # and crash-looping the service -- so getting the chown below wrong
+       # costs you the log FILES, not the mail server.
+       #
+       # Still worth doing: without it these logs exist only in
+       # `docker logs`, and the fail2ban jail in
+       # docs/security/intrusion-detection.md reads them from the host.
+       # Run once, before the first `docker compose up` (root, because chown
+       # to another uid always requires it):
+       #
+       #   sudo chown -R 10001:10001 logs/worker/api logs/worker/webhooks \
+       #                             logs/worker/tracking logs/worker/rate_limiter
+       #
+       # mailyte-email-server does the same thing from its deploy.sh; CE has no
+       # equivalent deploy step, and start.sh cannot do it because it does not
+       # run as root.
+       # ────────────────────────────────────────────────────────────────────
        - ./logs/worker/api:/app/logs
+       # H1 follow-through: worker/api/Dockerfile now runs this container as
+       # UID 10001, and /app below is bind-mounted from the host source tree,
+       # owned by whoever checked the repo out. app.py writes the single-use
+       # operator bootstrap token to /app/data/operator-bootstrap-token and
+       # removes it once consumed, and an unprivileged process cannot create
+       # that subdirectory under a host-owned bind mount.
+       #
+       # A Docker-managed named volume, not a host directory: it takes its
+       # ownership from the image's own /app/data (created and chowned to
+       # 10001 in the Dockerfile) on first use, so it needs no host-side
+       # chown. mailyte-email-server binds ./storage/api_data here instead and
+       # has its deploy.sh chown it -- CE has no deploy step to hang that on,
+       # a self-hoster just runs `docker compose up`, so the self-correcting
+       # form is the right one for this edition.
+       - api_data:/app/data
        - ./worker/api:/app
        - ./shared:/app/shared
        - ./database:/app/database
+       # Key Encryption Key for the envelope-encrypted DKIM private keys (C2).
+       # A file, never an env var: env vars leak through `docker inspect`, the
+       # process list, and crash reporters, and this key decrypts every signing
+       # key in the database.
+       #
+       # Created by scripts/generate_dkim_kek.sh, which start.sh runs. Without
+       # it, create_domain() raises KEKNotConfiguredError -- caught, so the
+       # domain is still created, but with NO DKIM key and a logged failure.
+       - ./secrets/encryption_kek:/run/secrets/encryption_kek:ro
      depends_on:
        mysql:
          condition: service_healthy
@@ -335,6 +540,9 @@ services:
        retries: 3
        start_period: 15s
      volumes:
+       # Must be writable by UID 10001 -- see the HOST OWNERSHIP REQUIREMENT
+       # block on the `api` service above. This container is one of the three
+       # that crash-loops rather than degrades if it is not.
        - ./logs/worker/webhooks:/app/logs
        - ./worker/webhooks:/app
        - ./shared:/app/shared
@@ -377,7 +585,17 @@ services:
        - FLASK_ENV=${FLASK_ENV:-development}
        - FLASK_DEBUG=${FLASK_DEBUG:-1}
      volumes:
-       - ./logs/tracking:/app/logs
+       # Must be writable by UID 10001 -- see the HOST OWNERSHIP REQUIREMENT
+       # block on the `api` service above. Note the path: ./logs/tracking, not
+       # ./logs/worker/tracking, which is what start.sh pre-creates -- so this
+       # one is auto-created root-owned by Docker on first `up` unless it is
+       # chowned explicitly.
+       # logs/worker/tracking, not logs/tracking: this mount was the only one
+       # in the repo missing the worker/ segment, so the directory start.sh,
+       # quick-start.sh, mailyte-ctl.sh and docs/reference/log-formats.md all
+       # create and document was never the one actually mounted. Docker then
+       # created an empty root-owned logs/tracking/ instead.
+       - ./logs/worker/tracking:/app/logs
        - ./worker/tracking:/app
        - ./shared:/app/shared
        - ./database:/app/database
@@ -424,6 +642,9 @@ services:
       retries: 3
       start_period: 15s
     volumes:
+      # Must be writable by UID 10001 -- see the HOST OWNERSHIP REQUIREMENT
+      # block on the `api` service above. start.sh does not pre-create this
+      # path at all, so Docker auto-creates it root-owned on first `up`.
       - ./logs/worker/rate_limiter:/app/logs
       - ./shared:/app/shared
       - ./database:/app/database
@@ -609,6 +830,16 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+    # H1: nginx's master process needs root to bind port 80 (<1024), and
+    # certbot needs it for the same reason during renewal. Both drop to their
+    # own unprivileged worker model internally, so no `USER` in docs/Dockerfile
+    # -- capabilities instead. DAC_OVERRIDE and FOWNER were found live in
+    # mailyte-email-server: entrypoint.sh's mkdocs build deletes and recreates
+    # /app/site on every start, and os.unlink() there failed with EPERM under
+    # cap_drop: ALL alone.
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    cap_add: ["NET_BIND_SERVICE", "SETUID", "SETGID", "CHOWN", "FOWNER", "DAC_OVERRIDE"]
 
   # ========================================================================
   # Mailyte Console — the admin panel (ADR-004)
@@ -700,6 +931,11 @@ volumes:
     driver: local
   letsencrypt_data:
     driver: local
+  # Writable state for the api container, which now runs as UID 10001 (H1).
+  # See the note on the api service's volume list for why this is a named
+  # volume rather than a host bind.
+  api_data:
+    driver: local
   sni_config:
     driver: local
     driver_opts:
@@ -719,3 +955,14 @@ networks:
     ipam:
       config:
         - subnet: 172.20.0.0/16
+  # docker-proxy and the one service that talks to it (C1). Deliberately not
+  # attached to mailserver_network, and `internal: true` so it has no route
+  # off the host at all -- a compromised service on the main network cannot
+  # reach the Docker API even indirectly. Subnet chosen not to overlap
+  # mailserver_network's 172.20.0.0/16 above.
+  internal_only:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.21.0.0/16

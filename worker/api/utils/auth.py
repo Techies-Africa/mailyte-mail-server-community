@@ -346,6 +346,51 @@ def _bump_failure_row(
         )
 
 
+# API key validation throttling (H3). There was no throttling on API key
+# guessing at all -- an attacker could try keys as fast as the server would
+# answer, forever.
+#
+# Its own service value ('api_key', migration 0008) and its own, looser
+# window. Unlike a login there is no email dimension to also track, because
+# an invalid key is not associated with an identity the way a login attempt
+# is; and a legitimate integration mistyping its key a handful of times in a
+# row is far more common than a handful of wrong passwords, hence the higher
+# limit.
+_API_KEY_FAILURE_WINDOW = timedelta(minutes=5)
+_API_KEY_FAILURE_HARD_LIMIT = 20
+_API_KEY_FAILURE_BACKOFF_START = 5
+
+
+def _api_key_attempt_blocked(cursor, client_ip: str) -> bool:
+    """True if this IP has hit the API-key failure limit.
+
+    IP-only. The email argument is a value no row can ever hold, which makes
+    _login_attempt_blocked's username arm a no-op rather than needing a
+    separate query -- an invalid key has no identity dimension to track.
+    """
+    return _login_attempt_blocked(cursor, client_ip, "\x00__no_identity__", service="api_key")
+
+
+def record_api_key_failure(cursor, client_ip: str) -> None:
+    _bump_failure_row(
+        cursor,
+        client_ip=client_ip,
+        username=None,
+        service="api_key",
+        window=_API_KEY_FAILURE_WINDOW,
+        hard_limit=_API_KEY_FAILURE_HARD_LIMIT,
+        backoff_start=_API_KEY_FAILURE_BACKOFF_START,
+    )
+
+
+def clear_api_key_failures(cursor, client_ip: str) -> None:
+    cursor.execute(
+        "DELETE FROM failed_auth_attempts "
+        "WHERE service = 'api_key' AND client_ip = %s AND username IS NULL",
+        (client_ip,),
+    )
+
+
 def _operator_login_blocked(cursor, client_ip: str, email: str) -> bool:
     """IP + email dual-dimension lockout check under the 'operator' service
     value (migration 0006): 3 failures in 15 minutes."""
@@ -404,8 +449,21 @@ def _authenticate_api_key(request: Request, permission_level: str = "read") -> d
             status_code=500, detail=create_api_response("error", "Database connection failed")
         )
 
+    client_ip = _client_ip(request)
+
     try:
         cursor = conn.cursor(dictionary=True)
+
+        # Rate limiting (H3) -- 20 invalid keys / 5 min per IP, with
+        # exponential backoff from the 5th failure. Checked BEFORE the lookup,
+        # so a caller who is already locked out does not get a free guess
+        # while the response is computed.
+        if _api_key_attempt_blocked(cursor, client_ip):
+            raise HTTPException(
+                status_code=429,
+                detail=create_api_response("error", "Too many failed attempts. Try again later."),
+            )
+
         # Try key_id column (current schema)
         cursor.execute(
             """
@@ -417,6 +475,8 @@ def _authenticate_api_key(request: Request, permission_level: str = "read") -> d
 
         api_key_data = cursor.fetchone()
         if not api_key_data:
+            record_api_key_failure(cursor, client_ip)
+            conn.commit()
             raise HTTPException(
                 status_code=401, detail=create_api_response("error", "Invalid API key")
             )
@@ -437,6 +497,13 @@ def _authenticate_api_key(request: Request, permission_level: str = "read") -> d
             raise HTTPException(
                 status_code=403, detail=create_api_response("error", "Write access required")
             )
+
+        # A valid key clears this IP's failure counter, so an integration
+        # that fixed its config is not still locked out by earlier attempts.
+        # Deliberately after the permission checks above: a real key used
+        # beyond its permissions is a 403, not a failed validation, and must
+        # not reset a counter an attacker is filling.
+        clear_api_key_failures(cursor, client_ip)
 
         # Update last used
         cursor.execute(

@@ -16,8 +16,39 @@ Features:
 import logging
 import logging.handlers
 import os
+import re
 from datetime import datetime
 from pathlib import Path
+
+
+class RedactingFilter(logging.Filter):
+    """Defence-in-depth against secrets reaching logs (phase-07 H2).
+
+    The real fix is never putting a secret in a log call in the first place
+    -- this filter exists for whatever call site nobody's caught yet, current
+    or future. Matches `key=value` / `key: value` / `key" : "value` shapes
+    where the key looks like a credential, case-insensitively, and redacts
+    only the value so the rest of the line stays useful for debugging.
+    """
+
+    # No leading \b: real secret names in this codebase are compound
+    # (DB_PASSWORD, WEBHOOK_SECRET, ADMIN_TOKEN_SECRET) and `_` counts as a
+    # word character, so `\bpassword\b` never matches the "PASSWORD" in
+    # "DB_PASSWORD" at all -- caught by testing this filter directly rather
+    # than trusting the pattern on sight. A trailing \b is kept: the
+    # keyword still needs to end at a whole word, just not begin at one.
+    _PATTERN = re.compile(
+        r'(?i)(password|secret|token|api[_-]?key|private[_-]?key)\b("?\s*[:=]\s*"?)([^\s,"\'}]+)'
+    )
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        # This codebase logs with f-strings (already-interpolated text), not
+        # %-style logging.info("...%s", value) -- record.msg is the full
+        # message by the time it reaches a filter, so matching against it
+        # directly is sufficient; record.args is empty in practice here.
+        if isinstance(record.msg, str) and self._PATTERN.search(record.msg):
+            record.msg = self._PATTERN.sub(r"\1\2***REDACTED***", record.msg)
+        return True
 
 
 class ServiceLogger:
@@ -45,16 +76,23 @@ class ServiceLogger:
             self._setup_logging()
 
     def _setup_logging(self):
-        """Configure logging handlers and formatters."""
+        """Configure logging handlers and formatters.
 
-        # Create logs directory structure
-        log_dir = Path(__file__).parent.parent / "logs" / self.service_name
-        log_dir.mkdir(parents=True, exist_ok=True)
+        File logging is best-effort. Every service in this stack now runs as a
+        non-root UID (H1), so a bind-mounted log directory created by root on
+        the host is not writable by the container. This used to raise
+        PermissionError straight out of the constructor -- and because several
+        services build their logger at import time, the process exited before
+        doing any work and the orchestrator restart-looped it forever.
 
-        # Set logger level
+        A mail server that cannot write a log file should still deliver mail.
+        So the console handler is installed FIRST and unconditionally, the file
+        handlers are added only if the directory is genuinely usable, and the
+        failure is reported rather than raised.
+        """
+
         self.logger.setLevel(self.log_level)
 
-        # Create formatters
         detailed_formatter = logging.Formatter(
             fmt="%(asctime)s | %(name)s | %(levelname)s | %(module)s:%(lineno)d | %(message)s",
             datefmt="%Y-%m-%d %H:%M:%S",
@@ -64,59 +102,95 @@ class ServiceLogger:
             fmt="%(asctime)s | %(levelname)s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
         )
 
-        # Console handler (INFO and above)
-        console_handler = logging.StreamHandler()
-        console_handler.setLevel(logging.INFO)
-        console_handler.setFormatter(simple_formatter)
-        self.logger.addHandler(console_handler)
-
-        # Main log file handler (all messages)
-        main_log_file = log_dir / f"{self.service_name}.log"
-        main_handler = logging.handlers.RotatingFileHandler(
-            filename=main_log_file,
-            maxBytes=10 * 1024 * 1024,  # 10MB
-            backupCount=5,
-            encoding="utf-8",
-        )
-        main_handler.setLevel(self.log_level)
-        main_handler.setFormatter(detailed_formatter)
-        self.logger.addHandler(main_handler)
-
-        # Error log file handler (WARNING and above)
-        error_log_file = log_dir / f"{self.service_name}_errors.log"
-        error_handler = logging.handlers.RotatingFileHandler(
-            filename=error_log_file,
-            maxBytes=5 * 1024 * 1024,  # 5MB
-            backupCount=3,
-            encoding="utf-8",
-        )
-        error_handler.setLevel(logging.WARNING)
-        error_handler.setFormatter(detailed_formatter)
-        self.logger.addHandler(error_handler)
-
-        # Performance log file handler (for timing and metrics)
-        perf_log_file = log_dir / f"{self.service_name}_performance.log"
-        self.perf_handler = logging.handlers.RotatingFileHandler(
-            filename=perf_log_file,
-            maxBytes=5 * 1024 * 1024,  # 5MB
-            backupCount=3,
-            encoding="utf-8",
-        )
-        self.perf_handler.setLevel(logging.INFO)
         perf_formatter = logging.Formatter(
             fmt="%(asctime)s | PERF | %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
         )
-        self.perf_handler.setFormatter(perf_formatter)
 
-        # Create performance logger
+        # Console handler (INFO and above). Installed before anything that can
+        # fail, so the "file logging disabled" warning below has somewhere to go.
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.INFO)
+        console_handler.setFormatter(simple_formatter)
+        console_handler.addFilter(RedactingFilter())
+        self.logger.addHandler(console_handler)
+
         self.perf_logger = logging.getLogger(f"{self.service_name}_performance")
         self.perf_logger.setLevel(logging.INFO)
-        self.perf_logger.addHandler(self.perf_handler)
         self.perf_logger.propagate = False
+        self.perf_handler = None
+
+        log_dir = Path(__file__).parent.parent / "logs" / self.service_name
+        self.log_dir = log_dir
+        self.file_logging_enabled = False
+
+        try:
+            log_dir.mkdir(parents=True, exist_ok=True)
+
+            # mkdir(exist_ok=True) succeeds on a directory that already exists
+            # and is read-only, so it does not answer the question we care
+            # about. os.access does.
+            if not os.access(log_dir, os.W_OK):
+                raise PermissionError(f"{log_dir} is not writable by uid {os.getuid()}")
+
+            main_handler = logging.handlers.RotatingFileHandler(
+                filename=log_dir / f"{self.service_name}.log",
+                maxBytes=10 * 1024 * 1024,  # 10MB
+                backupCount=5,
+                encoding="utf-8",
+            )
+            main_handler.setLevel(self.log_level)
+            main_handler.setFormatter(detailed_formatter)
+            main_handler.addFilter(RedactingFilter())
+            self.logger.addHandler(main_handler)
+
+            error_handler = logging.handlers.RotatingFileHandler(
+                filename=log_dir / f"{self.service_name}_errors.log",
+                maxBytes=5 * 1024 * 1024,  # 5MB
+                backupCount=3,
+                encoding="utf-8",
+            )
+            error_handler.setLevel(logging.WARNING)
+            error_handler.setFormatter(detailed_formatter)
+            error_handler.addFilter(RedactingFilter())
+            self.logger.addHandler(error_handler)
+
+            self.perf_handler = logging.handlers.RotatingFileHandler(
+                filename=log_dir / f"{self.service_name}_performance.log",
+                maxBytes=5 * 1024 * 1024,  # 5MB
+                backupCount=3,
+                encoding="utf-8",
+            )
+            self.perf_handler.setLevel(logging.INFO)
+            self.perf_handler.setFormatter(perf_formatter)
+            self.perf_logger.addHandler(self.perf_handler)
+
+            self.file_logging_enabled = True
+
+        except (OSError, ValueError) as exc:
+            # PermissionError is an OSError. Degrade to stdout only -- Docker
+            # and journald capture it, so the logs are not lost, they are just
+            # not on the volume.
+            for handler in list(self.logger.handlers):
+                if isinstance(handler, logging.handlers.RotatingFileHandler):
+                    self.logger.removeHandler(handler)
+                    handler.close()
+
+            perf_console = logging.StreamHandler()
+            perf_console.setLevel(logging.INFO)
+            perf_console.setFormatter(perf_formatter)
+            perf_console.addFilter(RedactingFilter())
+            self.perf_logger.addHandler(perf_console)
+
+            self.logger.warning(
+                f"File logging disabled for {self.service_name}: {exc}. "
+                f"Logging to stdout only. Fix by chowning the mounted log "
+                f"directory to the container UID."
+            )
 
         # Log startup message
         self.logger.info(f"{self.service_name} service started - logging configured")
-        self.logger.info(f"Log files: {log_dir}")
+        if self.file_logging_enabled:
+            self.logger.info(f"Log files: {log_dir}")
 
     def get_logger(self):
         """Get the configured logger instance."""
@@ -266,6 +340,9 @@ def setup_logging(log_level=None):
             handlers.append(file_handler)
         except Exception as e:
             print(f"Warning: Could not create file handler: {e}")
+
+        for h in handlers:
+            h.addFilter(RedactingFilter())
 
         logging.basicConfig(
             level=getattr(logging, log_level),

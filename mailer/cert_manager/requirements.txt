@@ -1,5 +1,5 @@
 
-mysql-connector-python==8.3.0
-requests==2.31.0
-cryptography==41.0.7
-certbot==2.7.4
+mysql-connector-python==9.4.0
+requests==2.32.5
+cryptography==49.0.0
+certbot==4.2.0

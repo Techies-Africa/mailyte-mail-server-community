@@ -163,7 +163,10 @@ def validate_organization_data(data, is_update=False):
     summary="List all organizations",
     description="Retrieve a paginated list of all organizations with domain counts, email account counts, and total storage usage.",
 )
-@require_api_key("read")
+# A full cross-tenant directory: this lists EVERY organization on the
+# instance. It was require_api_key("read"), so any tenant's read key could
+# enumerate every other tenant on the platform.
+@require_api_key("admin", scope="platform", role="support")
 async def list_organizations(page: int = Query(1), per_page: int = Query(50)):
     """List all organizations with usage statistics"""
     per_page = min(per_page, 200)
@@ -223,12 +226,18 @@ async def list_organizations(page: int = Query(1), per_page: int = Query(50)):
     description="Retrieve detailed information about a specific organization, including all its domains, email account counts, and aggregated storage statistics.",
 )
 @require_api_key("read")
-async def get_organization(organization_id: str):
+async def get_organization(organization_id: str, request: Request):
     """Get specific organization with detailed statistics"""
+    ctx = request.state.auth_context
     session = get_db_session()
     try:
         org = session.query(Organization).filter_by(id=organization_id).first()
-        if not org:
+        # Ownership check applies to organization scope only -- platform
+        # scope reads every tenant by design (ADR-002 SS8). 404 rather than
+        # 403, so a tenant cannot probe which organization ids exist.
+        if not org or (
+            ctx["scope"] == "organization" and org.id != ctx["organization_id"]
+        ):
             return JSONResponse(
                 content=create_api_response("error", "Organization not found"), status_code=404
             )
@@ -271,7 +280,10 @@ async def get_organization(organization_id: str):
     summary="Create a new organization",
     description="Register a new organization that can own domains and email accounts. The organization ID must be unique and is used as the primary identifier.",
 )
-@require_api_key("write")
+# Creating an organization is a platform act, not a tenant one. This was
+# require_api_key("write"), so any tenant's write key could create
+# organizations on the instance.
+@require_api_key("admin", scope="platform", role="admin")
 async def create_organization(request: Request):
     """Create new organization"""
     data = await request.json()
@@ -378,10 +390,16 @@ async def update_organization(organization_id: str, request: Request):
             status_code=400,
         )
 
+    ctx = request.state.auth_context
     session = get_db_session()
     try:
         org = session.query(Organization).filter_by(id=organization_id).first()
-        if not org:
+        # Was an existence check only, so any tenant's write key could rename
+        # or reconfigure any other tenant by id. Platform scope still edits
+        # every tenant (ADR-002 SS8) -- that is what the console needs.
+        if not org or (
+            ctx["scope"] == "organization" and org.id != ctx["organization_id"]
+        ):
             return JSONResponse(
                 content=create_api_response("error", "Organization not found"), status_code=404
             )
@@ -450,7 +468,9 @@ async def update_organization(organization_id: str, request: Request):
     summary="Delete an organization",
     description="Permanently remove an organization. The organization must have no remaining domains or email accounts; delete those first.",
 )
-@require_api_key("write")
+# Was require_api_key("write") with no ownership check in the body, so any
+# tenant's write key could delete ANY organization on the instance by id.
+@require_api_key("admin", scope="platform", role="admin")
 async def delete_organization(organization_id: str):
     """Delete organization and all related data"""
     session = get_db_session()
@@ -506,12 +526,17 @@ async def delete_organization(organization_id: str):
     description="Retrieve quota limits and current storage usage for an organization, broken down by domain with per-domain account counts.",
 )
 @require_api_key("read")
-async def get_organization_quotas(organization_id: str):
+async def get_organization_quotas(organization_id: str, request: Request):
     """Get organization quota and usage information"""
+    ctx = request.state.auth_context
     session = get_db_session()
     try:
         org = session.query(Organization).filter_by(id=organization_id).first()
-        if not org:
+        # See get_organization: platform reads every tenant, organization
+        # scope only itself, 404 either way so ids cannot be probed.
+        if not org or (
+            ctx["scope"] == "organization" and org.id != ctx["organization_id"]
+        ):
             return JSONResponse(
                 content=create_api_response("error", "Organization not found"), status_code=404
             )
@@ -566,12 +591,18 @@ async def get_organization_quotas(organization_id: str):
     description="Find an organization using its external system identifier. Returns the same detailed view as the primary get-organization endpoint.",
 )
 @require_api_key("read")
-async def get_organization_by_external_id(external_id: str):
+async def get_organization_by_external_id(external_id: str, request: Request):
     """Get organization by external ID"""
+    ctx = request.state.auth_context
     session = get_db_session()
     try:
         org = session.query(Organization).filter_by(external_id=external_id).first()
-        if not org:
+        # Lookup by a caller-supplied external id was entirely unscoped --
+        # the easiest of these to walk, since external ids come from the
+        # billing system and are guessable.
+        if not org or (
+            ctx["scope"] == "organization" and org.id != ctx["organization_id"]
+        ):
             return JSONResponse(
                 content=create_api_response("error", "Organization not found"), status_code=404
             )
@@ -612,7 +643,10 @@ async def get_organization_by_external_id(external_id: str):
     summary="Update organization quotas",
     description="Adjust the storage quotas and rate limits for an organization. These settings apply across all domains owned by the organization.",
 )
-@require_api_key("write")
+# Quotas are what the operator sells. Was require_api_key("write") with no
+# ownership check, so a tenant could raise its own storage quota -- or any
+# other tenant's -- at will.
+@require_api_key("admin", scope="platform", role="admin")
 async def update_organization_quotas(organization_id: str, request: Request):
     """Update organization quota settings"""
     data = await request.json()

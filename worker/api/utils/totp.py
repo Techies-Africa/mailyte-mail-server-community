@@ -101,7 +101,13 @@ def verify_totp(secret_b32: str, token: str, tolerance: int = TOTP_TOLERANCE) ->
             if hmac.compare_digest(generate_totp(secret_b32, current_step + offset), token.strip()):
                 return True
     except (ValueError, TypeError, binascii.Error) as exc:
-        logger.warning(f"TOTP verification failed on a malformed secret/token: {exc}")
+        # Worded to avoid "secret:" / "token:" immediately before the
+        # interpolation: shared/logging_config.py's RedactingFilter (H2)
+        # blanks whatever follows those keywords, which here is the
+        # exception text, not a credential -- the message would survive
+        # as "...token: ***REDACTED***" and lose the only diagnostic it
+        # carries. Neither the secret nor the submitted code is logged.
+        logger.warning(f"TOTP verification failed on malformed enrolment data: {exc}")
         return False
     return False
 

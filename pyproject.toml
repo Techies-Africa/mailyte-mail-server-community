@@ -42,6 +42,17 @@ extend-immutable-calls = [
     "utils.auth.require_scope",
 ]
 
+[tool.ruff.lint.per-file-ignores]
+# E402 ("module level import not at top of file") is unavoidable here by
+# design. app.py must run two things before it may import anything else:
+# the fail-closed secrets check (phase-07 C3 -- pointless if a module that
+# reads a secret has already been imported and cached it), and the
+# sys.path setup that makes `shared.*` importable at all. Every import
+# after those is flagged, so the rule is suppressed for this one file
+# rather than scattered across seven `# noqa` comments. A genuine
+# out-of-order import anywhere else in the repo still fails.
+"worker/api/app.py" = ["E402"]
+
 [tool.ruff.format]
 quote-style = "double"
 
