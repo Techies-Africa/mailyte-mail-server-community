@@ -32,9 +32,17 @@ import os
 from datetime import datetime
 
 import requests
+
+# requests is blocking. In an `async def` handler it runs ON the event loop and
+# stalls every other request this worker is serving. Measured on
+# mailyte-email-server before the same fix: 10.3s for a call the monitoring
+# service answered in 0.18s. Latent here only because CE ships no monitoring
+# container -- but docker-compose.yml invites operators to set
+# MONITORING_SERVICE_URL, and the moment they do, this bites.
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 from utils.auth import require_api_key
 
 router = APIRouter()
@@ -124,7 +132,9 @@ async def health_check():
     if not MONITORING_SERVICE_URL:
         return _unavailable()
     try:
-        response = requests.get(f"{MONITORING_SERVICE_URL}/health", timeout=10)
+        response = await run_in_threadpool(
+            lambda: requests.get(f"{MONITORING_SERVICE_URL}/health", timeout=10)
+        )
         if response.status_code == 200:
             return {
                 "status": "healthy",
@@ -163,7 +173,9 @@ async def get_services_status():
     if not MONITORING_SERVICE_URL:
         return _unavailable()
     try:
-        response = requests.get(f"{MONITORING_SERVICE_URL}/heartbeat", timeout=15)
+        response = await run_in_threadpool(
+            lambda: requests.get(f"{MONITORING_SERVICE_URL}/heartbeat", timeout=15)
+        )
         if response.status_code == 200:
             return response.json()
         return JSONResponse(
@@ -193,9 +205,9 @@ async def get_service_status(service_name: str):
     if not MONITORING_SERVICE_URL:
         return _unavailable()
     try:
-        response = requests.get(
+        response = await run_in_threadpool(lambda: requests.get(
             f"{MONITORING_SERVICE_URL}/heartbeat", params={"service": service_name}, timeout=10
-        )
+        ))
         if response.status_code == 200:
             return response.json()
         return JSONResponse(
@@ -229,7 +241,9 @@ async def get_system_metrics():
     if not MONITORING_SERVICE_URL:
         return _unavailable()
     try:
-        response = requests.get(f"{MONITORING_SERVICE_URL}/api/metrics", timeout=15)
+        response = await run_in_threadpool(
+            lambda: requests.get(f"{MONITORING_SERVICE_URL}/api/metrics", timeout=15)
+        )
         if response.status_code == 200:
             return response.json()
         return JSONResponse(
@@ -256,7 +270,9 @@ async def get_dashboard_stats():
     if not MONITORING_SERVICE_URL:
         return _unavailable()
     try:
-        response = requests.get(f"{MONITORING_SERVICE_URL}/api/stats", timeout=10)
+        response = await run_in_threadpool(
+            lambda: requests.get(f"{MONITORING_SERVICE_URL}/api/stats", timeout=10)
+        )
         if response.status_code == 200:
             return response.json()
         return JSONResponse(
@@ -301,9 +317,9 @@ async def restart_service(
 
     try:
         headers = {"X-Admin-Token": admin_token}
-        response = requests.post(
+        response = await run_in_threadpool(lambda: requests.post(
             f"{MONITORING_SERVICE_URL}/restart/{service_name}", headers=headers, timeout=30
-        )
+        ))
 
         if response.status_code == 200:
             return response.json()
@@ -360,7 +376,11 @@ async def trigger_auto_heal(request: Request, body: AutoHealRequest | None = Non
 
     try:
         headers = {"X-Admin-Token": admin_token}
-        response = requests.post(f"{MONITORING_SERVICE_URL}/auto-heal", headers=headers, timeout=60)
+        response = await run_in_threadpool(
+            lambda: requests.post(
+                f"{MONITORING_SERVICE_URL}/auto-heal", headers=headers, timeout=60
+            )
+        )
 
         if response.status_code == 200:
             return response.json()
@@ -413,9 +433,9 @@ async def test_webhooks(request: Request, body: WebhookTestRequest | None = None
 
     try:
         headers = {"X-Admin-Token": admin_token}
-        response = requests.post(
+        response = await run_in_threadpool(lambda: requests.post(
             f"{MONITORING_SERVICE_URL}/test/webhooks", headers=headers, timeout=30
-        )
+        ))
 
         if response.status_code == 200:
             return response.json()

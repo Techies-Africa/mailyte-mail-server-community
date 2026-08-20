@@ -15,7 +15,12 @@ from utils.auth import require_api_key
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-RATE_LIMITER_API_BASE = f"http://0.0.0.0:{os.getenv('RATE_LIMITER_API_PORT', 5003)}"
+# 0.0.0.0 is a BIND address, never a CONNECT address. Inside the api
+# container it resolves to the api itself, so this gateway called its own
+# port and timed out -- it has never worked under Docker. Fixed in
+# mailyte-email-server on 2026-08-08; CE never received that fix.
+# rate_limiter binds 8082 (docker-compose.yml). 5003 was never listened on.
+RATE_LIMITER_API_BASE = os.getenv("RATE_LIMITER_API_BASE", "http://rate_limiter:8082")
 
 
 async def proxy_to_rate_limiter(request: Request, endpoint, method="GET", data=None, params=None):

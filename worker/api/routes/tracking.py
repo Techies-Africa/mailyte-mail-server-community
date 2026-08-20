@@ -79,7 +79,12 @@ class EmailStatsResponse(BaseModel):
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-TRACKING_API_BASE = f"http://0.0.0.0:{os.getenv('TRACKING_API_PORT', 5001)}"
+# 0.0.0.0 is a BIND address, never a CONNECT address. Inside the api
+# container it resolves to the api itself, so this gateway called its own
+# port and timed out -- it has never worked under Docker. Fixed in
+# mailyte-email-server on 2026-08-08; CE never received that fix.
+# tracking binds 8086 (docker-compose.yml). 5001 was never listened on.
+TRACKING_API_BASE = os.getenv("TRACKING_API_BASE", "http://tracking:8086")
 
 
 async def proxy_to_tracking(request: Request, endpoint, method="GET", data=None, params=None):

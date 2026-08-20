@@ -1484,7 +1484,10 @@ async def get_mailbox_stats(mailbox: str, request: Request):
         # Basic mailbox info
         cursor.execute(
             """
-            SELECT email, created, last_login, storage_quota, storage_used
+            -- created_at AS created: the column is created_at; `created` does
+            -- not exist, so this raised "Unknown column 'created'". Aliased so
+            -- the response keeps the key its consumers read.
+            SELECT email, created_at AS created, last_login, storage_quota, storage_used
             FROM email_accounts
             WHERE email = %s
         """,
@@ -1497,32 +1500,51 @@ async def get_mailbox_stats(mailbox: str, request: Request):
                 content=create_api_response("error", "Mailbox not found"), status_code=404
             )
 
-        # Message statistics
+        # Message statistics.
+        #
+        # The previous query had no FROM clause at all -- it selected from
+        # nothing, against columns (seen, received, mailbox) that exist on no
+        # table in this schema, so this endpoint always returned 500.
+        #
+        # mail_logs is the delivery record and the only per-recipient message
+        # data the database holds. unread_messages is deliberately null rather
+        # than 0: read state lives in the Maildir on disk (dovecot owns it), so
+        # the database cannot answer it, and 0 would be a confident wrong
+        # answer rather than an honest absence.
         cursor.execute(
             """
             SELECT
-                COUNT(*) as total_messages,
-                SUM(CASE WHEN seen = 0 THEN 1 ELSE 0 END) as unread_messages,
-                AVG(size) as avg_message_size,
-                MAX(size) as largest_message_size,
-                MIN(received) as oldest_message,
-                MAX(received) as newest_message
-            WHERE mailbox = %s
+                COUNT(*) AS total_messages,
+                AVG(size) AS avg_message_size,
+                MAX(size) AS largest_message_size,
+                MIN(timestamp) AS oldest_message,
+                MAX(timestamp) AS newest_message
+            FROM mail_logs
+            WHERE recipient = %s
         """,
             (mailbox,),
         )
 
-        message_stats = cursor.fetchone()
+        message_stats = cursor.fetchone() or {}
+        message_stats["unread_messages"] = None
 
-        # Login statistics
+        # Login statistics. Same defect -- no FROM, and against columns
+        # (login_time, ip_address, username) that user_logins does not use. Its
+        # real columns are user_email / client_ip / logged_at.
+        #
+        # success = 1 because "how many times did this mailbox log in" should
+        # not be inflated by failed attempts; those live in
+        # failed_auth_attempts and surface on the auth-security screen.
         cursor.execute(
             """
             SELECT
-                COUNT(*) as total_logins,
-                MAX(login_time) as last_login,
-                COUNT(DISTINCT ip_address) as unique_ips
-            WHERE username = %s
-            AND login_time >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+                COUNT(*) AS total_logins,
+                MAX(logged_at) AS last_login,
+                COUNT(DISTINCT client_ip) AS unique_ips
+            FROM user_logins
+            WHERE user_email = %s
+              AND success = 1
+              AND logged_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
         """,
             (mailbox,),
         )
