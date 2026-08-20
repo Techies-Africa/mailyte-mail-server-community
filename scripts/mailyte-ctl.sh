@@ -69,13 +69,19 @@ CLEAN=false       # --clean flag
 FORCE=false       # --force / -f flag
 SERVICES=()       # positional service names
 
+# --profile console so the console appears in ps/logs/health/stop like any
+# other service (PRD SS9). It is declared behind that profile only until its
+# image is published; naming a profile no service uses is a no-op, so this
+# needs no change once the gate is removed.
+CONSOLE_PROFILE="--profile console"
+
 compose() {
     case "$MODE" in
-        dev)        docker compose -f "$COMPOSE_MAIN" -f "$COMPOSE_DEV" "$@" ;;
-        prod)       docker compose -f "$COMPOSE_MAIN" -f "$COMPOSE_PROD" "$@" ;;
+        dev)        docker compose -f "$COMPOSE_MAIN" -f "$COMPOSE_DEV" $CONSOLE_PROFILE "$@" ;;
+        prod)       docker compose -f "$COMPOSE_MAIN" -f "$COMPOSE_PROD" $CONSOLE_PROFILE "$@" ;;
         cloud)      docker compose -f "$COMPOSE_MAIN" -f "$COMPOSE_CLOUD" "$@" ;;
         cloud-prod) docker compose -f "$COMPOSE_MAIN" -f "$COMPOSE_CLOUD" -f "$COMPOSE_PROD" "$@" ;;
-        *)          docker compose -f "$COMPOSE_MAIN" "$@" ;;
+        *)          docker compose -f "$COMPOSE_MAIN" $CONSOLE_PROFILE "$@" ;;
     esac
 }
 
@@ -517,6 +523,29 @@ cmd_dkim() {
     python3 "$SCRIPTS_DIR/generate_dkim.py"
 }
 
+cmd_console_token() {
+    # The one thing standing between `./start.sh` and a working console on a
+    # fresh install. The API writes this single-use token only while no
+    # operator exists, and deletes it the moment it is consumed, so "not
+    # found" almost always means an owner account already exists.
+    print_header "Console Bootstrap Token"
+    local token
+    token=$(compose exec -T api cat /app/data/operator-bootstrap-token 2>/dev/null | tr -d '\r\n')
+    if [ -n "$token" ]; then
+        echo "  Token: $token"
+        echo ""
+        echo "  Open http://127.0.0.1:${CONSOLE_PORT:-3100}/bootstrap and paste it"
+        echo "  to create the first owner account."
+    else
+        print_warn "No bootstrap token available."
+        echo ""
+        echo "  This is expected if an operator account already exists — the"
+        echo "  token is single-use and removed once consumed."
+        echo ""
+        echo "  If the API is not running yet, start it first:  ./start.sh"
+    fi
+}
+
 cmd_services() {
     print_header "Available Services"
     compose config --services | sort
@@ -601,6 +630,7 @@ show_usage() {
     migrate                              Run database migrations
     migrate-status                       Show migration status
     dkim                                 Generate DKIM keys
+    console-token                        Show the console bootstrap token (first run)
 
   INFO
     services                             List all available services
@@ -670,6 +700,7 @@ case "$COMMAND" in
     migrate)          cmd_migrate ;;
     migrate-status)   cmd_migrate_status ;;
     dkim)             cmd_dkim ;;
+    console-token)    cmd_console_token ;;
 
     # Info
     services)         cmd_services ;;
