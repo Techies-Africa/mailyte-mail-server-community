@@ -255,6 +255,27 @@ services:
        - ADMIN_TOKEN_SECRET=${ADMIN_TOKEN_SECRET:-tokensecret}
        - FLASK_ENV=${FLASK_ENV:-development}
        - FLASK_DEBUG=${FLASK_DEBUG:-1}
+       # --- Mailyte Console / operator identity (ADR-002, ADR-004) ---------
+       # Set false ONLY while bringing the console up over plain
+       # http://localhost. With it true (the default) the operator session
+       # cookie carries Secure, a browser on an http:// origin silently drops
+       # it, and login appears to succeed and then bounce back to the sign-in
+       # screen. Never false on a real deployment.
+       - MAILYTE_COOKIE_SECURE=${MAILYTE_COOKIE_SECURE:-true}
+       # MFA is mandatory for every operator (ADR-002 §3). ADR-004 allows one
+       # escape hatch for a single-user homelab -- MAILYTE_CONSOLE_MFA=optional
+       # -- and the default deliberately stays on. It only ever applies to an
+       # operator who has not enrolled an authenticator at all; once enrolled,
+       # MFA is enforced regardless.
+       - MAILYTE_CONSOLE_MFA=${MAILYTE_CONSOLE_MFA:-required}
+       - TOTP_ISSUER=${TOTP_ISSUER:-Mailyte}
+       # Optional proxy targets. Left unset on purpose: this compose file
+       # ships no monitoring or queue-manager container, and the API returns a
+       # clear 503 naming the missing service rather than proxying to a
+       # default that does not exist. Point these at your own services to
+       # light up /api/v1/monitoring/* and /api/v1/queue/*.
+       - MONITORING_SERVICE_URL=${MONITORING_SERVICE_URL:-}
+       - QUEUE_SERVICE_URL=${QUEUE_SERVICE_URL:-}
      healthcheck:
        test: ["CMD-SHELL", "python3 -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:8080/health\")'"]
        interval: 30s
@@ -588,6 +609,87 @@ services:
       timeout: 10s
       retries: 3
       start_period: 30s
+
+  # ========================================================================
+  # Mailyte Console — the admin panel (ADR-004)
+  #
+  # One application, two deployments. The same console Mailyte staff use to
+  # run the hosted platform is the panel a self-hoster uses to run their own
+  # box: a CE self-hoster *is* the platform operator of their own instance.
+  # Enterprise-only modules are hidden by GET /api/v1/capabilities, which
+  # this edition reports without them.
+  #
+  # Prebuilt image, not a build context — the console lives in its own
+  # repository and is released on its own cadence. Pin CONSOLE_VERSION in
+  # .env for a reproducible deployment; `latest` is a convenience, not a
+  # recommendation.
+  #
+  # First run, to create the owner account:
+  #   docker compose exec api cat /app/data/operator-bootstrap-token
+  # then open http://127.0.0.1:3100/bootstrap and paste it. The API writes
+  # that 0600 file only while no operator exists, and consumes it on use.
+  #
+  # Port contract (conventions §2) — the four values agree:
+  #   1. app bind port         3100  (the image's `next start -p 3100`)
+  #   2. EXPOSE                3100  (the image's Dockerfile)
+  #   3. container side below  3100
+  #   4. healthcheck probe     3100
+  # ========================================================================
+  console:
+    image: mailyte/console:${CONSOLE_VERSION:-latest}
+    container_name: console
+    # Opt-in until the image is published. Without this, a plain
+    # `docker compose up` fails the WHOLE stack for every existing CE user the
+    # moment this file merges, because mailyte/console cannot be pulled yet --
+    # a mail server that stops booting is a far worse outcome than a console
+    # that has to be asked for. Start it with:
+    #     docker compose --profile console up -d console
+    # Remove this key once the image is published to the public registry.
+    profiles: ["console"]
+    ports:
+      # Bound to loopback on purpose (ADR-004). The console controls the
+      # whole mail server; publishing it on 0.0.0.0 by default would make
+      # exposing it the path of least resistance. Terminate TLS and restrict
+      # by source address in a reverse proxy in front of it, and forward
+      # X-Forwarded-For — operator sessions are IP-bound (ADR-002 §7), so a
+      # proxy that does not set it binds every operator to the proxy's own
+      # address and the control stops meaning anything.
+      - "127.0.0.1:${CONSOLE_PORT:-3100}:3100"
+    environment:
+      # Where the API is from THIS container. Never reaches the browser: the
+      # console proxies every call server-side, which is what keeps the API
+      # off any browser-reachable network and lets the operator session
+      # cookie stay same-origin.
+      - PLATFORM_API_URL=http://api:8080
+      # Optional deep-links, resolved by the OPERATOR's browser rather than
+      # by this container, so they are host-side addresses.
+      - NEXT_PUBLIC_DOCS_URL=${DOCS_URL:-http://localhost:8000}
+      - NEXT_PUBLIC_RSPAMD_URL=${RSPAMD_URL:-http://localhost:11334}
+      - NODE_ENV=production
+    healthcheck:
+      # Socket probe, never pgrep — pgrep is absent from these images and
+      # yields exit 127 forever (conventions §3). node, not python3: this is
+      # a Node image.
+      test: ["CMD", "node", "-e", "require('net').connect(3100,'127.0.0.1').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - mailserver_network
+    # The image already runs as a non-root user; these are the
+    # container-level counterparts.
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      # Next.js writes its build and image caches at runtime.
+      - /tmp
+      - /app/.next/cache
+    restart: unless-stopped
 
 volumes:
   mysql_data:

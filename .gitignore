@@ -143,6 +143,10 @@ venv.bak/
 .dmypy.json
 dmypy.json
 
+# ruff — CI runs it (.github/workflows/ci.yml) and so does anyone checking
+# the lint ratchet locally; its cache was never ignored.
+.ruff_cache/
+
 # Pyre type checker
 .pyre/
 
@@ -192,4 +196,14 @@ storage/qdrant_data/
 .idea/
 .vscode/
 *.swp
-*.swo.api-key
+*.swo
+
+# Credentials that must never reach this repo -- it is public.
+# `.api-key` was previously glued onto the end of the `*.swo` line by a
+# missing newline, which meant it matched nothing at all.
+.api-key
+
+# The api service's writable /app/data. docker-compose.yml bind-mounts
+# ./worker/api to /app, so the single-use operator bootstrap token app.py
+# writes at startup (0600, ADR-004) lands here on the host.
+worker/api/data/

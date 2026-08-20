@@ -110,6 +110,36 @@ Mailyte Enterprise Edition adds email tracking, webhooks, analytics, AI-powered 
             "name": "SSL",
             "description": "SSL certificate management handles TLS certificates for mail services. Certificates can be auto-provisioned via Let's Encrypt or manually uploaded. The system monitors certificate expiry and auto-renews before certificates expire.",
         },
+        {
+            "name": "Capabilities",
+            "description": "The capability manifest this deployment ships. The Mailyte Console "
+            "and mailyte-web read it before login to decide which navigation entries and routes "
+            "to render. Unauthenticated by design, and it never exposes tenant data.",
+        },
+        {
+            "name": "Platform Auth",
+            "description": "Operator login for the Mailyte Console. Real, individually-revocable "
+            "identities with mandatory MFA, replacing the static admin token. Two steps: "
+            "password, then TOTP.",
+        },
+        {
+            "name": "Platform",
+            "description": "The console's platform-scope surface: the overview aggregate that "
+            "paints the landing screen and every nav badge, operator lifecycle management "
+            "(owner-only), and read-only views over the append-only operator audit trail.",
+        },
+        {
+            "name": "Monitoring",
+            "description": "Service health, per-service status, system metrics, restart, and "
+            "auto-heal. A thin authenticated proxy over a monitoring service; returns 503 with "
+            "an explanation when this deployment has none configured.",
+        },
+        {
+            "name": "Queue",
+            "description": "Postfix mail queue status, deferred listing, and flush. A thin "
+            "authenticated proxy over a queue service; returns 503 with an explanation when "
+            "this deployment has none configured.",
+        },
     ],
 )
 
@@ -121,6 +151,93 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def operator_audit_middleware(request: Request, call_next):
+    """Every privileged action is audited -- no exceptions (ADR-002 §6).
+
+    Middleware, not per-handler calls: a handler that forgets to log is a
+    security hole, and middleware cannot forget. It also catches denials,
+    which are the signal of compromise and which a handler never reaches at
+    all because the auth guard raised before it ran.
+
+    Reads the raw request body before call_next -- Starlette caches it on the
+    Request object after first read, so route handlers downstream still see
+    it normally.
+    """
+    raw_body = await request.body()
+    response = await call_next(request)
+
+    from utils.operator_audit import maybe_audit
+
+    try:
+        await maybe_audit(request, response, raw_body)
+    except Exception as exc:
+        # Audit logging must never break the response it's describing.
+        logger.error(f"operator_audit_middleware failed: {exc}")
+
+    return response
+
+
+OPERATOR_BOOTSTRAP_TOKEN_PATH = "/app/data/operator-bootstrap-token"
+
+
+@app.on_event("startup")
+async def generate_operator_bootstrap_token_if_none_exist():
+    """Write a single-use bootstrap token when no platform operator exists.
+
+    Resolves the console's bootstrap paradox (ADR-004): the console needs an
+    operator to log in as, and only an existing `owner` can mint one --
+    except on a fresh install, where there is no owner yet. This token is the
+    only way in. `POST /api/v1/platform/auth/bootstrap` consumes it, creates
+    the first `owner`, and deletes it.
+
+    Deliberately gated on its own condition (no platform_operators row) and
+    kept separate from any organization bootstrap: an install can already
+    have organizations with zero operators, or the reverse, so sharing one
+    single-use token between them would let whichever bootstrap ran first
+    consume it and permanently lock out the other.
+
+    Non-fatal by design -- a failure here must never stop the API serving.
+    The token is never logged; the 0600 file is the only place it lives.
+    """
+    try:
+        import secrets as _secrets
+
+        import mysql.connector
+
+        conn = mysql.connector.connect(
+            host=os.getenv("DB_HOST", "mysql"),
+            port=int(os.getenv("DB_PORT", "3306")),
+            database=os.getenv("DB_NAME", "mailserver"),
+            user=os.getenv("DB_USER", "mailuser"),
+            password=os.getenv("DB_PASSWORD", ""),
+            connect_timeout=5,
+        )
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM platform_operators")
+        (count,) = cursor.fetchone()
+        cursor.close()
+        conn.close()
+
+        if count == 0:
+            os.makedirs(os.path.dirname(OPERATOR_BOOTSTRAP_TOKEN_PATH), exist_ok=True)
+            token = _secrets.token_urlsafe(32)
+            with open(OPERATOR_BOOTSTRAP_TOKEN_PATH, "w") as f:
+                f.write(token)
+            os.chmod(OPERATOR_BOOTSTRAP_TOKEN_PATH, 0o600)
+            logger.info(
+                "Operator bootstrap token generated (no operators exist yet), written to "
+                f"{OPERATOR_BOOTSTRAP_TOKEN_PATH}"
+            )
+        elif os.path.isfile(OPERATOR_BOOTSTRAP_TOKEN_PATH):
+            # Already provisioned -- remove any stale token so there is
+            # nothing left to leak or reuse.
+            os.remove(OPERATOR_BOOTSTRAP_TOKEN_PATH)
+    except Exception as exc:
+        logger.warning(f"Operator bootstrap token check failed (non-fatal): {exc}")
+
 
 # Serve static files and templates
 TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), "templates")
@@ -161,6 +278,14 @@ route_modules = [
     ("webhooks", "/api/v1/webhooks", "Webhooks"),
     ("ssl", "/api/v1/ssl", "SSL"),
     ("smtp_credentials", "/api/v1/smtp-credentials", "SMTP Credentials"),
+    ("monitoring", "/api/v1/monitoring", "Monitoring"),
+    ("queue", "/api/v1/queue", "Queue"),
+    ("capabilities", "/api/v1/capabilities", "Capabilities"),
+    ("platform_auth", "/api/v1/platform/auth", "Platform Auth"),
+    # Registered AFTER platform_auth deliberately: routers are matched in
+    # include order, so the more specific /api/v1/platform/auth/* prefix must
+    # claim its paths before the broader /api/v1/platform mount sees them.
+    ("platform", "/api/v1/platform", "Platform"),
 ]
 
 for module_name, prefix, tag in route_modules:
