@@ -166,6 +166,9 @@ ensure_setup() {
         "$SCRIPT_DIR/logs/worker/api"
         "$SCRIPT_DIR/logs/worker/tracking"
         "$SCRIPT_DIR/logs/worker/webhooks"
+        # Was missing entirely, so Docker created it as root and rate_limiter
+        # could not write into it.
+        "$SCRIPT_DIR/logs/worker/rate_limiter"
     )
     for d in "${dirs[@]}"; do
         mkdir -p "$d" 2>/dev/null
@@ -184,10 +187,56 @@ ensure_setup() {
         print_info "For production, replace with real certs or enable cert_manager"
     fi
 
-    # Create .env from example if missing
+    # Create .env from example if missing.
+    #
+    # The placeholders are REPLACED with generated values rather than copied
+    # through. secrets-check (C3) refuses to start the stack on a placeholder
+    # or a known-weak default, so a straight `cp` would hand every new
+    # self-hoster a stack that cannot boot and a message about a file they
+    # have not read yet. Generating here means the secure path is also the
+    # default path -- the operator never has to choose it.
     if [ ! -f "$SCRIPT_DIR/.env" ] && [ -f "$SCRIPT_DIR/.env.example" ]; then
         cp "$SCRIPT_DIR/.env.example" "$SCRIPT_DIR/.env"
-        print_warn ".env created from .env.example — edit it with your settings"
+        chmod 600 "$SCRIPT_DIR/.env"
+
+        # The five names in startup_checks.ALL_SECRETS. Keep in step with it.
+        for var in DB_ROOT_PASSWORD DB_PASSWORD WEBHOOK_SECRET ADMIN_PASSWORD ADMIN_TOKEN_SECRET; do
+            # base64 then strip non-alphanumerics: these values travel through
+            # compose interpolation, MySQL command lines and connection URLs,
+            # where +, / and = are variously special. 32 bytes in, ~40 chars
+            # out, comfortably past startup_checks.MIN_LENGTH of 16.
+            value="$(openssl rand -base64 32 | tr -dc 'A-Za-z0-9' | head -c 40)"
+            if grep -q "^${var}=" "$SCRIPT_DIR/.env" 2>/dev/null; then
+                # -i '' is BSD/macOS, -i is GNU. Neither is portable, so use a
+                # temp file and move it.
+                sed "s|^${var}=.*|${var}=${value}|" "$SCRIPT_DIR/.env" > "$SCRIPT_DIR/.env.tmp" \
+                    && mv "$SCRIPT_DIR/.env.tmp" "$SCRIPT_DIR/.env"
+            else
+                printf '%s=%s\n' "$var" "$value" >> "$SCRIPT_DIR/.env"
+            fi
+        done
+        chmod 600 "$SCRIPT_DIR/.env"
+        print_success ".env created with generated secrets (not the example placeholders)"
+        print_info "Review it for host-specific settings: HOSTNAME, DOMAIN, ports"
+    fi
+
+    # Key Encryption Key for envelope-encrypted DKIM private keys (C2).
+    #
+    # This must exist before `docker compose up`. The api service bind-mounts
+    # the file, and Docker silently creates a DIRECTORY at any bind-mount
+    # source that does not exist -- which then fails to open as a file, on
+    # every DKIM operation, with an error that does not mention Docker.
+    if [ ! -f "$SCRIPT_DIR/secrets/encryption_kek" ]; then
+        if [ -x "$SCRIPTS_DIR/generate_dkim_kek.sh" ]; then
+            bash "$SCRIPTS_DIR/generate_dkim_kek.sh" >/dev/null 2>&1
+        else
+            mkdir -p "$SCRIPT_DIR/secrets"
+            openssl rand -base64 32 > "$SCRIPT_DIR/secrets/encryption_kek"
+        fi
+        chmod 700 "$SCRIPT_DIR/secrets" 2>/dev/null
+        chmod 600 "$SCRIPT_DIR/secrets/encryption_kek" 2>/dev/null
+        print_success "DKIM key-encryption key generated at secrets/encryption_kek"
+        print_warn "BACK THIS UP. Losing it makes every stored DKIM private key unrecoverable."
     fi
 }
 
