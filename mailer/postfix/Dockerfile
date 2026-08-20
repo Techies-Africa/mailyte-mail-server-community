@@ -20,7 +20,9 @@ RUN apt-get update && \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
-RUN pip3 install mysql-connector-python requests redis
+# --timeout/--retries per conventions §5 -- a full CE build runs every service
+# in parallel and saturates the link, and a pip timeout here fails the build.
+RUN pip3 install --timeout 120 --retries 10 mysql-connector-python requests redis
 
 # Create vmail user and group (uid/gid 5000 — must match Dovecot)
 RUN groupadd -g 5000 vmail && \

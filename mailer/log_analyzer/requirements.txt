@@ -1,5 +1,5 @@
 
-mysql-connector-python==8.2.0
-requests==2.31.0
+mysql-connector-python==9.4.0
+requests==2.32.5
 geoip2==4.7.0
-flask==3.0.0
+flask==3.1.3

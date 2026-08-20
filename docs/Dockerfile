@@ -13,7 +13,7 @@ RUN apt-get update && apt-get install -y \
 
 # Install Python dependencies
 COPY requirements.txt /tmp/
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
+RUN pip install --no-cache-dir --timeout 120 --retries 10 -r /tmp/requirements.txt
 
 # ── Build layout ──
 # MkDocs wants:  /srv/mkdocs.yml  (config)
