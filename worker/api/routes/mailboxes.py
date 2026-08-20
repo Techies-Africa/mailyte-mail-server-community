@@ -22,15 +22,14 @@ import re
 from datetime import datetime
 
 from fastapi import APIRouter, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
 
 def sanitize_text(value):
-    """Sanitize free-text input to prevent stored XSS."""
+    """Sanitize free-text input to prevent stored XSS. Strips all HTML tags."""
     if not value or not isinstance(value, str):
         return value
-    # Escape HTML entities
     import re as _re
 
     value = _re.sub(r"<[^>]+>", "", value)  # Strip HTML tags
@@ -41,9 +40,15 @@ import os
 import sys
 from pathlib import Path
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, or_
 from sqlalchemy.orm import sessionmaker
-from utils.auth import create_api_response, hash_password, require_api_key
+from utils.auth import (
+    create_api_response,
+    hash_password,
+    require_api_key,
+    validate_password_strength,
+    verify_mailbox_scope,
+)
 from utils.database import get_db_connection
 
 from database.models.core import Domain, EmailAccount, Organization
@@ -115,15 +120,10 @@ def validate_email(email):
     return re.match(pattern, email) is not None
 
 
-def validate_password(password):
-    """Validate password strength"""
-    if len(password) < 8:
-        return False, "Password must be at least 8 characters long"
-    if not re.search(r"[A-Za-z]", password):
-        return False, "Password must contain letters"
-    if not re.search(r"\d", password):
-        return False, "Password must contain numbers"
-    return True, "Valid password"
+# phase-07 H7: password strength is validated by utils.auth's
+# validate_password_strength() (single source of truth, see that module) --
+# this used to be its own, weaker (8-char) copy here.
+validate_password = validate_password_strength
 
 
 def validate_email_account_data(data, is_update=False):
@@ -156,46 +156,138 @@ def validate_email_account_data(data, is_update=False):
     return errors
 
 
+# Whitelisted ORDER BY targets for the cross-tenant mailbox search
+# (console phase-02 SS2.4). Closed mapping: ORDER BY takes no bound
+# parameter, so anything not listed here would have to be interpolated.
+#
+# The activity column is `last_login`, not `last_login_at` -- verified
+# against database/models/core.py's EmailAccount and 001_init_schema.sql
+# rather than assumed from the phase doc's prose.
+_MAILBOX_SORT_KEYS = ("email", "created_at", "storage_used", "last_login")
+_SORT_DIRECTIONS = ("asc", "desc")
+
+
 @router.get(
     "/email-accounts",
     summary="List all email accounts",
-    description="Retrieve a paginated list of email accounts with optional filtering by domain, organization, or status. Includes domain and organization context for each account.",
+    description="Retrieve a paginated list of email accounts, searchable by address or display "
+    "name and filterable by domain, organization, or status. Sortable by email, creation date, "
+    "storage used or last login. Includes domain and organization context for each account.",
 )
 @require_api_key("read")
 async def list_email_accounts(
+    request: Request,
+    q: str = Query(
+        None,
+        description="Search the email address or the mailbox display name (`name`), both LIKE.",
+    ),
+    organization_id: str = Query(
+        None,
+        description="Platform scope only -- filter to a single organization. Ignored for tenant credentials, which always see only their own org.",
+    ),
     domain_id: str = Query(None),
-    organization_id: str = Query(None),
     status: str = Query(None),
-    page: int = Query(1),
-    per_page: int = Query(50),
+    sort_by: str = Query("email", description="email | created_at | storage_used | last_login"),
+    sort_dir: str = Query("asc", description="asc | desc"),
+    page: int = Query(1, ge=1),
+    per_page: int = Query(50, ge=1),
 ):
-    """List all email accounts with domain and organization context"""
+    """List all email accounts with domain and organization context.
+
+    Tenant scope: always the caller's own org -- a client-supplied
+    organization_id is ignored, never honoured (task 6.4's org_filter
+    principle; this previously took organization_id as an optional
+    client-supplied query param, honoured verbatim). Platform scope: sees
+    every organization unless organization_id narrows it (ADR-002 SS8
+    "sudo sees all").
+
+    `q` is what makes phase-02 SS2.4 ("customer says mail to x@y.com is
+    bouncing") a single request rather than an operator paging through
+    every tenant looking for one address.
+    """
     per_page = min(per_page, 200)
+    ctx = request.state.auth_context
+
+    if sort_by not in _MAILBOX_SORT_KEYS:
+        return JSONResponse(
+            content=create_api_response(
+                "error", f"sort_by must be one of {', '.join(_MAILBOX_SORT_KEYS)}"
+            ),
+            status_code=422,
+        )
+    if sort_dir not in _SORT_DIRECTIONS:
+        return JSONResponse(
+            content=create_api_response("error", "sort_dir must be 'asc' or 'desc'"),
+            status_code=422,
+        )
+    if status:
+        # AccountStatus(status) raises ValueError on an unknown value, which
+        # the bare `except` below would otherwise turn into a 500. A bad
+        # filter value is the caller's mistake, not the server's (SS8).
+        try:
+            status_filter = AccountStatus(status)
+        except ValueError:
+            valid = ", ".join(member.value for member in AccountStatus)
+            return JSONResponse(
+                content=create_api_response("error", f"status must be one of {valid}"),
+                status_code=422,
+            )
 
     session = get_db_session()
     try:
         query = session.query(EmailAccount)
+        if ctx["scope"] == "organization":
+            query = query.filter_by(organization_id=ctx["organization_id"])
+        elif organization_id:
+            query = query.filter_by(organization_id=organization_id)
 
         if domain_id:
             query = query.filter_by(domain_id=domain_id)
-        if organization_id:
-            query = query.filter_by(organization_id=organization_id)
         if status:
-            query = query.filter_by(status=AccountStatus(status))
+            query = query.filter_by(status=status_filter)
+        if q:
+            like = f"%{q}%"
+            query = query.filter(or_(EmailAccount.email.like(like), EmailAccount.name.like(like)))
+
+        sort_columns = {
+            "email": EmailAccount.email,
+            "created_at": EmailAccount.created_at,
+            "storage_used": EmailAccount.storage_used,
+            "last_login": EmailAccount.last_login,
+        }
+        sort_column = sort_columns[sort_by]
+        ordering = sort_column.asc() if sort_dir == "asc" else sort_column.desc()
+        # id tiebreaker: last_login is nullable and storage_used is heavily
+        # tied, so without it consecutive pages can repeat and skip rows.
+        query = query.order_by(ordering, EmailAccount.id.asc())
 
         total = query.count()
         accounts = query.offset((page - 1) * per_page).limit(per_page).all()
-        result = []
 
+        # Two grouped lookups for the page rather than two per row (2 + 2N
+        # before -- 402 queries on a full 200-row page). Cross-tenant pages
+        # made this worse, not better: consecutive rows rarely shared an
+        # organization, so nothing was served from the identity map.
+        domain_ids = {account.domain_id for account in accounts}
+        org_ids = {account.organization_id for account in accounts}
+        domain_names: dict = {}
+        org_names: dict = {}
+        if accounts:
+            domain_names = dict(
+                session.query(Domain.id, Domain.domain).filter(Domain.id.in_(domain_ids)).all()
+            )
+            org_names = dict(
+                session.query(Organization.id, Organization.name)
+                .filter(Organization.id.in_(org_ids))
+                .all()
+            )
+
+        result = []
         for account in accounts:
             account_data = account.to_dict()
 
-            # Add domain and organization information
-            domain = session.query(Domain).filter_by(id=account.domain_id).first()
-            org = session.query(Organization).filter_by(id=account.organization_id).first()
-
-            account_data["domain_name"] = domain.domain if domain else "Unknown"
-            account_data["organization_name"] = org.name if org else "Unknown"
+            account_data["domain_name"] = domain_names.get(account.domain_id, "Unknown")
+            account_data["organization_name"] = org_names.get(account.organization_id, "Unknown")
 
             # Remove sensitive information
             if "password" in account_data:
@@ -233,12 +325,17 @@ async def list_email_accounts(
     description="Retrieve detailed information for a specific email account by ID, including its associated domain and organization data. Sensitive fields like password are excluded.",
 )
 @require_api_key("read")
-async def get_email_account(account_id: str):
+async def get_email_account(account_id: str, request: Request):
     """Get specific email account with detailed information"""
+    ctx = request.state.auth_context
     session = get_db_session()
     try:
         account = session.query(EmailAccount).filter_by(id=account_id).first()
-        if not account:
+        # Platform scope may fetch any org's mailbox by id; organization
+        # scope only its own (task 6.4).
+        if not account or (
+            ctx["scope"] == "organization" and account.organization_id != ctx["organization_id"]
+        ):
             return JSONResponse(
                 content=create_api_response("error", "Email account not found"), status_code=404
             )
@@ -298,8 +395,19 @@ async def create_email_account(request: Request):
         local_part = email_parts[0]
         domain_name = email_parts[1]
 
-        # Find domain
-        domain = session.query(Domain).filter_by(domain=domain_name).first()
+        # Find domain.
+        #
+        # The org filter is load-bearing, not defensive: organization_id is
+        # inherited from whatever domain this lookup returns, so an unfiltered
+        # lookup let a tenant create a mailbox on ANOTHER tenant's domain and
+        # have it silently adopted into that tenant's organization. 404 rather
+        # than 403 for a domain the caller does not own -- conventions SS8
+        # forbids leaking that another tenant holds it.
+        ctx = request.state.auth_context
+        domain_query = session.query(Domain).filter_by(domain=domain_name)
+        if ctx["scope"] == "organization":
+            domain_query = domain_query.filter_by(organization_id=ctx["organization_id"])
+        domain = domain_query.first()
         if not domain:
             return JSONResponse(
                 content=create_api_response("error", f"Domain {domain_name} not found"),
@@ -352,7 +460,14 @@ async def create_email_account(request: Request):
             organization_id=domain.organization_id,
             password=hashed_password,
             name=sanitize_text(data.get("name")),
-            status=AccountStatus(data.get("status", "ACTIVE")),
+            # AccountStatus's values are lowercase ("active"/"inactive"/
+            # "suspended", see database/models/enums.py) -- the default here
+            # was "ACTIVE" (uppercase), which doesn't match any member and
+            # made every create_email_account call with no explicit status
+            # fail with "'ACTIVE' is not a valid AccountStatus". Callers
+            # (e.g. mailyte-api) never send this field, so this default was
+            # hit on every real mailbox creation.
+            status=AccountStatus(data.get("status", AccountStatus.ACTIVE.value)),
             storage_quota=data.get("storage_quota", 1073741824),  # 1GB default
             rate_limits=data.get("rate_limits", {}),
             storage_quotas=data.get("storage_quotas", {}),
@@ -410,6 +525,7 @@ async def create_email_account(request: Request):
 @require_api_key("write")
 async def update_email_account(account_id: str, request: Request):
     """Update email account"""
+    ctx = request.state.auth_context
     data = await request.json()
 
     if not data:
@@ -428,7 +544,11 @@ async def update_email_account(account_id: str, request: Request):
     session = get_db_session()
     try:
         account = session.query(EmailAccount).filter_by(id=account_id).first()
-        if not account:
+        # Platform scope may update any org's mailbox (ADR-002 SS8); organization
+        # scope only its own, and cross-org stays 404 (conventions SS8).
+        if not account or (
+            ctx["scope"] == "organization" and account.organization_id != ctx["organization_id"]
+        ):
             return JSONResponse(
                 content=create_api_response("error", "Email account not found"), status_code=404
             )
@@ -506,15 +626,23 @@ async def update_email_account(account_id: str, request: Request):
     description="Permanently delete an email account and update the associated domain counters (total accounts and storage used). This action cannot be undone.",
 )
 @require_api_key("write")
-async def delete_email_account(account_id: str):
+async def delete_email_account(account_id: str, request: Request):
     """Delete email account"""
+    ctx = request.state.auth_context
     session = get_db_session()
     try:
         account = session.query(EmailAccount).filter_by(id=account_id).first()
-        if not account:
-            return JSONResponse(
-                content=create_api_response("error", "Email account not found"), status_code=404
-            )
+        # Platform scope may delete any org's mailbox (ADR-002 SS8); organization
+        # scope only its own.
+        if not account or (
+            ctx["scope"] == "organization" and account.organization_id != ctx["organization_id"]
+        ):
+            # Already absent (from the caller's org-scoped view) is the
+            # desired end state of a delete -- 204, not 404, so a retried
+            # delete is naturally safe (phase-04 task 4.3). Indistinguishable
+            # from "belongs to another org", which is intentional: 404 already
+            # forbade telling those two cases apart (conventions §8).
+            return Response(status_code=204)
 
         account_id_val = account.id
         account_email_val = account.email
@@ -558,12 +686,17 @@ async def delete_email_account(account_id: str):
     description="Retrieve detailed storage quota and usage information for an email account, including attachment and email storage breakdown, usage percentage, rate limits, and whether the account is over threshold.",
 )
 @require_api_key("read")
-async def get_account_quotas(account_id: str):
+async def get_account_quotas(account_id: str, request: Request):
     """Get email account quota and usage information"""
+    ctx = request.state.auth_context
     session = get_db_session()
     try:
         account = session.query(EmailAccount).filter_by(id=account_id).first()
-        if not account:
+        # Platform scope may read any org's quota (ADR-002 SS8); organization
+        # scope only its own.
+        if not account or (
+            ctx["scope"] == "organization" and account.organization_id != ctx["organization_id"]
+        ):
             return JSONResponse(
                 content=create_api_response("error", "Email account not found"), status_code=404
             )
@@ -609,6 +742,7 @@ async def get_account_quotas(account_id: str):
 @require_api_key("write")
 async def update_account_quotas(account_id: str, request: Request):
     """Update email account quota settings"""
+    ctx = request.state.auth_context
     data = await request.json()
 
     if not data:
@@ -619,7 +753,11 @@ async def update_account_quotas(account_id: str, request: Request):
     session = get_db_session()
     try:
         account = session.query(EmailAccount).filter_by(id=account_id).first()
-        if not account:
+        # Platform scope may adjust any org's quota (ADR-002 SS8); organization
+        # scope only its own.
+        if not account or (
+            ctx["scope"] == "organization" and account.organization_id != ctx["organization_id"]
+        ):
             return JSONResponse(
                 content=create_api_response("error", "Email account not found"), status_code=404
             )
@@ -725,62 +863,109 @@ async def add_mailbox(request: Request):
             content=create_api_response("error", "Database connection failed"), status_code=500
         )
 
+    ctx = request.state.auth_context
+
     try:
         cursor = conn.cursor(dictionary=True)
 
-        # Check if domain exists
-        cursor.execute("SELECT id FROM domains WHERE domain = %s AND active = 1", (data["domain"],))
-        if not cursor.fetchone():
+        # Check the domain exists, is active, AND belongs to the caller's
+        # org -- without the organization_id filter, any tenant could
+        # provision a mailbox on a domain owned by a different organization.
+        # Platform scope provisions on any org's domain (ADR-002 SS8) and so
+        # skips that filter.
+        domain_sql = "SELECT id, organization_id FROM domains WHERE domain = %s AND active = 1"
+        domain_params = [data["domain"]]
+        if ctx["scope"] == "organization":
+            domain_sql += " AND organization_id = %s"
+            domain_params.append(ctx["organization_id"])
+        cursor.execute(domain_sql, tuple(domain_params))
+        domain_row = cursor.fetchone()
+        if not domain_row:
             return JSONResponse(
                 content=create_api_response(
                     "error", f"Domain {data['domain']} not found or inactive"
                 ),
                 status_code=400,
             )
+        domain_id = domain_row["id"] if isinstance(domain_row, dict) else domain_row[0]
+        # The new mailbox's org is the domain's org, never a caller-supplied
+        # value -- a platform caller has no org of its own to fall back on.
+        org_id = (
+            domain_row["organization_id"] if isinstance(domain_row, dict) else domain_row[1]
+        )
 
-        # Check if mailbox already exists
+        # Check if mailbox already exists (email addresses are globally
+        # unique, not per-org)
         cursor.execute("SELECT id FROM email_accounts WHERE email = %s", (email,))
-        if cursor.fetchone():
+        existing = cursor.fetchone()
+        if existing:
+            existing_id = existing["id"] if isinstance(existing, dict) else existing[0]
             return JSONResponse(
-                content=create_api_response("error", f"Mailbox {email} already exists"),
+                content=create_api_response(
+                    "error",
+                    f"Mailbox {email} already exists",
+                    {"existing_id": existing_id},
+                    error_code="MAILBOX_ALREADY_EXISTS",
+                ),
                 status_code=409,
             )
-
-        # Get domain_id
-        cursor.execute("SELECT id FROM domains WHERE domain = %s AND active = 1", (data["domain"],))
-        domain_row = cursor.fetchone()
-        if not domain_row:
-            return JSONResponse(
-                content=create_api_response("error", f"Domain {data['domain']} not found"),
-                status_code=400,
-            )
-        domain_id = domain_row["id"] if isinstance(domain_row, dict) else domain_row[0]
 
         # Hash password
         hashed_password = hash_password(data["password"])
 
-        # Get organization from API key
-        org_id = getattr(request.state, "organization_id", None) or "default"
+        # Insert mailbox (EE uses ULID primary keys)
+        try:
+            from shared.ulid_utils import generate_ulid
 
-        # Insert mailbox
-        cursor.execute(
-            """
-            INSERT INTO email_accounts (
-                email, local_part, domain_id, organization_id,
-                password, name, status, storage_quota
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-        """,
-            (
-                email,
-                data["local_part"],
-                domain_id,
-                org_id,
-                hashed_password,
-                sanitize_text(data.get("name", "")),
-                "active" if data.get("active", 1) else "inactive",
-                data.get("quota", 5368709120),
-            ),
-        )
+            mailbox_id = generate_ulid()
+        except ImportError:
+            import uuid
+
+            mailbox_id = str(uuid.uuid4()).replace("-", "")[:26]
+
+        try:
+            cursor.execute(
+                """
+                INSERT INTO email_accounts (
+                    id, email, local_part, domain_id, organization_id,
+                    password, name, status, storage_quota
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+                (
+                    mailbox_id,
+                    email,
+                    local_part,
+                    domain_id,
+                    org_id,
+                    hashed_password,
+                    sanitize_text(data.get("name", "")),
+                    "active" if data.get("active", 1) else "inactive",
+                    data.get("quota", 5368709120),
+                ),
+            )
+        except Exception as insert_exc:
+            # Race: another request created the same address between our
+            # SELECT above and this INSERT. The UNIQUE key on `email` is the
+            # real guard; translate its violation to 409 instead of letting
+            # a raw DB error reach the client (phase-04 task 4.4).
+            if "Duplicate entry" not in str(insert_exc):
+                raise
+            cursor.execute("SELECT id FROM email_accounts WHERE email = %s", (email,))
+            race_row = cursor.fetchone()
+            race_id = (
+                (race_row["id"] if isinstance(race_row, dict) else race_row[0])
+                if race_row
+                else None
+            )
+            return JSONResponse(
+                content=create_api_response(
+                    "error",
+                    f"Mailbox {email} already exists",
+                    {"existing_id": race_id},
+                    error_code="MAILBOX_ALREADY_EXISTS",
+                ),
+                status_code=409,
+            )
 
         user_id = cursor.lastrowid
 
@@ -810,8 +995,9 @@ async def add_mailbox(request: Request):
     description="Retrieve mailbox details by email address or ID using the legacy raw-SQL path. Pass 'all' to list all active mailboxes. Includes message statistics, login history, and quota usage percentage.",
 )
 @require_api_key("read")
-async def get_mailboxes(mailbox_id: str):
+async def get_mailboxes(mailbox_id: str, request: Request):
     """Get mailbox information"""
+    ctx = request.state.auth_context
     conn = get_db_connection()
     if not conn:
         return JSONResponse(
@@ -821,24 +1007,41 @@ async def get_mailboxes(mailbox_id: str):
     try:
         cursor = conn.cursor(dictionary=True)
 
+        # Platform scope reads across every organization (ADR-002 SS8);
+        # organization scope stays pinned to its own org. Hand-built rather
+        # than via org_filter() because these queries need the `ea.` alias.
+        org_clause = ""
+        org_params: list = []
+        if ctx["scope"] == "organization":
+            org_clause = " AND ea.organization_id = %s"
+            org_params = [ctx["organization_id"]]
+
         if mailbox_id == "all":
-            cursor.execute("""
+            # Previously WHERE ea.status = 'active' with no org filter --
+            # any authenticated tenant could list every mailbox on the
+            # platform.
+            cursor.execute(
+                f"""
                 SELECT ea.*, d.domain as domain_name
                 FROM email_accounts ea
                 LEFT JOIN domains d ON ea.domain_id = d.id
-                WHERE ea.status = 'active'
+                WHERE ea.status = 'active'{org_clause}
                 ORDER BY ea.email
-            """)
+            """,
+                tuple(org_params),
+            )
             mailboxes = cursor.fetchall()
         else:
+            # Previously matched by email/id alone -- any tenant could read
+            # another org's mailbox by guessing its email or ID.
             cursor.execute(
-                """
+                f"""
                 SELECT ea.*, d.domain as domain_name
                 FROM email_accounts ea
                 LEFT JOIN domains d ON ea.domain_id = d.id
-                WHERE ea.email = %s OR ea.id = %s
+                WHERE (ea.email = %s OR ea.id = %s){org_clause}
             """,
-                (mailbox_id, mailbox_id),
+                tuple([mailbox_id, mailbox_id] + org_params),
             )
             mailboxes = cursor.fetchall()
 
@@ -877,6 +1080,7 @@ async def get_mailboxes(mailbox_id: str):
 @require_api_key("write")
 async def edit_mailbox(request: Request):
     """Edit mailbox settings"""
+    ctx = request.state.auth_context
     data = await request.json()
 
     if not data or "items" not in data or "attr" not in data:
@@ -891,10 +1095,32 @@ async def edit_mailbox(request: Request):
         )
 
     try:
-        cursor = conn.cursor()
+        cursor = conn.cursor(dictionary=True)
         results = []
 
         for mailbox in data["items"]:
+            # Previously updated by email alone -- any tenant could edit
+            # another org's mailbox. Verify ownership before touching it.
+            cursor.execute(
+                "SELECT organization_id FROM email_accounts WHERE email = %s",
+                (mailbox,),
+            )
+            owner = cursor.fetchone()
+            # Platform scope may edit any org's mailbox (ADR-002 SS8);
+            # organization scope only its own.
+            if not owner or (
+                ctx["scope"] == "organization"
+                and owner["organization_id"] != ctx["organization_id"]
+            ):
+                results.append(
+                    {"mailbox": mailbox, "status": "error", "msg": f"Mailbox {mailbox} not found"}
+                )
+                continue
+            # Re-pin the UPDATE to the row's own org rather than the caller's:
+            # a platform caller has none, and this keeps the write narrowed to
+            # exactly the mailbox whose ownership was just verified.
+            mailbox_org_id = owner["organization_id"]
+
             update_fields = []
             update_values = []
 
@@ -923,13 +1149,13 @@ async def edit_mailbox(request: Request):
 
             if update_fields:
                 update_fields.append("modified = %s")
-                update_values.extend([datetime.now(), mailbox])
+                update_values.extend([datetime.now(), mailbox, mailbox_org_id])
 
                 cursor.execute(
                     f"""
                     UPDATE email_accounts
                     SET {", ".join(update_fields)}
-                    WHERE email = %s
+                    WHERE email = %s AND organization_id = %s
                 """,
                     update_values,
                 )
@@ -978,6 +1204,7 @@ async def edit_mailbox(request: Request):
 @require_api_key("write")
 async def delete_mailbox(request: Request):
     """Delete mailbox(es) and associated data"""
+    ctx = request.state.auth_context
     data = await request.json()
 
     if not data or not isinstance(data, list):
@@ -995,11 +1222,35 @@ async def delete_mailbox(request: Request):
         )
 
     try:
-        cursor = conn.cursor()
+        cursor = conn.cursor(dictionary=True)
         results = []
 
         for mailbox in data:
             try:
+                # Previously deleted by email alone -- any tenant could
+                # delete another org's mailbox. Verify ownership first.
+                cursor.execute(
+                    "SELECT organization_id FROM email_accounts WHERE email = %s",
+                    (mailbox,),
+                )
+                owner = cursor.fetchone()
+                # Platform scope may delete any org's mailbox (ADR-002 SS8);
+                # organization scope only its own.
+                if not owner or (
+                    ctx["scope"] == "organization"
+                    and owner["organization_id"] != ctx["organization_id"]
+                ):
+                    results.append(
+                        {
+                            "mailbox": mailbox,
+                            "status": "error",
+                            "msg": f"Mailbox {mailbox} not found",
+                        }
+                    )
+                    continue
+                # Re-pin the DELETE to the row's own org (see edit_mailbox).
+                mailbox_org_id = owner["organization_id"]
+
                 cursor.execute("START TRANSACTION")
 
                 # Delete associated data
@@ -1009,7 +1260,17 @@ async def delete_mailbox(request: Request):
                 )
                 aliases_deleted = cursor.rowcount
 
-                cursor.execute("DELETE FROM email_accounts WHERE email = %s", (mailbox,))
+                # Messages are not tracked/deleted by this endpoint (no
+                # messages table is touched here) -- pre-existing: the
+                # dispatch/response below referenced an undefined
+                # `messages_deleted` variable, which would NameError on
+                # every successful deletion.
+                messages_deleted = 0
+
+                cursor.execute(
+                    "DELETE FROM email_accounts WHERE email = %s AND organization_id = %s",
+                    (mailbox, mailbox_org_id),
+                )
                 user_deleted = cursor.rowcount
 
                 if user_deleted > 0:
@@ -1071,7 +1332,7 @@ async def delete_mailbox(request: Request):
     description="Retrieve detailed quota information for a mailbox using the legacy raw-SQL path, including total quota, usage, available space, usage percentage, and a per-folder size breakdown.",
 )
 @require_api_key("read")
-async def get_mailbox_quota(mailbox: str):
+async def get_mailbox_quota(mailbox: str, request: Request):
     """Get detailed quota information for a mailbox"""
     conn = get_db_connection()
     if not conn:
@@ -1081,12 +1342,23 @@ async def get_mailbox_quota(mailbox: str):
 
     try:
         cursor = conn.cursor(dictionary=True)
+        # This legacy raw-SQL route had NO org scoping at all: it keyed
+        # straight off the mailbox address, so any authenticated tenant could
+        # reach any other tenant's mailbox by guessing an address.
+        # verify_mailbox_scope 404s for a foreign mailbox and passes platform
+        # scope through unchanged (ADR-002 SS8).
+        verify_mailbox_scope(cursor, mailbox, request.state.auth_context)
 
+        # `quota` is not a column on email_accounts -- it is `storage_quota`.
+        # Both derived expressions referenced the wrong name, so this query
+        # raised before it could return a row.
         cursor.execute(
             """
             SELECT email, storage_quota, storage_used,
-                   (storage_used / quota * 100) as usage_percent,
-                   (quota - storage_used) as available
+                   CASE WHEN storage_quota > 0
+                        THEN (storage_used / storage_quota * 100)
+                        ELSE 0 END AS usage_percent,
+                   (storage_quota - storage_used) AS available
             FROM email_accounts
             WHERE email = %s
         """,
@@ -1150,6 +1422,15 @@ async def edit_mailbox_quota(request: Request):
         )
 
     try:
+        cursor = conn.cursor(dictionary=True)
+        # This legacy raw-SQL route had NO org scoping at all: it keyed
+        # straight off the mailbox address, so any authenticated tenant could
+        # reach any other tenant's mailbox by guessing an address.
+        # verify_mailbox_scope 404s for a foreign mailbox and passes platform
+        # scope through unchanged (ADR-002 SS8).
+        verify_mailbox_scope(cursor, data["mailbox"], request.state.auth_context)
+
+        cursor.close()
         cursor = conn.cursor()
 
         cursor.execute(
@@ -1183,7 +1464,7 @@ async def edit_mailbox_quota(request: Request):
     description="Retrieve comprehensive statistics for a mailbox using the legacy raw-SQL path, including message counts, unread counts, average/largest message sizes, oldest/newest message dates, and 30-day login activity with unique IP counts.",
 )
 @require_api_key("read")
-async def get_mailbox_stats(mailbox: str):
+async def get_mailbox_stats(mailbox: str, request: Request):
     """Get comprehensive mailbox statistics"""
     conn = get_db_connection()
     if not conn:
@@ -1193,6 +1474,12 @@ async def get_mailbox_stats(mailbox: str):
 
     try:
         cursor = conn.cursor(dictionary=True)
+        # This legacy raw-SQL route had NO org scoping at all: it keyed
+        # straight off the mailbox address, so any authenticated tenant could
+        # reach any other tenant's mailbox by guessing an address.
+        # verify_mailbox_scope 404s for a foreign mailbox and passes platform
+        # scope through unchanged (ADR-002 SS8).
+        verify_mailbox_scope(cursor, mailbox, request.state.auth_context)
 
         # Basic mailbox info
         cursor.execute(

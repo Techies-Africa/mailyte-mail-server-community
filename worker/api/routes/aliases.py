@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field
 
 
 def sanitize_text(value):
-    """Sanitize free-text input to prevent stored XSS."""
+    """Sanitize free-text input to prevent stored XSS. Strips all HTML tags."""
     if not value or not isinstance(value, str):
         return value
     import re as _re
@@ -27,11 +27,13 @@ def sanitize_text(value):
 import sys
 from pathlib import Path
 
-from utils.auth import create_api_response, require_api_key
+from utils.auth import create_api_response, org_filter, require_api_key
 from utils.database import get_db_connection
 
 project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
+
+
 from shared.webhook_dispatcher import Events, dispatch_event
 
 logger = logging.getLogger(__name__)
@@ -111,22 +113,35 @@ async def add_alias(request: Request):
             content=create_api_response("error", "Database connection failed"), status_code=500
         )
 
+    ctx = request.state.auth_context
+
     try:
         cursor = conn.cursor(dictionary=True)
 
         # Extract domain from address
         domain = address.split("@")[1]
 
-        # Check if domain exists
-        cursor.execute("SELECT id FROM domains WHERE domain = %s AND active = 1", (domain,))
+        # Check the domain exists AND belongs to the caller's org -- without
+        # the organization_id filter, any tenant could create an alias on a
+        # domain owned by a different organization. Platform scope drops the
+        # filter and works on any org's domain (ADR-002 SS8).
+        domain_sql = "SELECT id, organization_id FROM domains WHERE domain = %s AND active = 1"
+        domain_params = [domain]
+        if ctx["scope"] == "organization":
+            domain_sql += " AND organization_id = %s"
+            domain_params.append(ctx["organization_id"])
+        cursor.execute(domain_sql, tuple(domain_params))
         domain_result = cursor.fetchone()
         if not domain_result:
             return JSONResponse(
                 content=create_api_response("error", f"Domain {domain} not found or inactive"),
                 status_code=400,
             )
+        # The alias inherits the domain's org, never a caller-supplied value.
+        org_id = domain_result["organization_id"]
 
-        # Check if alias already exists
+        # Check if alias already exists (source addresses are globally unique,
+        # not per-org, since they're real mailbox addresses)
         cursor.execute("SELECT id FROM aliases WHERE source = %s", (address,))
         if cursor.fetchone():
             return JSONResponse(
@@ -135,15 +150,18 @@ async def add_alias(request: Request):
             )
 
         # Insert alias
-        org_id = getattr(request.state, "organization_id", None) or "default"
+        from shared.ulid_utils import generate_ulid
+
+        alias_id = generate_ulid()
         cursor.execute(
             """
             INSERT INTO aliases (
-                source, destination, domain_id, organization_id, active,
+                id, source, destination, domain_id, organization_id, active,
                 created_at, updated_at
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         """,
             (
+                alias_id,
                 address,
                 goto,
                 domain_result["id"],
@@ -184,8 +202,11 @@ async def add_alias(request: Request):
     description="Retrieve alias details by ID or source address. Pass 'all' to list all active aliases with pagination. Each alias includes destination count, parsed destination list, and 30-day forwarding statistics.",
 )
 @require_api_key("read")
-async def get_aliases(alias_id: str, page: int = Query(1), per_page: int = Query(50)):
+async def get_aliases(
+    alias_id: str, request: Request, page: int = Query(1), per_page: int = Query(50)
+):
     """Get alias information"""
+    ctx = request.state.auth_context
     conn = get_db_connection()
     if not conn:
         return JSONResponse(
@@ -195,30 +216,43 @@ async def get_aliases(alias_id: str, page: int = Query(1), per_page: int = Query
     try:
         cursor = conn.cursor(dictionary=True)
 
+        # Platform scope reads across every organization (ADR-002 SS8);
+        # organization scope stays pinned to its own org. Hand-built rather
+        # than via org_filter() because these queries need the `a.` alias.
+        org_clause = ""
+        org_params: list = []
+        if ctx["scope"] == "organization":
+            org_clause = " AND a.organization_id = %s"
+            org_params = [ctx["organization_id"]]
+
         if alias_id == "all":
             per_page = min(per_page, 200)
             offset = (page - 1) * per_page
+            # Previously WHERE a.active = 1 with no org filter at all -- any
+            # authenticated tenant could list every alias on the platform.
             cursor.execute(
-                """
+                f"""
                 SELECT a.*, d.description as domain_description
                 FROM aliases a
                 LEFT JOIN domains d ON a.domain_id = d.id
-                WHERE a.active = 1
+                WHERE a.active = 1{org_clause}
                 ORDER BY a.source
                 LIMIT %s OFFSET %s
             """,
-                (per_page, offset),
+                tuple(org_params + [per_page, offset]),
             )
             aliases = cursor.fetchall()
         else:
+            # Previously matched by id/source alone -- any tenant could read
+            # another org's alias by guessing its ID or address.
             cursor.execute(
-                """
+                f"""
                 SELECT a.*, d.description as domain_description
                 FROM aliases a
                 LEFT JOIN domains d ON a.domain_id = d.id
-                WHERE a.id = %s OR a.source = %s
+                WHERE (a.id = %s OR a.source = %s){org_clause}
             """,
-                (alias_id, alias_id),
+                tuple([alias_id, alias_id] + org_params),
             )
             aliases = cursor.fetchall()
 
@@ -229,19 +263,26 @@ async def get_aliases(alias_id: str, page: int = Query(1), per_page: int = Query
             alias["destination_count"] = len(destinations)
             alias["destinations"] = [dest.strip() for dest in destinations]
 
-            # Get forwarding statistics if available
-            cursor.execute(
-                """
-                SELECT COUNT(*) as forwarded_count
-                FROM message_forwards
-                WHERE alias_address = %s
-                AND created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
-            """,
-                (alias["source"],),
-            )
-
-            stats = cursor.fetchone()
-            alias["monthly_forwards"] = stats["forwarded_count"] if stats else 0
+            # Get forwarding statistics if available. Best-effort: the
+            # message_forwards table is referenced here but not created by
+            # any migration (pre-existing gap, unrelated to auth/org-scoping
+            # -- schema fixes belong to phase-08). Without this guard, every
+            # call to this endpoint 500s regardless of org-scoping.
+            try:
+                cursor.execute(
+                    """
+                    SELECT COUNT(*) as forwarded_count
+                    FROM message_forwards
+                    WHERE alias_address = %s
+                    AND created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+                """,
+                    (alias["source"],),
+                )
+                stats = cursor.fetchone()
+                alias["monthly_forwards"] = stats["forwarded_count"] if stats else 0
+            except Exception as stats_exc:
+                logger.warning(f"Forwarding stats unavailable for {alias['source']}: {stats_exc}")
+                alias["monthly_forwards"] = None
 
         return create_api_response("success", "Aliases retrieved successfully", aliases)
 
@@ -262,6 +303,7 @@ async def get_aliases(alias_id: str, page: int = Query(1), per_page: int = Query
 @require_api_key("write")
 async def edit_alias(request: Request):
     """Edit alias settings"""
+    ctx = request.state.auth_context
     data = await request.json()
 
     if not data or "items" not in data or "attr" not in data:
@@ -276,10 +318,32 @@ async def edit_alias(request: Request):
         )
 
     try:
-        cursor = conn.cursor()
+        cursor = conn.cursor(dictionary=True)
         results = []
 
         for alias_id in data["items"]:
+            # Previously updated by id/source alone -- any tenant could edit
+            # another org's alias. Verify ownership before touching it.
+            cursor.execute(
+                "SELECT organization_id FROM aliases WHERE id = %s OR source = %s",
+                (alias_id, alias_id),
+            )
+            owner = cursor.fetchone()
+            # Platform scope may edit any org's alias (ADR-002 SS8);
+            # organization scope only its own.
+            if not owner or (
+                ctx["scope"] == "organization"
+                and owner["organization_id"] != ctx["organization_id"]
+            ):
+                results.append(
+                    {"alias": alias_id, "status": "error", "msg": f"Alias {alias_id} not found"}
+                )
+                continue
+            # Re-pin the UPDATE to the row's own org rather than the caller's:
+            # a platform caller has none, and this keeps the write narrowed to
+            # exactly the alias whose ownership was just verified.
+            alias_org_id = owner["organization_id"]
+
             update_fields = []
             update_values = []
 
@@ -297,15 +361,15 @@ async def edit_alias(request: Request):
 
             if update_fields:
                 update_fields.append("updated_at = %s")
-                update_values.extend([datetime.now(), alias_id])
+                update_values.append(datetime.now())
 
                 cursor.execute(
                     f"""
                     UPDATE aliases
                     SET {", ".join(update_fields)}
-                    WHERE id = %s OR source = %s
+                    WHERE (id = %s OR source = %s) AND organization_id = %s
                 """,
-                    update_values + [alias_id],
+                    update_values + [alias_id, alias_id, alias_org_id],
                 )
 
                 if cursor.rowcount > 0:
@@ -345,6 +409,7 @@ async def edit_alias(request: Request):
 @require_api_key("write")
 async def delete_alias(request: Request):
     """Delete alias(es)"""
+    ctx = request.state.auth_context
     data = await request.json()
 
     if not data or not isinstance(data, list):
@@ -362,20 +427,38 @@ async def delete_alias(request: Request):
         )
 
     try:
-        cursor = conn.cursor()
+        cursor = conn.cursor(dictionary=True)
         results = []
 
         for alias_id in data:
-            # Get alias info before deletion
+            # Get alias info before deletion -- also verifies ownership.
+            # Previously matched by id/source alone with no org check at
+            # all, so any tenant could delete another org's alias.
             cursor.execute(
-                "SELECT source FROM aliases WHERE id = %s OR source = %s", (alias_id, alias_id)
+                "SELECT source, organization_id FROM aliases WHERE id = %s OR source = %s",
+                (alias_id, alias_id),
             )
             alias_info = cursor.fetchone()
 
-            cursor.execute("DELETE FROM aliases WHERE id = %s OR source = %s", (alias_id, alias_id))
+            # Platform scope may delete any org's alias (ADR-002 SS8);
+            # organization scope only its own.
+            if not alias_info or (
+                ctx["scope"] == "organization"
+                and alias_info["organization_id"] != ctx["organization_id"]
+            ):
+                results.append(
+                    {"alias": alias_id, "status": "error", "msg": f"Alias {alias_id} not found"}
+                )
+                continue
+
+            cursor.execute(
+                "DELETE FROM aliases WHERE (id = %s OR source = %s) AND organization_id = %s",
+                # Re-pin to the row's own org (see edit_alias).
+                (alias_id, alias_id, alias_info["organization_id"]),
+            )
 
             if cursor.rowcount > 0:
-                address = alias_info[0] if alias_info else alias_id
+                address = alias_info["source"] if alias_info else alias_id
                 dispatch_event(
                     Events.ALIAS_DELETED,
                     data={"alias_id": alias_id, "source": address},
@@ -411,8 +494,9 @@ async def delete_alias(request: Request):
     description="Retrieve aggregate alias statistics for a domain, including total/active/inactive counts, top 10 forwarding destinations by usage, and daily forwarding volume over the last 30 days.",
 )
 @require_api_key("read")
-async def get_alias_stats(domain: str):
+async def get_alias_stats(domain: str, request: Request):
     """Get alias statistics for a domain"""
+    ctx = request.state.auth_context
     conn = get_db_connection()
     if not conn:
         return JSONResponse(
@@ -422,8 +506,16 @@ async def get_alias_stats(domain: str):
     try:
         cursor = conn.cursor(dictionary=True)
 
-        # Look up domain_id from domain name
-        cursor.execute("SELECT id FROM domains WHERE domain = %s", (domain,))
+        # Look up domain_id from domain name, scoped to the caller's org --
+        # previously matched by domain name alone, so any tenant could pull
+        # alias stats for a domain owned by a different organization.
+        # org_filter() degrades to "1=1" for platform scope, which reads any
+        # org's stats by design (ADR-002 SS8).
+        org_sql, org_params = org_filter(ctx)
+        cursor.execute(
+            f"SELECT id FROM domains WHERE domain = %s AND {org_sql}",
+            tuple([domain] + org_params),
+        )
         domain_row = cursor.fetchone()
         if not domain_row:
             return JSONResponse(
@@ -463,23 +555,30 @@ async def get_alias_stats(domain: str):
 
         top_destinations = cursor.fetchall()
 
-        # Get monthly forwarding volume
-        cursor.execute(
-            """
-            SELECT
-                DATE(mf.created_at) as date,
-                COUNT(*) as forwards_count
-            FROM message_forwards mf
-            JOIN aliases a ON mf.alias_address = a.source
-            WHERE a.domain_id = %s
-            AND mf.created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
-            GROUP BY DATE(mf.created_at)
-            ORDER BY date DESC
-        """,
-            (domain_id,),
-        )
-
-        monthly_volume = cursor.fetchall()
+        # Get monthly forwarding volume. Best-effort -- see the same
+        # message_forwards note in get_aliases() above: the table is
+        # referenced but never created by any migration.
+        try:
+            cursor.execute(
+                """
+                SELECT
+                    DATE(mf.created_at) as date,
+                    COUNT(*) as forwards_count
+                FROM message_forwards mf
+                JOIN aliases a ON mf.alias_address = a.source
+                WHERE a.domain_id = %s
+                AND mf.created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)
+                GROUP BY DATE(mf.created_at)
+                ORDER BY date DESC
+            """,
+                (domain_id,),
+            )
+            monthly_volume = cursor.fetchall()
+        except Exception as volume_exc:
+            logger.warning(
+                f"Monthly forwarding volume unavailable for domain {domain}: {volume_exc}"
+            )
+            monthly_volume = []
 
         stats = {
             "basic_stats": basic_stats,
@@ -509,6 +608,7 @@ async def get_alias_stats(domain: str):
 @require_api_key("write")
 async def add_bulk_aliases(request: Request):
     """Add multiple aliases in bulk"""
+    ctx = request.state.auth_context
     data = await request.json()
 
     if not data or "aliases" not in data or not isinstance(data["aliases"], list):
@@ -554,8 +654,19 @@ async def add_bulk_aliases(request: Request):
                     error_count += 1
                     continue
 
-                # Look up domain_id
-                cursor.execute("SELECT id FROM domains WHERE domain = %s AND active = 1", (domain,))
+                # Look up domain_id, scoped to the caller's org -- previously
+                # matched by domain name alone, so any tenant could bulk-add
+                # aliases on a domain owned by a different organization.
+                # Platform scope drops the filter (ADR-002 SS8) and takes each
+                # alias's org from the domain it lands on.
+                domain_sql = (
+                    "SELECT id, organization_id FROM domains WHERE domain = %s AND active = 1"
+                )
+                domain_params = [domain]
+                if ctx["scope"] == "organization":
+                    domain_sql += " AND organization_id = %s"
+                    domain_params.append(ctx["organization_id"])
+                cursor.execute(domain_sql, tuple(domain_params))
                 domain_row = cursor.fetchone()
                 if not domain_row:
                     results.append(
@@ -578,18 +689,30 @@ async def add_bulk_aliases(request: Request):
                     continue
 
                 # Insert alias
-                org_id = getattr(request.state, "organization_id", None) or "default"
+                try:
+                    from shared.ulid_utils import generate_ulid
+
+                    bulk_alias_id = generate_ulid()
+                except ImportError:
+                    import uuid
+
+                    bulk_alias_id = str(uuid.uuid4()).replace("-", "")[:26]
                 cursor.execute(
                     """
+                    -- `id` was missing from the column list while its value
+                    -- was still supplied: 7 columns, 8 placeholders, so every
+                    -- bulk alias insert raised. aliases.id is CHAR(26) with no
+                    -- DB-side default (009_ulid_safe.sql), so it must be named.
                     INSERT INTO aliases (
-                        source, destination, domain_id, organization_id, active, created_at, updated_at
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        id, source, destination, domain_id, organization_id, active, created_at, updated_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                     (
+                        bulk_alias_id,
                         address,
                         goto,
                         domain_row[0],
-                        org_id,
+                        domain_row[1],
                         alias_data.get("active", 1),
                         datetime.now(),
                         datetime.now(),
