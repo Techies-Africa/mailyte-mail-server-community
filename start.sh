@@ -59,16 +59,24 @@ check_docker() {
 }
 
 # Which compose command to use
+# --profile console on every wrapper: the console is declared behind a profile
+# until its image is published, but PRD §9 requires it to behave like any other
+# service here -- start with the stack, appear in ps/logs/health, stop with
+# `down`. Passing the profile centrally is what makes that true without every
+# call site remembering. Naming a profile no service uses is a no-op, so this
+# needs no change once the gate is removed.
+CONSOLE_PROFILE="--profile console"
+
 compose_cmd() {
-    docker compose -f "$COMPOSE_MAIN" "$@"
+    docker compose -f "$COMPOSE_MAIN" $CONSOLE_PROFILE "$@"
 }
 
 compose_dev_cmd() {
-    docker compose -f "$COMPOSE_MAIN" -f "$COMPOSE_DEV" "$@"
+    docker compose -f "$COMPOSE_MAIN" -f "$COMPOSE_DEV" $CONSOLE_PROFILE "$@"
 }
 
 compose_prod_cmd() {
-    docker compose -f "$COMPOSE_MAIN" -f "$COMPOSE_PROD" "$@"
+    docker compose -f "$COMPOSE_MAIN" -f "$COMPOSE_PROD" $CONSOLE_PROFILE "$@"
 }
 
 compose_cloud_cmd() {
@@ -82,7 +90,11 @@ compose_cloud_prod_cmd() {
 # ---------------------------------------------------------------------------
 # Service tiers — essential vs optional
 # ---------------------------------------------------------------------------
-ESSENTIAL_SERVICES="redis mysql rspamd postfix dovecot api"
+# The console is essential, not optional (PRD §9 shipping model): it is how a
+# self-hoster administers the server, and first boot lands on its
+# operator-bootstrap screen. That IS the CE onboarding. Starts last because it
+# depends_on api being healthy.
+ESSENTIAL_SERVICES="redis mysql rspamd postfix dovecot api console"
 WORKER_SERVICES="webhooks tracking rate_limiter"
 OPTIONAL_SERVICES="cert_manager autoconfig templates"
 
@@ -247,6 +259,22 @@ do_first_time_setup() {
     press_enter
 }
 
+# The console ships as a published image, so unlike every other service here
+# it can fail for a reason unrelated to this host: the image is not in the
+# registry yet. That must not take the mail server down with it -- a running
+# server with no console is recoverable; a start.sh that aborts at stage 5
+# looks like the whole stack is broken.
+start_console() {
+    if compose_cmd up -d console 2>/dev/null; then
+        print_success "Console started — http://127.0.0.1:${CONSOLE_PORT:-3100}"
+        print_info  "First run: create the owner account with the bootstrap token"
+        print_info  "  ./start.sh console-token"
+    else
+        print_warn "Console did not start (image mailyte/console not published yet?)"
+        print_info "The mail server is unaffected."
+    fi
+}
+
 do_start_essential() {
     ensure_setup
     print_header "Starting Essential Services"
@@ -292,6 +320,9 @@ do_start_essential() {
     print_info "Stage 4: API..."
     compose_cmd up -d api
     sleep 2
+
+    print_info "Stage 5: Console..."
+    start_console
 
     echo ""
     print_success "Essential services started"
