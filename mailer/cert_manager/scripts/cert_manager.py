@@ -75,8 +75,9 @@ class CertificateManager:
         self.sni_config_path = os.getenv("SNI_CONFIG_PATH", "/etc/ssl/sni")
 
         # Optional: send SIGHUP to Postfix/Dovecot containers after cert changes
-        # Requires Docker socket mounted at /var/run/docker.sock
+        # Reloads go through docker-proxy, never a mounted docker.sock (C1)
         self.docker_reload_enabled = os.getenv("DOCKER_RELOAD_ENABLED", "false").lower() == "true"
+        self.docker_proxy_url = os.getenv("DOCKER_PROXY_URL", "http://docker-proxy:2375")
         self.postfix_container = os.getenv("POSTFIX_CONTAINER", "postfix")
         self.dovecot_container = os.getenv("DOVECOT_CONTAINER", "dovecot")
 
@@ -551,29 +552,36 @@ class CertificateManager:
         Postfix reloads tls_server_sni_maps on SIGHUP without dropping connections.
         Dovecot reloads ssl_cert/local_name blocks on SIGHUP.
 
-        Requires Docker socket mounted at /var/run/docker.sock in cert_manager container
-        and DOCKER_RELOAD_ENABLED=true.
+        Requires DOCKER_RELOAD_ENABLED=true. Goes through docker-proxy
+        (tecnativa/docker-socket-proxy, CONTAINERS+POST+ALLOW_RESTARTS only --
+        covers stop/restart/kill, nothing else) rather than a socket mount.
+        A bind-mounted docker.sock's `:ro` flag only stops this container from
+        writing to the *socket file itself*; it does nothing to restrict which
+        Docker API calls a client may make once connected, so the previous
+        mount was full unrestricted Docker API access -- root on the host --
+        while looking safe (C1). The proxy is what actually narrows it.
+
+        The previous implementation also shelled out to a `docker` binary that
+        this image has never installed, so live reload could not have worked
+        even with the socket present: certificates renewed, and postfix and
+        dovecot kept serving the old ones until something restarted them.
         """
         if not self.docker_reload_enabled:
             return
 
-        docker_socket = "/var/run/docker.sock"
-        if not os.path.exists(docker_socket):
-            logger.warning("Docker socket not found — cannot reload services live")
-            return
-
         for container in [self.postfix_container, self.dovecot_container]:
             try:
-                result = subprocess.run(
-                    ["docker", "kill", "--signal=HUP", container],
-                    capture_output=True,
-                    text=True,
+                resp = requests.post(
+                    f"{self.docker_proxy_url}/containers/{container}/kill",
+                    params={"signal": "HUP"},
                     timeout=10,
                 )
-                if result.returncode == 0:
+                if resp.status_code in (200, 204):
                     logger.info(f"Sent SIGHUP to {container} — TLS config reloading")
                 else:
-                    logger.warning(f"Failed to signal {container}: {result.stderr.strip()}")
+                    logger.warning(
+                        f"Failed to signal {container}: HTTP {resp.status_code} {resp.text[:200]}"
+                    )
             except Exception as e:
                 logger.warning(f"Could not signal {container}: {e}")
 
