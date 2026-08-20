@@ -1383,7 +1383,10 @@ async def get_domain_policy(domain: str, request: Request):
         # Get domain policy information
         cursor.execute(
             """
-            SELECT d.domain, d.rl_value, d.rl_frame, d.active,
+            -- rate_limits, not rl_value/rl_frame: those two columns exist on
+            -- no table in this schema, so this query raised "Unknown column
+            -- 'd.rl_value'" and the endpoint 500'd on every call.
+            SELECT d.domain, d.rate_limits, d.active,
                    dp.policy_bl_only, dp.policy_reject_spam,
                    dp.policy_greylist, dp.policy_rbl
             FROM domains d

@@ -556,9 +556,25 @@ _ABSENT_COUNTERS = ("migrations",)
     "degraded (no monitoring container ships with CE) and `migrations` is always degraded "
     "(enterprise capability).",
 )
-async def platform_overview(
+def platform_overview(
     ctx: AuthContext = Depends(require_scope("platform", "read", role="support")),
 ):
+    # Deliberately `def`, not `async def`. Nothing in this body is awaited --
+    # it is a dozen blocking pymysql queries plus, when a monitoring service is
+    # configured, a blocking requests.get. Declared `async`, FastAPI runs it ON
+    # the event loop rather than in a threadpool, so a single overview call
+    # freezes the whole api process for its duration. That matters more here
+    # than it looks: the console polls this every 60s from every page, for the
+    # sidebar badges.
+    #
+    # On a stock CE install _block_services raises immediately (no
+    # MONITORING_SERVICE_URL) so only the DB queries block. But the moment an
+    # operator sets MONITORING_SERVICE_URL -- which _block_services' own
+    # docstring invites -- this becomes a self-deadlock: the heartbeat it calls
+    # health-checks the `api` container, which cannot answer because it is
+    # blocked inside this request, so the call burns its full 8s timeout and
+    # reports `services: null`, blaming a dependency that was answering fine.
+    # That is exactly what happened in the enterprise edition.
     now = datetime.now()
     seven_days_ago = now - timedelta(days=7)
     day_ago = now - timedelta(hours=24)
