@@ -122,6 +122,12 @@ celerybeat.pid
 # Environments
 .env
 .venv
+
+# Generated secrets -- the envelope-encryption KEK (phase-07 C2) that
+# scripts/generate_dkim_kek.sh writes. Never committed; each environment
+# generates its own. This repo is public: a committed KEK next to a leaked
+# database dump is the same as never having encrypted the keys at all.
+/secrets/
 env/
 venv/
 ENV/

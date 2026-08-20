@@ -10,6 +10,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     String,
     Text,
 )
@@ -66,7 +67,14 @@ class DKIMKey(Base):
     id = Column(String(26), primary_key=True, default=generate_ulid)
     domain_id = Column(String(26), ForeignKey("domains.id"), nullable=False)
     selector = Column(String(100), nullable=False, default="default")
-    private_key = Column(Text, nullable=False)
+    # Plaintext, kept only for pre-phase-07 rows until they're rotated
+    # (scripts/generate_dkim.py --rotate-all) -- every row written from
+    # phase-07 onward leaves this NULL and uses the three columns below
+    # instead (C2, migration 0007_encrypt_private_keys).
+    private_key = Column(Text, nullable=True)
+    private_key_ciphertext = Column(LargeBinary, nullable=True)
+    private_key_nonce = Column(LargeBinary(length=12), nullable=True)
+    key_version = Column(Integer, nullable=False, default=1)
     public_key = Column(Text, nullable=False)
     active = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime, nullable=False, default=func.now())

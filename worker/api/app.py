@@ -1,5 +1,15 @@
 import os
 import sys
+
+# Fail closed on missing/weak secrets (phase-07 C3) -- deliberately the very
+# first thing this process does, before any other import that might touch the
+# database or a secret-derived value. Only the subset this container actually
+# receives is checked; see startup_checks.API_SECRETS for which and why.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from startup_checks import API_SECRETS, verify_secrets
+
+verify_secrets(required=API_SECRETS)
+
 from pathlib import Path
 
 import uvicorn

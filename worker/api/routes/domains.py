@@ -55,6 +55,7 @@ from database.models.core import Domain, EmailAccount, Organization
 
 project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
+from shared.envelope_encryption import encrypt_private_key
 from shared.webhook_dispatcher import Events, dispatch_event
 
 # ---------------------------------------------------------------------------
@@ -472,10 +473,18 @@ async def create_domain(request: Request):
                 private_pem, public_b64 = generate_dkim_keypair()
                 selector = domain.dkim_selector or "default"
 
+                # private_key stays NULL -- only the encrypted columns are
+                # written (phase-07 C2). private_pem lives in memory only
+                # long enough to encrypt it here, and is never logged or
+                # returned in the response below.
+                encrypted = encrypt_private_key(private_pem)
                 dkim_key = DKIMKey(
                     domain_id=domain.id,
                     selector=selector,
-                    private_key=private_pem,
+                    private_key=None,
+                    private_key_ciphertext=encrypted.ciphertext,
+                    private_key_nonce=encrypted.nonce,
+                    key_version=encrypted.key_version,
                     public_key=public_b64,
                     active=True,
                 )
