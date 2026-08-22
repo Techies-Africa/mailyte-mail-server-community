@@ -270,7 +270,7 @@ start_console() {
         print_info  "First run: create the owner account with the bootstrap token"
         print_info  "  ./start.sh console-token"
     else
-        print_warn "Console did not start (image mailyte/console not published yet?)"
+        print_warn "Console did not start (image ghcr.io/techies-africa/mailyte-console not published yet?)"
         print_info "The mail server is unaffected."
     fi
 }

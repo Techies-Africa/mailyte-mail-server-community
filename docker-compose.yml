@@ -867,11 +867,11 @@ services:
   #   4. healthcheck probe     3100
   # ========================================================================
   console:
-    image: mailyte/console:${CONSOLE_VERSION:-latest}
+    image: ghcr.io/techies-africa/mailyte-console:${CONSOLE_VERSION:-latest}
     container_name: console
     # Opt-in until the image is published. Without this, a plain
     # `docker compose up` fails the WHOLE stack for every existing CE user the
-    # moment this file merges, because mailyte/console cannot be pulled yet --
+    # moment this file merges, because ghcr.io/techies-africa/mailyte-console cannot be pulled yet --
     # a mail server that stops booting is a far worse outcome than a console
     # that has to be asked for. Start it with:
     #     docker compose --profile console up -d console
