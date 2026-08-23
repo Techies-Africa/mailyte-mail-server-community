@@ -1,0 +1,14 @@
+[Unit]
+Description=Nightly Mailyte full backup
+
+[Timer]
+# 02:30 local time. Change with `systemctl edit mailyte-backup-full.timer`.
+OnCalendar=*-*-* 02:30:00
+# A machine that was off at 02:30 still gets its backup when it comes back,
+# rather than silently skipping a day.
+Persistent=true
+AccuracySec=1min
+Unit=mailyte-backup-full.service
+
+[Install]
+WantedBy=timers.target

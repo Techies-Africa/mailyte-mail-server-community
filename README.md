@@ -109,6 +109,26 @@ print('Mailbox created: user@test.local / testpass123')
 "
 ```
 
+## Set Up Backups
+
+**Do this before you put real mail on the server.** One command:
+
+```bash
+sudo ./deployment/systemd/install-timers.sh
+```
+
+That enables a nightly full backup and an hourly incremental, to local disk, via
+systemd timers. `scripts/backup.sh` has always existed — this is what actually
+runs it.
+
+Local backups protect you from a bad migration or a mistaken deletion. They do
+**not** survive losing the machine: for that, add an S3-compatible bucket (four
+values in `.env`). Both, plus how to test a restore before you need one, are in
+[docs/operations/backups.md](docs/operations/backups.md).
+
+> Backups contain your DKIM private keys and `.env`. Keep them at mode 700, and
+> encrypt them before putting them anywhere shared.
+
 ## Logging In
 
 ### Roundcube Webmail

@@ -1,0 +1,30 @@
+[Unit]
+Description=Mailyte full backup (MySQL, mail storage, DKIM, SSL, config)
+Documentation=file://__MAILYTE_ROOT__/docs/operations/backups.md
+# The backup execs into the mysql and redis containers, so it is pointless
+# before Docker is up and actively harmful during shutdown.
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+# __MAILYTE_USER__ and __MAILYTE_ROOT__ are substituted by install-timers.sh.
+# They are baked in rather than read from an EnvironmentFile because systemd
+# does not expand variables in WorkingDirectory or User -- a unit that looked
+# parameterised but silently ran from / would be worse than a literal path.
+User=__MAILYTE_USER__
+WorkingDirectory=__MAILYTE_ROOT__
+ExecStart=/bin/bash __MAILYTE_ROOT__/scripts/backup.sh --full
+
+# Niced so the backup never competes with Postfix or Dovecot for CPU. On a
+# self-hosted install that is usually the same small VPS.
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=6h
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mailyte-backup
+
+[Install]
+WantedBy=multi-user.target

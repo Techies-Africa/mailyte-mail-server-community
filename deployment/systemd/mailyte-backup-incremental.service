@@ -1,0 +1,24 @@
+[Unit]
+Description=Mailyte incremental backup (MySQL binlog + new mail)
+Documentation=file://__MAILYTE_ROOT__/docs/operations/backups.md
+After=docker.service network-online.target
+Requires=docker.service
+# Never run alongside a full backup: both drive mysqldump --flush-logs and
+# would fight over the same binlog position file.
+Conflicts=mailyte-backup-full.service
+
+[Service]
+Type=oneshot
+User=__MAILYTE_USER__
+WorkingDirectory=__MAILYTE_ROOT__
+ExecStart=/bin/bash __MAILYTE_ROOT__/scripts/backup.sh --incremental
+Nice=10
+IOSchedulingClass=idle
+# Must finish well inside its own hourly period.
+TimeoutStartSec=45min
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mailyte-backup
+
+[Install]
+WantedBy=multi-user.target
