@@ -224,7 +224,11 @@ ALTER TABLE dkim_keys ADD CONSTRAINT fk_dkim_domain FOREIGN KEY (domain_id) REFE
 -- Step 6: Clean up
 DROP FUNCTION IF EXISTS generate_ulid_backfill;
 
--- Update alembic version
-UPDATE alembic_version SET version_num = '009_ulid_primary_keys' WHERE version_num IS NOT NULL;
+-- Update alembic version.
+-- version_num is the PRIMARY KEY, and the UPDATE chain is broken upstream (002 never
+-- sets its version), so multiple rows accumulate and updating them all to the same
+-- value trips a duplicate-key error. Reset to exactly one row instead.
+DELETE FROM alembic_version;
+INSERT INTO alembic_version (version_num) VALUES ('009_ulid_primary_keys');
 
 SELECT 'ULID migration complete' AS status;

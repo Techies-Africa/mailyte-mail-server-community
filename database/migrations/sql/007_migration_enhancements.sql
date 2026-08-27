@@ -5,26 +5,31 @@
 -- Depends on: 005_phase3_scalability.sql (migration_jobs table)
 -- =============================================================================
 
--- Add new columns to migration_jobs for export support and tracking
+-- Add new columns to migration_jobs for export support and tracking.
+--
+-- Three deviations from the original, all forced by 005's actual table shape:
+--   * No `IF NOT EXISTS` — that is MariaDB syntax; MySQL rejects it (ERROR 1064).
+--   * No `AFTER <col>` clauses — column order is cosmetic, and two of the original
+--     anchors (source_password, is_delta) do not exist in 005's migration_jobs.
+--   * started_at / completed_at are not added here — 005 already defines them, so
+--     re-adding them raises a duplicate-column error.
 ALTER TABLE migration_jobs
-    ADD COLUMN IF NOT EXISTS direction VARCHAR(10) NOT NULL DEFAULT 'import' AFTER status,
-    ADD COLUMN IF NOT EXISTS target_host VARCHAR(255) AFTER source_password,
-    ADD COLUMN IF NOT EXISTS target_port INT DEFAULT 993 AFTER target_host,
-    ADD COLUMN IF NOT EXISTS target_ssl TINYINT(1) DEFAULT 1 AFTER target_port,
-    ADD COLUMN IF NOT EXISTS is_retry TINYINT(1) NOT NULL DEFAULT 0 AFTER is_delta,
-    ADD COLUMN IF NOT EXISTS parent_job_id VARCHAR(36) AFTER is_retry,
-    ADD COLUMN IF NOT EXISTS webhook_url VARCHAR(500) AFTER last_uid,
-    ADD COLUMN IF NOT EXISTS started_at DATETIME AFTER webhook_url,
-    ADD COLUMN IF NOT EXISTS completed_at DATETIME AFTER started_at;
+    ADD COLUMN direction VARCHAR(10) NOT NULL DEFAULT 'import',
+    ADD COLUMN target_host VARCHAR(255),
+    ADD COLUMN target_port INT DEFAULT 993,
+    ADD COLUMN target_ssl TINYINT(1) DEFAULT 1,
+    ADD COLUMN is_retry TINYINT(1) NOT NULL DEFAULT 0,
+    ADD COLUMN parent_job_id VARCHAR(36),
+    ADD COLUMN webhook_url VARCHAR(500);
 
 -- Add indexes for new columns
-CREATE INDEX IF NOT EXISTS idx_direction ON migration_jobs (direction);
-CREATE INDEX IF NOT EXISTS idx_parent ON migration_jobs (parent_job_id);
+CREATE INDEX idx_direction ON migration_jobs (direction);
+CREATE INDEX idx_parent ON migration_jobs (parent_job_id);
 
 -- Structured error log — one row per failed message (replaces text blob)
 CREATE TABLE IF NOT EXISTS migration_errors (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
-    job_id VARCHAR(36) NOT NULL,
+    job_id VARCHAR(100) NOT NULL,  -- must match migration_jobs.job_id VARCHAR(100) in 005
     folder VARCHAR(255) NOT NULL,
     message_uid VARCHAR(100) DEFAULT '',
     message_id VARCHAR(500) DEFAULT '',
@@ -36,7 +41,7 @@ CREATE TABLE IF NOT EXISTS migration_errors (
     INDEX idx_job (job_id),
     INDEX idx_job_retryable (job_id, retryable, retried),
     FOREIGN KEY (job_id) REFERENCES migration_jobs(job_id) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- Update alembic version
 UPDATE alembic_version SET version_num = '007_migration_enhancements'
