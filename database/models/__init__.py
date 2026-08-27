@@ -14,7 +14,7 @@ Base = declarative_base()
 # Import all models to make them available
 from .authentication import APIKey, UserSession
 from .certificates import DKIMKey, SSLCertificate
-from .core import Alias, Domain, EmailAccount, Organization, SmtpCredential
+from .core import Alias, Domain, EmailAccount, Organization, SmtpCredential, SmtpCredentialEvent
 from .enums import (
     AccountStatus,
     AlertLevel,
@@ -38,6 +38,7 @@ __all__ = [
     "EmailAccount",
     "Alias",
     "SmtpCredential",
+    "SmtpCredentialEvent",
     # Mail processing models
     "MailQueue",
     "MailLog",

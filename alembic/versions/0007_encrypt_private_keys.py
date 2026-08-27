@@ -63,10 +63,29 @@ _KEY_TABLES = ('dkim_keys', 'pgp_keys', 'smime_certs')
 
 
 def upgrade() -> None:
+    # Existence-guarded: 0001_baseline was regenerated AFTER this work and
+    # already carries these columns, so a FRESH database replaying the chain
+    # hit error 1060 here and could never initialize (found while applying
+    # 0010, 00-PRD-smtp-api-keys K6 -- the chain had already been unable to
+    # reach this point before the 0003 FK fix, which is why nobody saw it).
+    # An OLD database upgrading through this revision still gets the
+    # columns added exactly as before.
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    all_tables = set(inspector.get_table_names())
     for table in _KEY_TABLES:
-        op.add_column(table, sa.Column('private_key_ciphertext', sa.LargeBinary(), nullable=True))
-        op.add_column(table, sa.Column('private_key_nonce', sa.LargeBinary(length=12), nullable=True))
-        op.add_column(table, sa.Column('key_version', sa.Integer(), nullable=False, server_default=sa.text('1')))
+        # pgp_keys/smime_certs have no CE writer AND no CE table -- the
+        # baseline never created them, so the original unguarded
+        # add_column also died with 1146 on any fresh database.
+        if table not in all_tables:
+            continue
+        existing = {c['name'] for c in inspector.get_columns(table)}
+        if 'private_key_ciphertext' not in existing:
+            op.add_column(table, sa.Column('private_key_ciphertext', sa.LargeBinary(), nullable=True))
+        if 'private_key_nonce' not in existing:
+            op.add_column(table, sa.Column('private_key_nonce', sa.LargeBinary(length=12), nullable=True))
+        if 'key_version' not in existing:
+            op.add_column(table, sa.Column('key_version', sa.Integer(), nullable=False, server_default=sa.text('1')))
 
     # dkim_keys.private_key was NOT NULL -- every new row from this point on
     # writes only the encrypted columns above, so the plaintext column must
@@ -84,7 +103,13 @@ def downgrade() -> None:
     # absence does. Re-run scripts/generate_dkim.py afterwards.
     op.execute("DELETE FROM dkim_keys WHERE private_key IS NULL")
     op.alter_column('dkim_keys', 'private_key', existing_type=sa.Text(), nullable=False)
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    all_tables = set(inspector.get_table_names())
     for table in _KEY_TABLES:
-        op.drop_column(table, 'key_version')
-        op.drop_column(table, 'private_key_nonce')
-        op.drop_column(table, 'private_key_ciphertext')
+        if table not in all_tables:  # see upgrade(): pgp/smime never exist on CE
+            continue
+        existing = {c['name'] for c in inspector.get_columns(table)}
+        for column in ('key_version', 'private_key_nonce', 'private_key_ciphertext'):
+            if column in existing:
+                op.drop_column(table, column)

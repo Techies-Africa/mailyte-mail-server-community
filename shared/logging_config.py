@@ -300,6 +300,15 @@ class LogTimer:
 
         if hasattr(self.logger, "log_performance"):
             self.logger.log_performance(self.operation_name, duration=duration, **self.kwargs)
+        elif callable(self.logger) and not hasattr(self.logger, "info"):
+            # get_performance_logger()'s second return value is the bound
+            # log_performance function itself -- exactly what every service
+            # passes here. Before this branch existed, __exit__ fell through
+            # to .info() on the function and raised AttributeError AFTER the
+            # timed body succeeded, which the callers' outer try/except then
+            # reported as the operation failing (rate_limiter fail-open on
+            # every check was the visible symptom).
+            self.logger(self.operation_name, duration=duration, **self.kwargs)
         else:
             # Fallback for regular loggers
             self.logger.info(f"{self.operation_name} completed in {duration:.3f}s")

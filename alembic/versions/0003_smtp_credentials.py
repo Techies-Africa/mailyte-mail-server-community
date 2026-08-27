@@ -37,8 +37,18 @@ def upgrade() -> None:
     op.create_table(
         'smtp_credentials',
         sa.Column('id', sa.CHAR(26, collation='utf8mb4_unicode_ci'), primary_key=True),
-        sa.Column('organization_id', sa.CHAR(26, collation='utf8mb4_unicode_ci'), sa.ForeignKey('organizations.id'), nullable=False, index=True),
-        sa.Column('domain_id', sa.CHAR(26, collation='utf8mb4_unicode_ci'), sa.ForeignKey('domains.id'), nullable=False, index=True),
+        # FK columns match CE's REAL parent types (organizations.id is
+        # VARCHAR(100), domains.id is INT -- CE never had EE's ULID
+        # conversion). As originally written, both were CHAR(26) copied from
+        # EE's 0008, which MySQL rejects with error 3780 on every fresh CE
+        # database -- meaning this migration could never have applied
+        # anywhere this repo's own chain produced, which is also why the
+        # mismatch went unnoticed until 0010 (00-PRD-smtp-api-keys K6)
+        # replayed the chain from scratch. Fixed in place rather than
+        # tombstoned: nothing later in the chain can run while this hard
+        # fails, so no deployment can legitimately have it recorded.
+        sa.Column('organization_id', sa.String(100, collation='utf8mb4_unicode_ci'), sa.ForeignKey('organizations.id'), nullable=False, index=True),
+        sa.Column('domain_id', sa.Integer(), sa.ForeignKey('domains.id'), nullable=False, index=True),
         sa.Column('username', sa.String(255, collation='utf8mb4_unicode_ci'), nullable=False, unique=True, index=True),
         sa.Column('password', sa.String(255, collation='utf8mb4_unicode_ci'), nullable=False),
         sa.Column('allowed_ips', sa.JSON(), nullable=True),

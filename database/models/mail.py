@@ -75,8 +75,13 @@ class MailLog(Base):
     # Additional fields for analytics
     bounce_reason = Column(Text, nullable=True)
     spam_score = Column(Float, nullable=True)
+    # Authenticated SASL identity from the smtpd client= line (0011) -- what
+    # ties a delivery to the SMTP API key that sent it. NULL for inbound and
+    # for pre-0011 rows.
+    sasl_username = Column(String(255), nullable=True)
 
     __table_args__ = (
         Index("idx_mail_logs_time_status", "timestamp", "status"),
         Index("idx_mail_logs_sender_time", "sender", "timestamp"),
+        Index("idx_mail_logs_sasl_time", "sasl_username", "timestamp"),
     )

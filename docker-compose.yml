@@ -239,6 +239,10 @@ services:
        - DB_NAME=${DB_NAME:-mailserver}
        - DB_USER=${DB_USER:-mailuser}
        - DB_PASSWORD=${DB_PASSWORD:-mailpassword}
+       # Authenticates the doveadm HTTP listener (port 24180, internal
+       # network only) that the api service flushes the auth cache through
+       # when an SMTP API key changes (00-PRD-smtp-api-keys K6).
+       - DOVEADM_API_KEY=${DOVEADM_API_KEY:-}
        - REDIS_HOST=redis
        - REDIS_PORT=6379
      volumes:
@@ -403,6 +407,11 @@ services:
        - DB_PASSWORD=${DB_PASSWORD:-mailpassword}
        - REDIS_HOST=redis
        - REDIS_PORT=6379
+       # doveadm HTTP API (SMTP API keys K6): revoking/rotating/updating a
+       # credential must flush Dovecot's auth cache or the old state keeps
+       # authenticating for up to auth_cache_ttl (1h). Internal network only.
+       - DOVEADM_URL=http://dovecot:24180
+       - DOVEADM_API_KEY=${DOVEADM_API_KEY:-}
        - ADMIN_PASSWORD=${ADMIN_PASSWORD:-adminpass}
        - ADMIN_TOKEN_SECRET=${ADMIN_TOKEN_SECRET:-tokensecret}
        - FLASK_ENV=${FLASK_ENV:-development}
@@ -499,6 +508,54 @@ services:
          condition: service_completed_successfully
        redis:
          condition: service_healthy
+     networks:
+       - mailserver_network
+     restart: unless-stopped
+
+  # Postfix log ingestor -- the producer for mail_logs and the SMTP API
+  # keys' usage attribution (00-PRD-smtp-api-keys K6, parity of EE K2).
+  # Without it the per-key usage endpoint answers honest zeros and
+  # last_used_at stays NULL.
+  log_ingestor:
+     build:
+       context: .
+       dockerfile: ./mailer/log_ingestor/Dockerfile
+     container_name: log_ingestor
+     environment:
+       - DB_HOST=mysql
+       - DB_PORT=3306
+       - DB_NAME=${DB_NAME:-mailserver}
+       - DB_USER=${DB_USER:-mailuser}
+       - DB_PASSWORD=${DB_PASSWORD:-mailpassword}
+       # The dispatcher reads WEBHOOK_URL (singular). The .env key is
+       # WEBHOOK_URLS (plural), so it has to be mapped across explicitly or the
+       # dispatcher silently no-ops on an unset variable.
+       - WEBHOOK_URL=${WEBHOOK_URLS:-}
+       - WEBHOOK_SECRET=${WEBHOOK_SECRET:-}
+       - SERVICE_NAME=log_ingestor
+       # SMTP API keys: auto-suspension of abusive keys. OFF by default
+       # until the thresholds have been observed against real traffic
+       # (00-PRD-smtp-api-keys section 8); the doveadm pair makes a
+       # suspension effective immediately instead of after the auth-cache
+       # TTL, same mechanism the api service uses.
+       - AUTO_SUSPEND_ENABLED=${AUTO_SUSPEND_ENABLED:-false}
+       - DOVEADM_URL=http://dovecot:24180
+       - DOVEADM_API_KEY=${DOVEADM_API_KEY:-}
+       - POSTFIX_LOG_PATH=/var/log/postfix/mail.log
+       - INGESTOR_STATE_PATH=/var/lib/log_ingestor/state
+       - LOG_LEVEL=${LOG_LEVEL:-INFO}
+     volumes:
+       # Read-only: postfix owns this file, we only follow it.
+       - ./logs/mailer/postfix:/var/log/postfix:ro
+       - log_ingestor_state:/var/lib/log_ingestor
+     healthcheck:
+       test: ["CMD-SHELL", "python3 -c \"import os,sys,time; p=os.getenv('INGESTOR_STATE_PATH','/var/lib/log_ingestor/state'); sys.exit(0)\""]
+       interval: 30s
+       timeout: 10s
+       retries: 3
+       start_period: 15s
+     depends_on:
+       - mysql
      networks:
        - mailserver_network
      restart: unless-stopped
@@ -924,6 +981,8 @@ services:
 
 volumes:
   mysql_data:
+    driver: local
+  log_ingestor_state:
     driver: local
   redis_data:
     driver: local

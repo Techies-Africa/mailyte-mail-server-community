@@ -4,6 +4,30 @@ connect = host=${DB_HOST} port=${DB_PORT} dbname=${DB_NAME} user=${DB_USER} pass
 default_pass_scheme = BLF-CRYPT
 
 # SMTP-only credential, distinct from a mailbox password. This passdb is
-# only reached via the `protocol smtp { passdb { ... } }` block in
-# dovecot.conf -- IMAP/POP3 auth never queries this table.
-password_query = SELECT username as user, password FROM smtp_credentials WHERE username='%u' AND active = 1
+# only reached via the `protocol smtp { passdb { ... skip = notfound } }`
+# block in dovecot.conf -- IMAP/POP3 auth never queries this table.
+#
+# Enforcement happens IN this query (00-PRD-smtp-api-keys K1):
+#
+# * active + expires_at -- a revoked or expired key gets no row back.
+#   Successful results still land in Dovecot's auth cache (a `nocache`
+#   extra field is NOT honoured on 2.3.16 -- verified live), so every
+#   auth-affecting mutation in the API also flushes the cache for the
+#   username through the doveadm HTTP listener; see service doveadm in
+#   dovecot.conf. Worst case with the flush unavailable: auth_cache_ttl.
+# * allow_nets -- Dovecot's own per-user IP allowlist (CIDR-capable),
+#   checked on every AUTH attempt against the client IP Postfix forwards
+#   in the SASL handshake -- cached results included. Emitted only when
+#   the key's allowlist is enabled AND non-empty: an enabled empty list
+#   would deny every network, and the API already rejects that state --
+#   the JSON_LENGTH guard keeps a bad row from locking anyone out. The
+#   REPLACE chain turns the JSON array ["1.2.3.4", "10.0.0.0/8"] into the
+#   comma list allow_nets expects; entries are API-validated IP literals,
+#   so none can contain the stripped characters.
+password_query = SELECT username AS user, password, \
+  IF(ip_allowlist_enabled = 1 AND JSON_LENGTH(allowed_ips) > 0, \
+     REPLACE(REPLACE(REPLACE(REPLACE(CAST(allowed_ips AS CHAR), '[', ''), ']', ''), '"', ''), ' ', ''), \
+     NULL) AS allow_nets \
+  FROM smtp_credentials \
+  WHERE username = '%u' AND active = 1 \
+    AND (expires_at IS NULL OR expires_at > UTC_TIMESTAMP())

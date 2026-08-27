@@ -400,6 +400,60 @@ class RateLimitConfigService:
             description=f"Default {entity_type} {direction} limits",
         )
 
+    def get_smtp_credential(self, username: str) -> dict | None:
+        """
+        Resolve an SMTP API-key identity (a SASL username with no '@') to its
+        org, domain and per-key limits (00-PRD-smtp-api-keys K2/K6).
+
+        Cached for 60s: the policy service asks once per RCPT, and a
+        revoked/limits-changed key tolerates a minute of staleness here
+        because authentication itself is enforced (and cache-flushed) at the
+        Dovecot layer -- this lookup only shapes rate limiting.
+
+        Returns None when the username is unknown -- callers treat that as
+        fail-closed for an authenticated identity, per the PRD: unknown
+        authenticated sender != infrastructure error.
+        """
+        cache_key = f"smtp_credential:{username}"
+        if self.redis_client:
+            try:
+                cached = self.redis_client.get(cache_key)
+                if cached:
+                    data = json.loads(cached)
+                    return data if data else None  # {} caches a miss
+            except Exception as e:
+                logger.warning(f"Cache read failed for {cache_key}: {e}")
+
+        if not self.db_pool:
+            raise RuntimeError("database not available")
+
+        conn = self.db_pool.get_connection()
+        try:
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute(
+                """
+                SELECT sc.username, sc.organization_id, d.domain,
+                       sc.hourly_limit, sc.daily_limit, sc.active
+                FROM smtp_credentials sc
+                JOIN domains d ON d.id = sc.domain_id
+                WHERE sc.username = %s
+                LIMIT 1
+                """,
+                (username,),
+            )
+            row = cursor.fetchone()
+            cursor.close()
+        finally:
+            conn.close()
+
+        if self.redis_client:
+            try:
+                self.redis_client.setex(cache_key, 60, json.dumps(row or {}, default=str))
+            except Exception as e:
+                logger.warning(f"Cache write failed for {cache_key}: {e}")
+
+        return row
+
     def create_rate_limit_rule(self, rule: RateLimitRule) -> bool:
         """
         Create or update rate limit rule in the appropriate table.
@@ -853,6 +907,60 @@ class RateLimitConfigService:
         # Fallback to using domain as organization ID
         logger.debug(f"Using domain {domain} as organization ID (fallback)")
         return domain
+
+    def get_smtp_credential(self, username: str) -> dict | None:
+        """
+        Resolve an SMTP API-key identity (a SASL username with no '@') to its
+        org, domain and per-key limits (00-PRD-smtp-api-keys K2/K6).
+
+        Cached for 60s: the policy service asks once per RCPT, and a
+        revoked/limits-changed key tolerates a minute of staleness here
+        because authentication itself is enforced (and cache-flushed) at the
+        Dovecot layer -- this lookup only shapes rate limiting.
+
+        Returns None when the username is unknown -- callers treat that as
+        fail-closed for an authenticated identity, per the PRD: unknown
+        authenticated sender != infrastructure error.
+        """
+        cache_key = f"smtp_credential:{username}"
+        if self.redis_client:
+            try:
+                cached = self.redis_client.get(cache_key)
+                if cached:
+                    data = json.loads(cached)
+                    return data if data else None  # {} caches a miss
+            except Exception as e:
+                logger.warning(f"Cache read failed for {cache_key}: {e}")
+
+        if not self.db_pool:
+            raise RuntimeError("database not available")
+
+        conn = self.db_pool.get_connection()
+        try:
+            cursor = conn.cursor(dictionary=True)
+            cursor.execute(
+                """
+                SELECT sc.username, sc.organization_id, d.domain,
+                       sc.hourly_limit, sc.daily_limit, sc.active
+                FROM smtp_credentials sc
+                JOIN domains d ON d.id = sc.domain_id
+                WHERE sc.username = %s
+                LIMIT 1
+                """,
+                (username,),
+            )
+            row = cursor.fetchone()
+            cursor.close()
+        finally:
+            conn.close()
+
+        if self.redis_client:
+            try:
+                self.redis_client.setex(cache_key, 60, json.dumps(row or {}, default=str))
+            except Exception as e:
+                logger.warning(f"Cache write failed for {cache_key}: {e}")
+
+        return row
 
     def create_rate_limit_rule(self, rule: RateLimitRule) -> bool:
         """

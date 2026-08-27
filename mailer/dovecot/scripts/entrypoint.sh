@@ -3,6 +3,14 @@ set -e
 
 echo "=== Dovecot Entrypoint ==="
 
+# doveadm HTTP API key (SMTP API keys K6) -- substituted into dovecot.conf
+# before the DB substitutions below. The sentinel is __NAME__ rather than
+# ${NAME} because dovecot.conf is parsed by Dovecot's own config parser,
+# which expands ${...} itself and fails on the placeholder. An unset key
+# leaves the listener answering 401 to everything, which degrades cache
+# flushing without opening an unauthenticated admin surface.
+sed -i -e "s|__DOVEADM_API_KEY__|${DOVEADM_API_KEY:-}|g" /etc/dovecot/dovecot.conf
+
 # -------------------------------------------------------
 # 0. Substitute environment variables in SQL config
 # -------------------------------------------------------

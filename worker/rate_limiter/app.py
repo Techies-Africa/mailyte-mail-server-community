@@ -175,8 +175,34 @@ class EnterpriseRateLimiter:
         """
         try:
             with LogTimer(log_performance, f"rate_limit_check_{direction}"):
-                # Extract organization and domain from email
-                organization_id, domain = self._extract_organization_and_domain(email)
+                # An identity with no '@' is an SMTP API key's SASL username
+                # (00-PRD-smtp-api-keys K2/K6) -- these used to fall through
+                # the '@' guard in the policy bridge and bypass rate limiting
+                # entirely. Resolve it to its org/domain so the same
+                # hierarchical checks apply, plus a per-key rule on top.
+                credential = None
+                if "@" not in email:
+                    try:
+                        credential = self.config_service.get_smtp_credential(email)
+                    except Exception as e:
+                        # Infrastructure error: fail open, same contract as
+                        # every other error path in this method.
+                        logger.error(f"SMTP credential lookup failed for {email}: {e}")
+                        return True, f"credential lookup failed: {e}", {"error": str(e)}
+                    if credential is None:
+                        # An AUTHENTICATED identity we cannot resolve is not
+                        # an infrastructure error -- fail closed (PRD S5
+                        # decision 7). Unauthenticated mail never reaches
+                        # this branch: it carries a sender address with '@'.
+                        return (
+                            False,
+                            "Unknown SMTP credential identity",
+                            {"email": email, "direction": direction},
+                        )
+                    organization_id, domain = credential["organization_id"], credential["domain"]
+                else:
+                    # Extract organization and domain from email
+                    organization_id, domain = self._extract_organization_and_domain(email)
 
                 # Prepare response details
                 details = {
@@ -189,11 +215,25 @@ class EnterpriseRateLimiter:
                 }
 
                 # Perform hierarchical rate limit checks
-                checks = [("organization", organization_id), ("domain", domain), ("mailbox", email)]
+                if credential is not None:
+                    checks = [
+                        ("organization", organization_id),
+                        ("domain", domain),
+                        ("smtp_credential", email),
+                    ]
+                else:
+                    checks = [
+                        ("organization", organization_id),
+                        ("domain", domain),
+                        ("mailbox", email),
+                    ]
 
                 for entity_type, identifier in checks:
+                    rule_override = None
+                    if entity_type == "smtp_credential":
+                        rule_override = self._credential_rule(credential, direction)
                     allowed, message, check_details = self._check_single_entity_limit(
-                        entity_type, identifier, direction
+                        entity_type, identifier, direction, rule_override
                     )
 
                     details["checks"][entity_type] = check_details
@@ -242,23 +282,41 @@ class EnterpriseRateLimiter:
 
         return organization_id, domain
 
+    def _credential_rule(self, credential: dict, direction: str):
+        """Per-key rule built from the smtp_credentials row itself rather
+        than the rate_limit_rules table -- key limits live with the key
+        (managed by the console/API), NULL means inherit, i.e. no per-key
+        bound on that window (0 = unlimited in RateLimitRule semantics)."""
+        from services.config_service import RateLimitRule
+
+        return RateLimitRule(
+            entity_type="smtp_credential",
+            identifier=credential["username"],
+            direction=direction,
+            hourly_limit=int(credential.get("hourly_limit") or 0),
+            daily_limit=int(credential.get("daily_limit") or 0),
+        )
+
     def _check_single_entity_limit(
-        self, entity_type: str, identifier: str, direction: str
+        self, entity_type: str, identifier: str, direction: str, rule_override=None
     ) -> tuple[bool, str, dict[str, Any]]:
         """
-        Check rate limit for a single entity (organization/domain/mailbox).
+        Check rate limit for a single entity (organization/domain/mailbox/
+        smtp_credential).
 
         Args:
-            entity_type: 'organization', 'domain', or 'mailbox'
+            entity_type: 'organization', 'domain', 'mailbox' or 'smtp_credential'
             identifier: Entity identifier
             direction: 'inbound' or 'outbound'
+            rule_override: Skip the rate_limit_rules lookup and use this rule
+                (per-key limits come from the smtp_credentials row)
 
         Returns:
             Tuple of (allowed, message, details)
         """
         try:
             # Get rate limit configuration
-            config_rule = self.config_service.get_rate_limit_rule(
+            config_rule = rule_override or self.config_service.get_rate_limit_rule(
                 entity_type, identifier, direction
             )
 
@@ -479,15 +537,32 @@ class EnterpriseRateLimiter:
         """
         try:
             with LogTimer(log_performance, f"usage_increment_{direction}"):
-                # Extract organization and domain
-                organization_id, domain = self._extract_organization_and_domain(email)
+                # Same identity resolution as check_rate_limit: an SMTP API
+                # key counts against its org, its domain, and itself.
+                if "@" not in email:
+                    credential = self.config_service.get_smtp_credential(email)
+                    if credential is None:
+                        logger.warning(f"increment_usage: unknown SMTP credential {email}")
+                        return False
+                    organization_id, domain = (
+                        credential["organization_id"],
+                        credential["domain"],
+                    )
+                    entities = [
+                        ("organization", organization_id),
+                        ("domain", domain),
+                        ("smtp_credential", email),
+                    ]
+                else:
+                    # Extract organization and domain
+                    organization_id, domain = self._extract_organization_and_domain(email)
 
-                # Increment usage for all levels
-                entities = [
-                    ("organization", organization_id),
-                    ("domain", domain),
-                    ("mailbox", email),
-                ]
+                    # Increment usage for all levels
+                    entities = [
+                        ("organization", organization_id),
+                        ("domain", domain),
+                        ("mailbox", email),
+                    ]
 
                 success = True
                 for entity_type, identifier in entities:
@@ -651,6 +726,14 @@ async def check_rate_limit(request: Request):
 
         # Perform rate limit check
         allowed, message, details = rate_limiter.check_rate_limit(email, direction)
+
+        # The Postfix policy bridge sends record=true so that each allowed
+        # message actually counts against the window -- without this, no
+        # producer incremented usage anywhere and every limit compared
+        # against zero (found during 00-PRD-smtp-api-keys K2). Other callers
+        # (dashboards, pre-flight checks) omit it and stay read-only.
+        if allowed and data.get("record"):
+            rate_limiter.increment_usage(email, direction)
 
         response = {
             "allowed": allowed,
@@ -860,7 +943,11 @@ async def postfix_policy(request: Request):
         recipient = attrs.get("recipient", "")
 
         email = sasl_username if sasl_username else sender
-        if not email or "@" not in email:
+        # An authenticated identity is always checked -- an SMTP API key's
+        # SASL username has no '@' and used to slip through this guard,
+        # exempting every key from rate limiting (00-PRD-smtp-api-keys 4.5).
+        # Only an unauthenticated message with no sender passes through.
+        if not email or (not sasl_username and "@" not in email):
             # Cannot determine sender; pass through
             return PlainTextResponse("action=DUNNO\n\n")
 
@@ -873,6 +960,10 @@ async def postfix_policy(request: Request):
         allowed, message, details = rate_limiter.check_rate_limit(email, direction)
 
         if allowed:
+            # This endpoint IS the mail path (one query per RCPT), so an
+            # allowed message must count against the window here -- usage
+            # had no other producer.
+            rate_limiter.increment_usage(email, direction)
             return PlainTextResponse("action=DUNNO\n\n")
         else:
             logger.warning(
