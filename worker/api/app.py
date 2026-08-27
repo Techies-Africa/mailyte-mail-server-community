@@ -288,6 +288,11 @@ route_modules = [
     ("webhooks", "/api/v1/webhooks", "Webhooks"),
     ("ssl", "/api/v1/ssl", "SSL"),
     ("smtp_credentials", "/api/v1/smtp-credentials", "SMTP Credentials"),
+    # Read-side split of the same resource (K6 parity of EE K1/K2,
+    # 00-PRD-smtp-api-keys): events/usage live in their own module purely
+    # for file-size reasons. Same prefix is fine -- the paths ({id}/events,
+    # {id}/usage) don't collide with the lifecycle router's.
+    ("smtp_credential_reports", "/api/v1/smtp-credentials", "SMTP Credential Reports"),
     ("monitoring", "/api/v1/monitoring", "Monitoring"),
     ("queue", "/api/v1/queue", "Queue"),
     ("capabilities", "/api/v1/capabilities", "Capabilities"),

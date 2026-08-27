@@ -358,7 +358,19 @@ class SmtpCredential(Base):
     domain_id = Column(String(26), ForeignKey("domains.id"), nullable=False, index=True)
     username = Column(String(255), nullable=False, unique=True, index=True)
     password = Column(String(255), nullable=False)  # bcrypt-hashed, same as EmailAccount.password
+    name = Column(String(255), nullable=True)
+    prefix = Column(String(16), nullable=True)  # secret's first chars, for display after the one-time reveal
+    created_by = Column(String(255), nullable=True)
     allowed_ips = Column(JSON, nullable=True)
+    # Gate separate from the list itself, so IPs can be staged before enforcement is turned on.
+    ip_allowlist_enabled = Column(Boolean, nullable=False, default=False)
+    # Enforced inside the Dovecot passdb query -- not by any scheduler.
+    expires_at = Column(DateTime, nullable=True)
+    # Per-key outbound caps; NULL inherits the org's limits (K2 rate limiter).
+    hourly_limit = Column(Integer, nullable=True)
+    daily_limit = Column(Integer, nullable=True)
+    # Written by the log ingestor, never by the auth path (row-lock serialization).
+    last_used_at = Column(DateTime, nullable=True)
     active = Column(Boolean, nullable=False, default=True)
     created_at = Column(DateTime, nullable=False, default=func.now())
     updated_at = Column(DateTime, nullable=False, default=func.now(), onupdate=func.now())
@@ -369,8 +381,51 @@ class SmtpCredential(Base):
             "organization_id": self.organization_id,
             "domain_id": self.domain_id,
             "username": self.username,
+            "name": self.name,
+            "prefix": self.prefix,
+            "created_by": self.created_by,
             "allowed_ips": self.allowed_ips,
+            "ip_allowlist_enabled": self.ip_allowlist_enabled,
+            "expires_at": self.expires_at.isoformat() if self.expires_at else None,
+            "hourly_limit": self.hourly_limit,
+            "daily_limit": self.daily_limit,
+            "last_used_at": self.last_used_at.isoformat() if self.last_used_at else None,
             "active": self.active,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class SmtpCredentialEvent(Base):
+    """Audit trail for SMTP API keys (00-PRD-smtp-api-keys section 6.7).
+
+    Deliberately FK-free: an audit row must survive the deletion of the
+    credential -- and the organization -- it describes, so the ids are plain
+    columns and the username is denormalized for display after deletion.
+    Rows are append-only; nothing updates or deletes them."""
+
+    __tablename__ = "smtp_credential_events"
+
+    id = Column(String(26), primary_key=True, default=generate_ulid)
+    credential_id = Column(String(26), nullable=False, index=True)
+    # String(100): CE organization ids are VARCHAR(100), not ULIDs.
+    organization_id = Column(String(100), nullable=False, index=True)
+    username = Column(String(255), nullable=False)
+    event = Column(String(32), nullable=False)  # created/rotated/revoked/enabled/updated/deleted/suspended
+    actor = Column(String(255), nullable=True)
+    source_ip = Column(String(45), nullable=True)
+    detail = Column(JSON, nullable=True)
+    created_at = Column(DateTime, nullable=False, default=func.now())
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "credential_id": self.credential_id,
+            "organization_id": self.organization_id,
+            "username": self.username,
+            "event": self.event,
+            "actor": self.actor,
+            "source_ip": self.source_ip,
+            "detail": self.detail,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
         }

@@ -11,7 +11,7 @@
 
 CREATE TABLE IF NOT EXISTS dlp_policies (
     id INT AUTO_INCREMENT PRIMARY KEY,
-    organization_id INT NOT NULL,
+    organization_id VARCHAR(100) NOT NULL,
     name VARCHAR(255) NOT NULL,
     description TEXT,
     policy_type ENUM('pii', 'keyword', 'regex', 'file_type') NOT NULL DEFAULT 'keyword',
@@ -24,7 +24,7 @@ CREATE TABLE IF NOT EXISTS dlp_policies (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     INDEX idx_org_enabled (organization_id, enabled),
     FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- =============================================================================
 -- 2. DLP Violations Log — records every policy match
@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS dlp_policies (
 
 CREATE TABLE IF NOT EXISTS dlp_violations (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
-    organization_id INT NOT NULL,
+    organization_id VARCHAR(100) NOT NULL,
     policy_id INT NOT NULL,
     message_id VARCHAR(255),
     sender VARCHAR(255) NOT NULL,
@@ -47,7 +47,7 @@ CREATE TABLE IF NOT EXISTS dlp_violations (
     INDEX idx_policy (policy_id),
     FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE,
     FOREIGN KEY (policy_id) REFERENCES dlp_policies(id) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- =============================================================================
 -- 3. TOTP Secrets — per-user 2FA enrolment
@@ -64,7 +64,7 @@ CREATE TABLE IF NOT EXISTS totp_secrets (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     INDEX idx_email (user_email)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- =============================================================================
 -- 4. Geo-Blocking Policies — per-organization country-level access rules
@@ -72,7 +72,7 @@ CREATE TABLE IF NOT EXISTS totp_secrets (
 
 CREATE TABLE IF NOT EXISTS geo_policies (
     id INT AUTO_INCREMENT PRIMARY KEY,
-    organization_id INT NOT NULL,
+    organization_id VARCHAR(100) NOT NULL,
     allowed_countries JSON COMMENT 'Array of ISO 3166-1 alpha-2 codes',
     blocked_countries JSON COMMENT 'Array of ISO 3166-1 alpha-2 codes',
     time_restrictions JSON COMMENT 'Time-of-day access rules',
@@ -82,7 +82,7 @@ CREATE TABLE IF NOT EXISTS geo_policies (
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     UNIQUE KEY idx_org (organization_id),
     FOREIGN KEY (organization_id) REFERENCES organizations(id) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- =============================================================================
 -- 5. GDPR Consent Records
@@ -100,7 +100,7 @@ CREATE TABLE IF NOT EXISTS consent_records (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     INDEX idx_user_type (user_email, consent_type)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- =============================================================================
 -- 6. Data Export Requests
@@ -120,7 +120,7 @@ CREATE TABLE IF NOT EXISTS data_export_requests (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_user_status (user_email, status),
     INDEX idx_expires (expires_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- =============================================================================
 -- 7. Data Erasure Requests
@@ -138,7 +138,7 @@ CREATE TABLE IF NOT EXISTS data_erasure_requests (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_user_status (user_email, status),
     INDEX idx_hard_delete (hard_delete_scheduled_at, status)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- =============================================================================
 -- 8. Audit Log — general-purpose compliance audit trail
@@ -155,7 +155,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
     INDEX idx_action (action),
     INDEX idx_user (user_email),
     INDEX idx_date (created_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- =============================================================================
 -- Update Alembic migration version tracker

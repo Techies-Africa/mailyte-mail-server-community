@@ -36,7 +36,15 @@ submission inet n       -       y       -       -       smtpd
   -o smtpd_client_connection_count_limit=20
   -o smtpd_client_message_rate_limit=50
   -o smtpd_client_recipient_rate_limit=100
-  -o smtpd_recipient_restrictions=permit_sasl_authenticated,submission_rate_limit_check,reject
+  # submission_rate_limit_check BEFORE permit_sasl_authenticated: restriction
+  # evaluation stops at the first permit, so the old order made the rate-limit
+  # policy dead code for every authenticated sender -- the only senders it is
+  # for (00-PRD-smtp-api-keys K6, parity of the EE K2 fix; same failure shape
+  # as the reject_sender_login_mismatch ordering). The policy answers DUNNO
+  # within quota, so evaluation still falls through to
+  # permit_sasl_authenticated; over quota it answers DEFER_IF_PERMIT, which
+  # defers exactly the senders the rest of the list would have permitted.
+  -o smtpd_recipient_restrictions=submission_rate_limit_check,permit_sasl_authenticated,reject
   -o smtpd_relay_restrictions=permit_sasl_authenticated,reject
   -o smtpd_client_restrictions=permit_sasl_authenticated,reject
   -o smtpd_helo_restrictions=permit_sasl_authenticated,reject_invalid_helo_hostname,reject
@@ -182,7 +190,10 @@ smtps     inet  n       -       y       -       -       smtpd
   -o smtpd_client_connection_count_limit=20
   -o smtpd_client_message_rate_limit=50
   -o smtpd_client_recipient_rate_limit=100
-  -o smtpd_recipient_restrictions=permit_sasl_authenticated,reject
+  # Same rate-limit policy as submission (K6): 465 previously had no
+  # check_policy_service at all, so implicit-TLS submissions were never
+  # rate limited. Ordering rationale in the submission block above.
+  -o smtpd_recipient_restrictions=submission_rate_limit_check,permit_sasl_authenticated,reject
   -o smtpd_relay_restrictions=permit_sasl_authenticated,reject
   -o smtpd_client_restrictions=permit_sasl_authenticated,reject
   -o smtpd_helo_restrictions=permit_sasl_authenticated,reject_invalid_helo_hostname,reject

@@ -43,10 +43,14 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision: str = '0009_domain_policy'
-down_revision: str | None = '0008_api_key_rate_limit_service'
-branch_labels: str | Sequence[str] | None = None
-depends_on: str | Sequence[str] | None = None
+# Plain assignments, no PEP 604 annotations: the migrate image runs Python
+# 3.9, where `str | None` at module level raises TypeError -- this file's
+# original annotations meant NO CE migration after 0008 could ever run
+# (found while applying 0010, 00-PRD-smtp-api-keys K6).
+revision = '0009_domain_policy'
+down_revision = '0008_api_key_rate_limit_service'
+branch_labels = None
+depends_on = None
 
 
 def upgrade() -> None:

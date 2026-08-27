@@ -35,7 +35,7 @@ CREATE OR REPLACE VIEW audit_log AS
         id,
         event_type  AS action,
         user_email,
-        performed_by,
+        NULL        AS performed_by,  -- audit_logs (002) has no equivalent column
         client_ip   AS ip_address,
         details,
         created_at
@@ -59,7 +59,7 @@ CREATE TABLE IF NOT EXISTS pgp_keys (
     updated_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     INDEX idx_pgp_email (email),
     INDEX idx_pgp_fingerprint (fingerprint)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- =============================================================================
 -- STEP 4: S/MIME certificate storage (worker/encryption/app.py)
@@ -79,7 +79,7 @@ CREATE TABLE IF NOT EXISTS smime_certs (
     created_at  DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_smime_email (email),
     INDEX idx_smime_expires (not_after)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- =============================================================================
 -- STEP 5: OAuth 2.0 clients and grants (worker/oauth/app.py)
@@ -103,7 +103,7 @@ CREATE TABLE IF NOT EXISTS oauth_clients (
     INDEX idx_oauth_client_active (active),
     CONSTRAINT fk_oauth_client_org FOREIGN KEY (organization_id)
         REFERENCES organizations(id) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS oauth_grants (
     id                  INT AUTO_INCREMENT PRIMARY KEY,
@@ -123,7 +123,7 @@ CREATE TABLE IF NOT EXISTS oauth_grants (
     INDEX idx_oauth_grant_expires (access_expires_at),
     CONSTRAINT fk_oauth_grant_client FOREIGN KEY (client_id)
         REFERENCES oauth_clients(client_id) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- =============================================================================
 -- STEP 6: URL protection tables (worker/url_protection/app.py)
@@ -139,7 +139,7 @@ CREATE TABLE IF NOT EXISTS url_blocklist (
     created_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_url_block_org (organization_id),
     INDEX idx_url_block_type (entry_type)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS url_clicks (
     id              BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -157,7 +157,7 @@ CREATE TABLE IF NOT EXISTS url_clicks (
     INDEX idx_url_click_message (message_id),
     INDEX idx_url_click_result (scan_result),
     INDEX idx_url_click_domain (url_domain)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- =============================================================================
 -- STEP 7: Email templates (worker/templates/app.py)
@@ -182,7 +182,7 @@ CREATE TABLE IF NOT EXISTS email_templates (
     INDEX idx_template_active (active),
     CONSTRAINT fk_template_org FOREIGN KEY (organization_id)
         REFERENCES organizations(id) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS email_template_versions (
     id          INT AUTO_INCREMENT PRIMARY KEY,
@@ -197,7 +197,7 @@ CREATE TABLE IF NOT EXISTS email_template_versions (
     INDEX idx_tmpl_ver_template (template_id),
     CONSTRAINT fk_tmpl_ver_template FOREIGN KEY (template_id)
         REFERENCES email_templates(id) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS template_render_log (
     id              BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -210,7 +210,7 @@ CREATE TABLE IF NOT EXISTS template_render_log (
     error_message   TEXT         NULL,
     INDEX idx_render_log_template (template_id),
     INDEX idx_render_log_org (organization_id)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- =============================================================================
 -- STEP 8: Email archival tables (worker/archiver/app.py)
@@ -236,7 +236,7 @@ CREATE TABLE IF NOT EXISTS email_archive (
     INDEX idx_archive_expires (expires_at),
     CONSTRAINT fk_archive_org FOREIGN KEY (organization_id)
         REFERENCES organizations(id) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS retention_policies (
     id              INT AUTO_INCREMENT PRIMARY KEY,
@@ -249,7 +249,7 @@ CREATE TABLE IF NOT EXISTS retention_policies (
     updated_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     CONSTRAINT fk_retention_org FOREIGN KEY (organization_id)
         REFERENCES organizations(id) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS legal_holds (
     id              INT AUTO_INCREMENT PRIMARY KEY,
@@ -266,7 +266,7 @@ CREATE TABLE IF NOT EXISTS legal_holds (
     INDEX idx_legal_hold_active (active),
     CONSTRAINT fk_legal_hold_org FOREIGN KEY (organization_id)
         REFERENCES organizations(id) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- =============================================================================
 -- STEP 9: Storage tracking (worker/storage_usage/app.py)
@@ -284,7 +284,7 @@ CREATE TABLE IF NOT EXISTS storage_usage (
     INDEX idx_storage_org (organization_id),
     INDEX idx_storage_account (email_account),
     INDEX idx_storage_calculated (calculated_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS storage_alerts (
     id              BIGINT AUTO_INCREMENT PRIMARY KEY,
@@ -300,7 +300,7 @@ CREATE TABLE IF NOT EXISTS storage_alerts (
     INDEX idx_storage_alert_org (organization_id),
     INDEX idx_storage_alert_level (alert_level),
     INDEX idx_storage_alert_created (created_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- =============================================================================
 -- STEP 10: Rate limit tracking (worker/rate_limiter/app.py)
@@ -311,7 +311,7 @@ CREATE TABLE IF NOT EXISTS rate_limit_configs (
     organization_id VARCHAR(100) NULL COMMENT 'NULL = global default',
     entity_type     ENUM('organization', 'domain', 'mailbox', 'api_key') NOT NULL,
     identifier      VARCHAR(255) NULL COMMENT 'NULL = applies to all of entity_type',
-    window          ENUM('second', 'minute', 'hour', 'day', 'month') NOT NULL DEFAULT 'hour',
+    `window`          ENUM('second', 'minute', 'hour', 'day', 'month') NOT NULL DEFAULT 'hour',
     max_requests    INT          NOT NULL,
     warning_pct     INT          NOT NULL DEFAULT 80,
     critical_pct    INT          NOT NULL DEFAULT 95,
@@ -319,20 +319,20 @@ CREATE TABLE IF NOT EXISTS rate_limit_configs (
     updated_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     INDEX idx_rl_config_org (organization_id),
     INDEX idx_rl_config_entity (entity_type, identifier)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE IF NOT EXISTS rate_limit_alerts (
     id              BIGINT AUTO_INCREMENT PRIMARY KEY,
     organization_id VARCHAR(100) NULL,
     entity_type     VARCHAR(50)  NOT NULL,
     identifier      VARCHAR(255) NOT NULL,
-    window          VARCHAR(20)  NOT NULL,
+    `window`          VARCHAR(20)  NOT NULL,
     usage_pct       DECIMAL(5,2) NOT NULL,
     alert_level     ENUM('warning', 'critical', 'exceeded') NOT NULL,
     created_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_rl_alert_org (organization_id),
     INDEX idx_rl_alert_created (created_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- =============================================================================
 -- STEP 11: Queue statistics (worker/queue_manager/app.py)
@@ -349,7 +349,7 @@ CREATE TABLE IF NOT EXISTS queue_statistics (
     recorded_at     DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_queue_stats_name (queue_name),
     INDEX idx_queue_stats_time (recorded_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- =============================================================================
 -- STEP 12: Bounce events (worker/delivery_optimizer/app.py)
@@ -372,7 +372,7 @@ CREATE TABLE IF NOT EXISTS bounce_events (
     INDEX idx_bounce_type (bounce_type),
     INDEX idx_bounce_domain (domain),
     INDEX idx_bounce_created (created_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- =============================================================================
 -- STEP 13: User login audit (worker/api/routes/mailboxes.py)
@@ -390,7 +390,7 @@ CREATE TABLE IF NOT EXISTS user_logins (
     INDEX idx_user_login_email (user_email),
     INDEX idx_user_login_ip (client_ip),
     INDEX idx_user_login_time (logged_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- =============================================================================
 -- STEP 14: Webhook dead letter queue (shared/webhook_dispatcher.py)
@@ -412,7 +412,7 @@ CREATE TABLE IF NOT EXISTS webhook_dead_letters (
     INDEX idx_wdl_status (status),
     INDEX idx_wdl_event (event_type),
     INDEX idx_wdl_created (created_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- =============================================================================
 -- STEP 15: Backup history (scripts/backup.sh)
@@ -430,7 +430,7 @@ CREATE TABLE IF NOT EXISTS backup_history (
     completed_at    DATETIME     NULL,
     INDEX idx_backup_status (status),
     INDEX idx_backup_started (started_at)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- =============================================================================
 -- STEP 16: API rate limits (per-endpoint, used by rate_limiter service)
@@ -446,7 +446,7 @@ CREATE TABLE IF NOT EXISTS api_rate_limits (
     created_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
     INDEX idx_api_rl_org (organization_id),
     INDEX idx_api_rl_pattern (endpoint_pattern)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- =============================================================================
 -- Update Alembic version

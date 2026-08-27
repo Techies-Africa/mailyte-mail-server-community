@@ -31,7 +31,12 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 project_root = Path(__file__).parent.parent.parent
 sys.path.append(str(project_root / "shared"))
 
-from metrics import get_metrics
+# Import explicitly from shared: /app precedes the appended shared path on
+# sys.path, so a bare `from metrics import ...` resolves to the local dict-based
+# stub in worker/webhooks/metrics.py, which has no get_prometheus_metrics().
+from shared.metrics import get_metrics
+from shared.logging_config import get_service_logger, get_performance_logger, LogTimer
+from shared.webhook_dispatcher import dispatch_event, Events
 from services.cleanup_service import WebhookCleanupService
 
 # Import modular webhook services
@@ -43,7 +48,7 @@ from shared.webhook_dispatcher import Events, dispatch_event
 app = FastAPI(title="Webhooks Service")
 
 # Initialize metrics
-metrics = get_metrics()
+metrics = get_metrics('webhooks')
 
 # Configure service-specific logging
 logger, log_performance = get_performance_logger("webhooks")

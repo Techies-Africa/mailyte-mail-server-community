@@ -28,7 +28,7 @@ import json
 import logging
 import os
 import sys
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 # ---------------------------------------------------------------------------
@@ -65,11 +65,25 @@ logger = logging.getLogger("rate_limit_policy")
 # HTTP helpers
 # ---------------------------------------------------------------------------
 def _http_post_json(url: str, payload: dict, timeout: int = HTTP_TIMEOUT) -> dict:
-    """POST JSON to *url* and return the parsed response body."""
+    """POST JSON to *url* and return the parsed response body.
+
+    The service answers an over-quota check with HTTP 429 and a JSON body
+    carrying allowed=false -- urlopen raises HTTPError on any non-2xx, so
+    that denial must be read out of the exception. Treating it as a
+    transport error (as this used to) turned every rate-limit denial into a
+    fail-open DUNNO: the limiter said no and the mail went through anyway.
+    """
     data = json.dumps(payload).encode("utf-8")
     req = Request(url, data=data, headers={"Content-Type": "application/json"})
-    with urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    try:
+        with urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        try:
+            return json.loads(body)
+        except ValueError:
+            raise exc
 
 
 def _http_post_text(url: str, body: str, timeout: int = HTTP_TIMEOUT) -> str:
@@ -93,7 +107,11 @@ def check_via_json_api(attrs: dict[str, str]) -> str:
     sasl_username = attrs.get("sasl_username", "")
     email = sasl_username if sasl_username else sender
 
-    if not email or "@" not in email:
+    # An authenticated identity is always checked: an SMTP API key's SASL
+    # username has no '@' and used to slip through this guard, exempting
+    # every key from rate limiting (00-PRD-smtp-api-keys 4.5). Only an
+    # unauthenticated message with no usable sender passes through.
+    if not email or (not sasl_username and "@" not in email):
         return "DUNNO"
 
     direction = "outbound" if sasl_username else "inbound"
@@ -101,6 +119,10 @@ def check_via_json_api(attrs: dict[str, str]) -> str:
     payload = {
         "email": email,
         "direction": direction,
+        # Each policy query is one RCPT on the live mail path -- the service
+        # increments usage for allowed messages only when this flag is set,
+        # so read-only callers of the same endpoint don't consume quota.
+        "record": True,
     }
 
     try:
