@@ -162,7 +162,6 @@ smtpd_recipient_restrictions =
     reject_unlisted_recipient,
     reject_rbl_client zen.spamhaus.org,
     check_policy_service unix:private/policy-ip-access,
-    check_policy_service unix:private/policy-rate-limit,
     permit
 
 # Named restriction class so the submission service's master.cf override
@@ -193,8 +192,7 @@ smtpd_sender_restrictions =
     reject_sender_login_mismatch,
     permit_sasl_authenticated,
     reject_non_fqdn_sender,
-    reject_unknown_sender_domain,
-    check_policy_service unix:private/policy-rate-limit
+    reject_unknown_sender_domain
 
 # HELO/EHLO RESTRICTIONS
 smtpd_helo_restrictions =
@@ -205,6 +203,17 @@ smtpd_helo_restrictions =
     warn_if_reject reject_unknown_helo_hostname
 
 # DATA PHASE RESTRICTIONS
+#
+# The rate limiter is consulted HERE AND NOWHERE ELSE -- ported from the EE
+# sibling, where the lesson cost an inbound outage: it used to run in three
+# lists at once (sender, recipient and data restrictions), each call posts
+# record:true, so one message incremented the same counter three times
+# inside one second and per-second limits deferred essentially every
+# unauthenticated inbound message. It only hit unauthenticated mail because
+# permit_mynetworks/permit_sasl_authenticated short-circuit ahead of the
+# policy in the other two lists -- outbound looked fine while inbound
+# stopped. DATA runs once per message, which is the unit the caps mean.
+# Adding this policy to any other list re-creates the outage.
 smtpd_data_restrictions =
     reject_unauth_pipelining,
     reject_multi_recipient_bounce,

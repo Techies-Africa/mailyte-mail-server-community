@@ -36,15 +36,12 @@ submission inet n       -       y       -       -       smtpd
   -o smtpd_client_connection_count_limit=20
   -o smtpd_client_message_rate_limit=50
   -o smtpd_client_recipient_rate_limit=100
-  # submission_rate_limit_check BEFORE permit_sasl_authenticated: restriction
-  # evaluation stops at the first permit, so the old order made the rate-limit
-  # policy dead code for every authenticated sender -- the only senders it is
-  # for (00-PRD-smtp-api-keys K6, parity of the EE K2 fix; same failure shape
-  # as the reject_sender_login_mismatch ordering). The policy answers DUNNO
-  # within quota, so evaluation still falls through to
-  # permit_sasl_authenticated; over quota it answers DEFER_IF_PERMIT, which
-  # defers exactly the senders the rest of the list would have permitted.
-  -o smtpd_recipient_restrictions=submission_rate_limit_check,permit_sasl_authenticated,reject
+  # No rate-limit policy in THIS list on purpose: the limiter is consulted at
+  # exactly one point for every message -- main.cf's smtpd_data_restrictions,
+  # which submission does not override -- because each policy call posts
+  # record:true and a second consultation double-counts every message. See
+  # the outage note above main.cf's smtpd_data_restrictions.
+  -o smtpd_recipient_restrictions=permit_sasl_authenticated,reject
   -o smtpd_relay_restrictions=permit_sasl_authenticated,reject
   -o smtpd_client_restrictions=permit_sasl_authenticated,reject
   -o smtpd_helo_restrictions=permit_sasl_authenticated,reject_invalid_helo_hostname,reject
@@ -79,6 +76,13 @@ tracking-filter unix -  n       n       -       25      pipe
   -o smtpd_sender_restrictions=
   -o smtpd_recipient_restrictions=permit_mynetworks,reject
   -o smtpd_end_of_data_restrictions=
+  # Keep the pipelining guard but drop the global list's rate-limit policy:
+  # this listener receives the tracking filter's re-injected COPY of a
+  # message that was already counted once at its real ingress. Inheriting
+  # the global smtpd_data_restrictions counted every filtered message twice
+  # -- on an unauthenticated connection, so an outbound message's second
+  # count landed on the sender's INBOUND counters.
+  -o smtpd_data_restrictions=reject_unauth_pipelining
   -o smtpd_error_sleep_time=0
   -o smtpd_soft_error_limit=1001
   -o smtpd_hard_error_limit=1000
@@ -190,10 +194,9 @@ smtps     inet  n       -       y       -       -       smtpd
   -o smtpd_client_connection_count_limit=20
   -o smtpd_client_message_rate_limit=50
   -o smtpd_client_recipient_rate_limit=100
-  # Same rate-limit policy as submission (K6): 465 previously had no
-  # check_policy_service at all, so implicit-TLS submissions were never
-  # rate limited. Ordering rationale in the submission block above.
-  -o smtpd_recipient_restrictions=submission_rate_limit_check,permit_sasl_authenticated,reject
+  # Rate limiting for 465 happens at main.cf's smtpd_data_restrictions, the
+  # single counting point -- see the submission block above.
+  -o smtpd_recipient_restrictions=permit_sasl_authenticated,reject
   -o smtpd_relay_restrictions=permit_sasl_authenticated,reject
   -o smtpd_client_restrictions=permit_sasl_authenticated,reject
   -o smtpd_helo_restrictions=permit_sasl_authenticated,reject_invalid_helo_hostname,reject
