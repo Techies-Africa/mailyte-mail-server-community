@@ -1,0 +1,52 @@
+# Shared-mailbox discovery dictionary.
+#
+# Dovecot needs to know which shared mailboxes to LIST for a given user
+# before it will look at any ACL file. That lookup is `acl_shared_dict`
+# (plugin block in local.conf), and this is its backing store.
+#
+# It reads a VIEW over shared_mailbox_members rather than a table of its own,
+# so there is nothing to synchronise: add a member in the dashboard and the
+# folder is listed on their next connection, remove them and it disappears.
+# The rights themselves cannot work this way -- Dovecot's only ACL backend is
+# vfile, plain files in the Maildir -- which is what
+# shared-mailbox-acl-sync.py is for.
+#
+# ${DB_*} are substituted by scripts/entrypoint.sh at container start, the
+# same way dovecot-sql.conf.ext is. The file is left unreadable by other
+# users afterwards because this line contains the database password.
+connect = host=${DB_HOST} port=${DB_PORT} dbname=${DB_NAME} user=${DB_USER} password=${DB_PASSWORD}
+
+# $to is the member doing the looking, $from is the shared address being
+# looked at; Dovecot builds this exact key when listing the shared namespace.
+#
+# value_field has to name a real column, and the value is never used for
+# anything -- the view returns a constant '1' for it.
+map {
+  pattern = shared/shared-boxes/user/$to/$from
+  table = dovecot_shared_mailbox_acl
+  value_field = dummy
+
+  fields {
+    from_user = $from
+    to_user = $to
+  }
+}
+
+# Dovecot probes a second prefix when listing: mailboxes shared with EVERY
+# user on the server. We do not support that, but leaving it unmapped logged
+#   Error: sql dict iterate failed for shared/shared-boxes/anyone/:
+#   Invalid/unmapped path
+# on every single folder listing, which is how real errors get buried.
+#
+# dovecot_shared_mailbox_anyone is an empty view, deliberately -- pointing
+# this at the real shares would list every shared mailbox in every
+# organization to every mailbox on the server.
+map {
+  pattern = shared/shared-boxes/anyone/$from
+  table = dovecot_shared_mailbox_anyone
+  value_field = dummy
+
+  fields {
+    from_user = $from
+  }
+}

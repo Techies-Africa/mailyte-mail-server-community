@@ -24,10 +24,18 @@ AGPL-3.0. Free to self-host, no seat limits, no feature keys.
 ## Requirements
 
 - Docker with Compose v2
-- A host with port 25 open — most cloud providers block it by default, and you
-  have to ask them to unblock it
 - A domain you control DNS for
 - 2 GB RAM minimum, 4 GB comfortable
+- **Outbound port 25, and correct reverse DNS**
+
+Those last two are not software, and they are where most self-hosted mail fails.
+Port 25 is blocked by default on AWS, Azure, DigitalOcean, Hetzner, Vultr and
+Linode — a support ticket each — and blocked *permanently* on Google Cloud.
+Reverse DNS is set at your provider and is almost never right out of the box.
+A stack with neither looks perfectly healthy and cannot deliver a single message.
+
+Five minutes before you start: **[Before You Install](docs/getting-started/server-requirements.md)**
+— what to check, how to check it, and a script that tells you where you stand.
 
 ---
 

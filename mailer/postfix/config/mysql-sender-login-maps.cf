@@ -2,10 +2,25 @@ user = ${DB_USER}
 password = ${DB_PASSWORD}
 hosts = ${DB_HOST}:${DB_PORT}
 dbname = ${DB_NAME}
+# Maps an envelope sender address to the logins permitted to use it.
+#
 # Third branch (SMTP-credentials workstream): a domain-scoped SMTP
 # credential is a valid login for ANY address at its domain, not just one
 # mailbox -- Mailgun's model, not a per-mailbox login. `%s` is the envelope
 # sender address; Postfix substitutes it as a literal before MySQL parses
 # the query, so SUBSTRING_INDEX operates on the real address, not a bind
 # parameter.
-query = SELECT email FROM email_accounts WHERE email='%s' AND status = 'active' UNION SELECT destination FROM aliases WHERE source='%s' AND active = 1 UNION SELECT sc.username FROM smtp_credentials sc JOIN domains d ON sc.domain_id = d.id WHERE d.domain = SUBSTRING_INDEX('%s', '@', -1) AND sc.active = 1
+#
+# Fourth branch (shared mailboxes): a member granted full_access or send_as
+# may use the shared address as their envelope sender. Without this the
+# permission levels were readable in the dashboard and enforced nowhere --
+# "Send as" granted precisely nothing.
+#
+# send_on_behalf is deliberately included: that mode still puts the shared
+# address in the ENVELOPE sender (which is all this map governs) and differs
+# only in the From/Sender headers the client composes. read_only is
+# deliberately excluded -- "can see everything, can send nothing".
+#
+# Both mailboxes must be active, so suspending either the shared address or
+# the member's own mailbox withdraws the right immediately.
+query = SELECT email FROM email_accounts WHERE email='%s' AND status = 'active' UNION SELECT destination FROM aliases WHERE source='%s' AND active = 1 UNION SELECT sc.username FROM smtp_credentials sc JOIN domains d ON sc.domain_id = d.id WHERE d.domain = SUBSTRING_INDEX('%s', '@', -1) AND sc.active = 1 UNION SELECT member.email FROM shared_mailbox_members smm JOIN email_accounts shared ON shared.id = smm.shared_mailbox_id AND shared.mailbox_type = 'shared' AND shared.status = 'active' JOIN email_accounts member ON member.id = smm.email_account_id AND member.status = 'active' WHERE shared.email = '%s' AND smm.permission IN ('full_access','send_as','send_on_behalf')
