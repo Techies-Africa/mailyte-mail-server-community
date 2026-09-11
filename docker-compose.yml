@@ -112,11 +112,22 @@ services:
     healthcheck:
       # CMD-SHELL, not CMD's exec array -- reading the password out of the
       # mounted file needs a shell for the command substitution.
-      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u root -p\"$$(cat /run/secrets/db_root_password)\""]
-      interval: 10s
+      #
+      # 127.0.0.1, NOT localhost. `-h localhost` connects over the unix socket,
+      # which the mysql image's first-run initialisation answers while the
+      # server is still running with networking disabled -- so the container
+      # reported healthy, `depends_on: condition: service_healthy` released
+      # immediately, and `migrate` died on "Can't connect to MySQL server on
+      # 'mysql' ([Errno 111] Connection refused)". Every fresh install failed
+      # its first `docker compose up` and worked on the second, which is a
+      # miserable first impression and looks like a flake rather than a bug.
+      # Forcing TCP makes the healthcheck test the thing every other container
+      # actually uses.
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -u root -p\"$$(cat /run/secrets/db_root_password)\""]
+      interval: 5s
       timeout: 5s
-      retries: 10
-      start_period: 30s
+      retries: 20
+      start_period: 40s
 
   # Schema migrations (phase-08) -- runs once per `up`, after MySQL is
   # healthy and before anything that touches the schema starts. A failed
