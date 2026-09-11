@@ -4,10 +4,10 @@ hide:
   - toc
 ---
 
-# Mailyte Email Server Handbook
+# Mailyte Mail Server Handbook
 
 <div style="font-size: 1.15rem; color: var(--md-default-fg-color--light); margin-bottom: 2rem; max-width: 48rem;">
-The complete developer guide to the Mailyte Email Server — the infrastructure behind Mailyte's email hosting platform. Everything from first setup to scaling to millions of emails, explained in plain language.
+Run your own mail server: SMTP, IMAP, spam filtering, webmail and an admin console, driven by a REST API. This handbook covers both editions — pages describing something only the Enterprise Edition has are marked with a badge. <a href="reference/editions/">See what each includes</a>.
 </div>
 
 <div class="grid cards" markdown>
@@ -16,7 +16,7 @@ The complete developer guide to the Mailyte Email Server — the infrastructure 
 
     ---
 
-    Install the server, configure your environment, and send your first email in under 15 minutes.
+    Check your server can actually send mail — outbound port 25 and reverse DNS stop more installs than anything else — then install, configure and send.
 
     [:octicons-arrow-right-24: Jump in](getting-started/index.md)
 

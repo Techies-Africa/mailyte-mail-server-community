@@ -1,0 +1,12 @@
+# Global ACL file. Applies to EVERY mailbox, before per-mailbox dovecot-acl.
+#
+# The service account the webmail signs in through must never be constrained
+# by ACLs: it authenticates as a Dovecot master user, and when the acl plugin
+# treats that session as a non-owner it hides every folder -- which is exactly
+# how enabling acl took webmail down on 2026-09-11.
+#
+# Granting it here covers BOTH possibilities without needing to know which
+# identity Dovecot uses for a master session: if the acl username is the
+# target mailbox, the owner rules already grant everything; if it is the
+# master user, this line does.
+* user=jmap_master lrwstipekxa
