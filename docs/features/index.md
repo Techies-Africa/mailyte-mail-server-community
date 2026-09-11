@@ -5,7 +5,7 @@ description: Every feature in Mailyte — what it does, how ready it is, and how
 
 # Features Overview
 
-Mailyte packs a lot into one box. This page gives you a bird's-eye view of every feature, where it lives, and how ready it is for production use.
+Mailyte packs a lot into one box. This page gives you a bird's-eye view of every feature, where it lives, and how ready it is for production use. Ports listed are the host-published ports from `docker-compose.yml`; in production every non-mail port is bound to loopback and public traffic goes through Traefik on 443.
 
 ---
 
@@ -17,7 +17,7 @@ Mailyte packs a lot into one box. This page gives you a bird's-eye view of every
 
     ---
 
-    Pixel opens, click tracking, bounce and complaint logging — know what happens after you hit send.
+    Pixel opens and click tracking injected by a Postfix content filter — know what happens after you hit send.
 
     [:octicons-arrow-right-24: Email tracking](email-tracking.md)
 
@@ -25,39 +25,39 @@ Mailyte packs a lot into one box. This page gives you a bird's-eye view of every
 
     ---
 
-    ML spam detection, Bayesian filtering, ClamAV antivirus, DNSBL checks, and greylisting.
+    Rspamd scoring, Bayesian + neural filtering, greylisting, phishing feeds, postscreen DNSBLs.
 
     [:octicons-arrow-right-24: Anti-spam](anti-spam.md)
 
--   :material-speedometer:{ .lg .middle } **Rate Limiting**
+-   :material-key:{ .lg .middle } **SMTP API Keys**
 
     ---
 
-    Redis-backed sliding window limits at the org, domain, and mailbox level.
+    Domain-scoped sending credentials with IP allowlists, expiry, rotation, and instant revocation.
 
-    [:octicons-arrow-right-24: Rate limiting](rate-limiting.md)
-
--   :material-harddisk:{ .lg .middle } **Storage & Quotas**
-
-    ---
-
-    Per-mailbox, per-domain, and per-org quota tracking with alerts.
-
-    [:octicons-arrow-right-24: Storage & quotas](storage-quotas.md)
+    [:octicons-arrow-right-24: SMTP API keys](smtp-credentials.md)
 
 -   :material-webhook:{ .lg .middle } **Webhooks**
 
     ---
 
-    Real-time event delivery with retry logic, HMAC signing, and automatic cleanup.
+    Signed event delivery with Mailgun-style retries, delivery logs, and a replayable dead-letter queue.
 
     [:octicons-arrow-right-24: Webhooks](webhooks.md)
+
+-   :material-cellphone-link:{ .lg .middle } **Client Auto-Setup**
+
+    ---
+
+    Thunderbird autoconfig, Outlook autodiscover, and MTA-STS for every hosted domain.
+
+    [:octicons-arrow-right-24: Autoconfig](autoconfig.md)
 
 -   :material-brain:{ .lg .middle } **AI-Powered Search**
 
     ---
 
-    Qdrant vector DB, semantic search over email content — ask questions, get answers.
+    Qdrant vector DB, semantic search over indexed email content.
 
     [:octicons-arrow-right-24: AI search](rag-integration.md)
 
@@ -69,9 +69,9 @@ Mailyte packs a lot into one box. This page gives you a bird's-eye view of every
 
 | Badge | Meaning |
 |-------|---------|
-| :material-check-circle:{ .stable } **Stable** | Production-ready, battle-tested |
+| :material-check-circle:{ .stable } **Stable** | Working in production |
 | :material-flask:{ .beta } **Beta** | Working and usable, still being refined |
-| :material-hammer-wrench:{ .dev } **In Development** | Actively being built -- not ready yet |
+| :material-hammer-wrench:{ .dev } **Deployed, not enabled** | Code is deployed but a wiring/config step is still missing |
 
 ---
 
@@ -79,21 +79,23 @@ Mailyte packs a lot into one box. This page gives you a bird's-eye view of every
 
 | Feature | Status | Service / Port | Description |
 |---------|--------|---------------|-------------|
-| [Email Tracking](email-tracking.md) | :material-check-circle: **Stable** | Tracking / `8083` | Pixel opens, click tracking, bounce & complaint logging |
-| [Anti-Spam Protection](anti-spam.md) | :material-check-circle: **Stable** | Rspamd / `11333` | ML spam detection, Bayesian filtering, ClamAV, greylisting |
-| [Rate Limiting](rate-limiting.md) | :material-check-circle: **Stable** | Rate Limiter / `8082` | Redis-backed sliding window limits at org, domain, and mailbox levels |
-| [Storage & Quotas](storage-quotas.md) | :material-check-circle: **Stable** | Storage Usage / `8084` | Per-mailbox, per-domain, and per-org quota tracking |
-| [Webhooks](webhooks.md) | :material-check-circle: **Stable** | Webhooks / `8081` | Real-time event delivery with retry, HMAC signing, and cleanup |
-| [Templates](templates.md) | :material-flask: **Beta** | Templates / `8087` | Jinja2-based email templates with versioning. A/B testing in development |
-| [Analytics](analytics.md) | :material-check-circle: **Stable** | Tracking / `8083` | Delivery stats, geo data, device detection, time-series aggregation |
-| [Archiving](archiving.md) | :material-hammer-wrench: **In Development** | -- | Long-term email storage with compliance retention policies |
-| [Encryption](encryption.md) | :material-hammer-wrench: **In Development** | -- | PGP/GPG and S/MIME end-to-end encryption |
-| [ActiveSync](activesync.md) | :material-hammer-wrench: **In Development** | -- | Microsoft Exchange ActiveSync protocol support |
-| [Backup & Restore](backup-restore.md) | :material-check-circle: **Stable** | Cron / Cloud Sync | Automated DB + filesystem backups, S3/Azure cloud sync |
-| [Deliverability](deliverability.md) | :material-check-circle: **Stable** | Delivery Optimizer / `8088` | SPF/DKIM/DMARC, reputation tracking, bounce handling, suppression lists |
-| [AI-Powered Search](rag-integration.md) | :material-flask: **Beta** | RAG / `8090` | Qdrant vector DB, semantic search over email content |
-| [Auto-Healing](auto-healing.md) | :material-check-circle: **Stable** | Health Monitor | Detects failed services and restarts them automatically |
-| [Multi-Tenant Support](multi-tenant.md) | :material-check-circle: **Stable** | All services | Organization-based isolation for data, config, and quotas |
+| [Email Tracking](email-tracking.md) | :material-check-circle: **Stable** | Tracking / `8086` + Postfix filter | Open/click tracking injected at submission; functional since 2026-08-22 |
+| [Anti-Spam Protection](anti-spam.md) | :material-check-circle: **Stable** | Rspamd / `11332` milter, `11334` UI | Scoring, Bayes, neural, greylisting, phishing feeds. ClamAV **not** deployed by default |
+| [Rate Limiting](rate-limiting.md) | :material-check-circle: **Stable** | Rate Limiter / `8082` | Org/domain/mailbox/credential limits across six windows, enforced at Postfix DATA |
+| [Storage & Quotas](storage-quotas.md) | :material-check-circle: **Stable** | Storage Usage / `8092` + Dovecot | Usage roll-ups and alerts; hard enforcement by Dovecot quota |
+| [Webhooks](webhooks.md) | :material-flask: **Beta** | Shared dispatcher + Webhooks / `8081` | Delivers all events to one global URL; per-endpoint fan-out not yet implemented |
+| [SMTP API Keys](smtp-credentials.md) | :material-check-circle: **Stable** | API + Dovecot passdb | Shipped 2026-08-27; rotation, revocation, IP allowlists, per-key limits |
+| [Client Auto-Setup](autoconfig.md) | :material-check-circle: **Stable** | Autoconfig / `8100` | Autoconfig/autodiscover/MTA-STS, publicly routed since 2026-08-27 |
+| [Templates](templates.md) | :material-flask: **Beta** | Templates / `8095` | Jinja2 templates with versioning and a starter library. No A/B testing |
+| [Analytics](analytics.md) | :material-check-circle: **Stable** | Analytics / `8087` + API | Volume/engagement/deliverability from `mail_logs` + tracking events (producer live since 2026-08-22) |
+| [Archiving](archiving.md) | :material-check-circle: **Stable** | Archiver / `8089` | Every accepted message age-encrypted to S3 within seconds; retention + legal holds |
+| [Encryption](encryption.md) | :material-flask: **Beta** | Encryption / `8093` | PGP/S/MIME key management API + WKD; not wired into the mail flow. Mail at rest is already encrypted (Dovecot mail_crypt) |
+| [ActiveSync](activesync.md) | :material-hammer-wrench: **Deployed, not enabled** | Z-Push / `8084` | Real Z-Push 2.7.4 (mail-only IMAP backend), but no public Traefik route yet |
+| [Backup & Restore](backup-restore.md) | :material-check-circle: **Stable** | Host systemd timers | Full daily + hourly incremental, age-encrypted, S3 offsite via `secrets/dr.env` |
+| [Deliverability](deliverability.md) | :material-check-circle: **Stable** | Delivery Optimizer / `8094` + Rspamd | DKIM signing, DNS verification, ISP throttling on the live send path, reputation, IP warming |
+| [AI-Powered Search](rag-integration.md) | :material-flask: **Beta** | RAG / `8091` + Qdrant | Semantic search; indexing is API-driven, not automatic |
+| [Auto-Healing](auto-healing.md) | :material-check-circle: **Stable** | Monitoring / `8085` | 5-minute health sweeps; container restarts via a scoped docker-proxy |
+| [Multi-Tenant Support](multi-tenant.md) | :material-check-circle: **Stable** | All services | Organization-scoped isolation for data, config, and quotas |
 
 ---
 
@@ -101,36 +103,37 @@ Mailyte packs a lot into one box. This page gives you a bird's-eye view of every
 
 | Category | Capabilities |
 |----------|-------------|
-| **Mail protocols** | SMTP (25, 587, 465), IMAP (143, 993), POP3 (110, 995), STARTTLS, implicit TLS |
-| **Spam defense** | Bayesian classification, DNSBL, SPF/DKIM/DMARC validation, ClamAV, greylisting, content analysis |
-| **Tracking** | Open pixels, click wrapping, bounce detection, complaint feedback loops |
-| **Analytics** | Delivery rates, engagement metrics, geo/device breakdown, time-series aggregation |
-| **Delivery** | DKIM signing, SPF alignment, DMARC policies, reputation monitoring, suppression lists |
-| **Storage** | Per-mailbox quotas, per-domain limits, per-org caps, usage alerts, automatic cleanup |
-| **AI / Search** | Vector embeddings via Qdrant, semantic search queries, RAG-based email retrieval |
-| **Automation** | Webhook events, auto-healing, cert rotation, scheduled backups, cloud sync |
-| **Multi-tenancy** | Org-scoped API keys, isolated data, per-tenant quotas and rate limits |
+| **Mail protocols** | SMTP (25, 587, 465), IMAP (143, 993), POP3 (110, 995), Sieve/ManageSieve (4190), JMAP, CalDAV/CardDAV |
+| **Spam defense** | Postscreen weighted DNSBLs, Rspamd scoring, Bayes + neural, greylisting, fuzzy hashing, phishing feeds |
+| **Sending** | SMTP API keys, sender-login enforcement (587/465), DKIM signing, per-ISP throttling, IP warming |
+| **Tracking** | Open pixels, click wrapping, unsubscribes, bounce + complaint recording |
+| **Analytics** | Delivery/engagement/deliverability metrics from real mail logs and tracking events |
+| **Storage** | Per-mailbox/domain/org usage, Dovecot quota enforcement, alerts |
+| **Durability** | Continuous encrypted mail archive (S3 + spool), full/incremental backups, legal holds |
+| **AI / Search** | Vector embeddings (local by default), per-org Qdrant collections |
+| **Automation** | Webhook events, auto-healing, DNS verification, client auto-setup |
+| **Multi-tenancy** | Org-scoped API keys, isolated data, per-tenant quotas, rate limits, and spam policy |
 
 ---
 
 ## How features connect
 
-Most features don't operate in isolation -- they talk to each other through the centralized webhook dispatcher and shared database. Here's a simplified view of how the major pieces fit together:
+Most features talk to each other through the shared webhook dispatcher, the Postfix content filter, and the shared database:
 
 ```mermaid
 graph LR
-    Postfix[Postfix SMTP] -->|inbound/outbound| Webhooks
-    Postfix -->|milter| Rspamd[Anti-Spam]
-    Postfix -->|policy| RateLimiter[Rate Limiter]
-    Webhooks -->|events| Tracking[Email Tracking]
-    Tracking -->|stats| Analytics
-    Tracking -->|bounces| Deliverability
-    Deliverability -->|suppression| Postfix
-    StorageUsage[Storage & Quotas] -->|alerts| Webhooks
-    RAG[AI Search] -->|indexes| Qdrant[(Qdrant)]
-    HealthMonitor[Auto-Healing] -->|restarts| Postfix
-    HealthMonitor -->|restarts| Dovecot
-    HealthMonitor -->|alerts| Webhooks
+    Postfix[Postfix SMTP] -->|milter| Rspamd[Anti-Spam + DKIM]
+    Postfix -->|policy at DATA| RateLimiter[Rate Limiter]
+    Postfix -->|content filter 587/465| Injector[tracking_injector]
+    Injector -->|inject| Tracking[Email Tracking]
+    Injector -->|check/record| Optimizer[Delivery Optimizer]
+    Injector -->|copy| Archiver
+    Dovecot -->|sieve pipe| Archiver
+    MailLog[Postfix mail.log] --> Ingestor[log_ingestor]
+    Ingestor -->|mail_logs| Analytics
+    Ingestor & Tracking & Optimizer -->|dispatch_event| Webhooks[Webhook Dispatcher]
+    Monitoring[Auto-Healing] -->|restart via docker-proxy| Postfix
+    RAG[AI Search] -->|vectors| Qdrant[(Qdrant)]
 ```
 
 ---
@@ -141,28 +144,29 @@ graph LR
 
     Focus on these features first:
 
-    1. **[Deliverability](deliverability.md)** -- set up SPF, DKIM, and DMARC correctly
-    2. **[Email Tracking](email-tracking.md)** -- track opens, clicks, and bounces
-    3. **[Webhooks](webhooks.md)** -- get real-time delivery notifications in your app
-    4. **[Rate Limiting](rate-limiting.md)** -- protect your sender reputation
+    1. **[Deliverability](deliverability.md)** — set up SPF, DKIM, and DMARC and verify them via the API
+    2. **[SMTP API Keys](smtp-credentials.md)** — send with a revocable credential, not a mailbox password
+    3. **[Email Tracking](email-tracking.md)** — track opens, clicks, and bounces
+    4. **[Webhooks](webhooks.md)** — get delivery notifications in your app
 
 === "I'm hosting mailboxes for customers"
 
     Focus on these features first:
 
-    1. **[Multi-Tenant Support](multi-tenant.md)** -- isolate each customer's data
-    2. **[Storage & Quotas](storage-quotas.md)** -- set and enforce per-customer limits
-    3. **[Anti-Spam Protection](anti-spam.md)** -- keep inboxes clean
-    4. **[Backup & Restore](backup-restore.md)** -- protect customer data
+    1. **[Multi-Tenant Support](multi-tenant.md)** — isolate each customer's data
+    2. **[Client Auto-Setup](autoconfig.md)** — let their mail clients configure themselves
+    3. **[Storage & Quotas](storage-quotas.md)** — set and enforce per-customer limits
+    4. **[Anti-Spam Protection](anti-spam.md)** — keep inboxes clean
+    5. **[Backup & Restore](backup-restore.md)** + **[Archiving](archiving.md)** — protect customer data
 
 === "I'm building a product on top of Mailyte"
 
     Focus on these features first:
 
-    1. **[Webhooks](webhooks.md)** -- integrate email events into your product
-    2. **[AI-Powered Search](rag-integration.md)** -- add smart email search
-    3. **[Templates](templates.md)** -- manage email templates via API
-    4. **[Analytics](analytics.md)** -- surface email insights to your users
+    1. **[Webhooks](webhooks.md)** — integrate email events into your product
+    2. **[AI-Powered Search](rag-integration.md)** — add smart email search
+    3. **[Templates](templates.md)** — manage email templates via API
+    4. **[Analytics](analytics.md)** — surface email insights to your users
 
 ---
 
@@ -170,15 +174,15 @@ graph LR
 
 - **Want to send tracked emails?** Start with [Email Tracking](email-tracking.md).
 - **Setting up a new organization?** Read [Multi-Tenant Support](multi-tenant.md) first.
+- **Onboarding a domain?** [Deliverability](deliverability.md) and [Client Auto-Setup](autoconfig.md) cover DNS and clients.
 - **Worried about spam?** Check [Anti-Spam Protection](anti-spam.md).
-- **Need to search old emails by meaning?** See [AI-Powered Search](rag-integration.md).
 - **Something broke?** [Auto-Healing](auto-healing.md) might have already fixed it.
 
 ---
 
 ## Related sections
 
-- [API Reference](../api/index.md) -- control every feature programmatically
-- [Architecture](../architecture/index.md) -- understand how features map to services
-- [Security](../security/index.md) -- how features are secured
-- [Getting Started](../getting-started/index.md) -- install and configure everything
+- [API Reference](../api/index.md) — control every feature programmatically
+- [Architecture](../architecture/index.md) — understand how features map to services
+- [Security](../security/index.md) — how features are secured
+- [Getting Started](../getting-started/index.md) — install and configure everything

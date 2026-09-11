@@ -32,7 +32,19 @@ from utils.database import get_db_connection
 
 project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
+from schemas.alias import (
+    AliasAddResponse,
+    AliasBulkResponse,
+    AliasEditResponse,
+    AliasGetResponse,
+    AliasStatsResponse,
+)
 
+# No aliases.py endpoint returns a bare (data-less) message envelope, so
+# SimpleMessageResponse isn't needed here -- every response below carries a
+# `data` payload (unlike mailboxes.py/organizations.py/domains.py, which
+# import it for their delete endpoints).
+from schemas.common import ErrorResponse
 
 from shared.webhook_dispatcher import Events, dispatch_event
 
@@ -79,6 +91,18 @@ def validate_email_list(email_list):
     "/add",
     summary="Create a new email alias",
     description="Create a single email alias that forwards mail from the source address to one or more destination addresses. Validates both source and destination email formats, checks domain existence, and prevents duplicate aliases.",
+    response_model=AliasAddResponse,
+    responses={
+        400: {
+            "model": ErrorResponse,
+            "description": "Missing field / invalid source or destination address format / domain not found or inactive",
+        },
+        409: {"model": ErrorResponse, "description": "Alias already exists"},
+        500: {
+            "model": ErrorResponse,
+            "description": "Database connection failed / failed to add alias",
+        },
+    },
 )
 @require_api_key("write")
 async def add_alias(request: Request):
@@ -172,7 +196,10 @@ async def add_alias(request: Request):
             ),
         )
 
-        alias_id = cursor.lastrowid
+        # aliases.id is a CHAR(26) ULID -- cursor.lastrowid only tracks
+        # AUTO_INCREMENT columns, so it reads 0 here. Keep the ULID that was
+        # generated and inserted above; overwriting it made every response
+        # (and every dispatched event) carry alias_id: 0.
 
         dispatch_event(
             Events.ALIAS_CREATED,
@@ -200,6 +227,13 @@ async def add_alias(request: Request):
     "/get/{alias_id}",
     summary="Get alias information",
     description="Retrieve alias details by ID or source address. Pass 'all' to list all active aliases with pagination. Each alias includes destination count, parsed destination list, and 30-day forwarding statistics.",
+    response_model=AliasGetResponse,
+    responses={
+        500: {
+            "model": ErrorResponse,
+            "description": "Database connection failed / failed to retrieve aliases",
+        }
+    },
 )
 @require_api_key("read")
 async def get_aliases(
@@ -299,6 +333,17 @@ async def get_aliases(
     "/edit",
     summary="Edit alias settings",
     description="Batch-update one or more aliases. Accepts an items array of alias IDs or source addresses and an attr object with fields to update (destination, active status). Destination addresses are validated before applying changes.",
+    response_model=AliasEditResponse,
+    responses={
+        400: {
+            "model": ErrorResponse,
+            "description": "Invalid request format -- items/attr expected",
+        },
+        500: {
+            "model": ErrorResponse,
+            "description": "Database connection failed / failed to edit alias",
+        },
+    },
 )
 @require_api_key("write")
 async def edit_alias(request: Request):
@@ -405,6 +450,17 @@ async def edit_alias(request: Request):
     "/delete",
     summary="Delete alias(es)",
     description="Delete one or more email aliases. Accepts an array of alias IDs or source addresses. Returns per-alias success/error results. Deleted aliases stop forwarding immediately.",
+    response_model=AliasEditResponse,
+    responses={
+        400: {
+            "model": ErrorResponse,
+            "description": "Invalid request format -- array of alias IDs expected",
+        },
+        500: {
+            "model": ErrorResponse,
+            "description": "Database connection failed / failed to delete aliases",
+        },
+    },
 )
 @require_api_key("write")
 async def delete_alias(request: Request):
@@ -492,6 +548,17 @@ async def delete_alias(request: Request):
     "/get/stats/{domain}",
     summary="Get alias statistics for a domain",
     description="Retrieve aggregate alias statistics for a domain, including total/active/inactive counts, top 10 forwarding destinations by usage, and daily forwarding volume over the last 30 days.",
+    response_model=AliasStatsResponse,
+    responses={
+        404: {
+            "model": ErrorResponse,
+            "description": "Domain not found (or belongs to another org)",
+        },
+        500: {
+            "model": ErrorResponse,
+            "description": "Database connection failed / failed to retrieve alias statistics",
+        },
+    },
 )
 @require_api_key("read")
 async def get_alias_stats(domain: str, request: Request):
@@ -604,6 +671,17 @@ async def get_alias_stats(domain: str, request: Request):
     "/add/bulk",
     summary="Bulk create aliases",
     description="Create multiple email aliases in a single request. Each alias in the array is validated independently -- invalid entries are skipped and reported while valid ones are created. Returns a summary with success/error counts and per-alias results.",
+    response_model=AliasBulkResponse,
+    responses={
+        400: {
+            "model": ErrorResponse,
+            "description": "Invalid request format -- aliases array expected",
+        },
+        500: {
+            "model": ErrorResponse,
+            "description": "Database connection failed / failed to add bulk aliases",
+        },
+    },
 )
 @require_api_key("write")
 async def add_bulk_aliases(request: Request):

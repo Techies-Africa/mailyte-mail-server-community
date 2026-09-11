@@ -1,268 +1,126 @@
 # Alerting
 
-Alerts tell you something is wrong before your users do — set them up and trust them.
+Alerts tell you something is wrong before your users do — and only work when the alert expressions match series that actually exist.
 
 ## How Alerting Works
 
-Prometheus evaluates alert rules every 15 seconds. When a rule fires, it sends the alert to Alertmanager. Alertmanager groups, deduplicates, and routes alerts to your notification channels.
+Prometheus evaluates alert rules every 15 seconds. When a rule fires, it sends the alert to Alertmanager (`prom/alertmanager:v0.27.0`). Alertmanager groups, deduplicates, and routes alerts to its configured webhook receiver.
 
 ```mermaid
 graph LR
     PR[Prometheus] -->|fires alert| AM[Alertmanager]
-    AM -->|routes to| SL[Slack]
-    AM -->|routes to| EM[Email]
-    AM -->|routes to| WH[Webhook]
-    AM -->|routes to| PD[PagerDuty]
+    AM -->|webhook POST| WH[webhooks:8081/alertmanager]
 ```
 
 ## Alert Rules
 
-Alert rules live in `monitoring/prometheus/rules/`. Here are the ones Mailyte ships with.
+Alert rules live in `monitoring/prometheus/rules/` and are mounted into the container at `/etc/prometheus/rules/`. Two files ship with the repo.
 
-### Mail Queue Alerts
+### `mail_alerts.yml`
 
-```yaml
-# rules/postfix.yml
-groups:
-  - name: postfix
-    rules:
-      - alert: MailQueueHigh
-        expr: postfix_queue_size > 500
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "Mail queue is backing up"
-          description: "Queue has {{ $value }} messages (threshold: 500)"
+The general service/mail/security rules. The active set (rewritten 2026-08-30 so every live expression matches a series that actually exists):
 
-      - alert: MailQueueCritical
-        expr: postfix_queue_size > 2000
-        for: 2m
-        labels:
-          severity: critical
-        annotations:
-          summary: "Mail queue is critically high"
-          description: "Queue has {{ $value }} messages — delivery may be stalled"
+| Alert | Expression | Severity |
+|-------|-----------|----------|
+| `ServiceDown` | `up == 0` for 2m | critical |
+| `HighErrorRate` | `sum by (job) (rate({__name__=~".+_http_errors_total"}[5m])) / sum by (job) (rate({__name__=~".+_http_requests_total"}[5m])) > 0.05` | warning |
+| `DatabaseConnectionPoolExhausted` | MySQL connections > 80% of max | warning |
+| `SlowQueries` | > 10 slow queries/sec | warning |
+| `RedisMemoryHigh` | Redis memory > 80% of max | warning |
 
-      - alert: HighBounceRate
-        expr: >
-          rate(postfix_bounce_total[15m])
-          / rate(postfix_delivery_total[15m]) > 0.1
-        for: 10m
-        labels:
-          severity: warning
-        annotations:
-          summary: "Bounce rate exceeds 10%"
-          description: "Current bounce rate: {{ $value | humanizePercentage }}"
+`SpamSpike` was commented out on 2026-08-31: a live probe showed this rspamd build's controller serves no `/metrics` endpoint at all, so no `rspamd_*` series exists for any expression to match. Re-enable together with an rspamd exporter or upgrade.
 
-      - alert: DeliveryStalled
-        expr: rate(postfix_delivery_total[10m]) == 0
-        for: 10m
-        labels:
-          severity: critical
-        annotations:
-          summary: "No emails delivered in 10 minutes"
-          description: "Postfix may be down or misconfigured"
-```
+`HighErrorRate` uses a `__name__` regex because the workers export **service-prefixed** counters (`api_http_errors_total`, never bare `http_errors_total`) — see the naming note under `backup_alerts.yml` below.
 
-### Service Down Alerts
+!!! note "Rules commented out because their series have no producer (2026-08-30)"
+    An alert whose expression matches no series **silently never fires** — it looks exactly like "everything is fine". Rather than leave that trap armed, the following rules are commented out in `mail_alerts.yml` with dated notes, to be restored when a producer exists:
 
-```yaml
-# rules/services.yml
-groups:
-  - name: services
-    rules:
-      - alert: ServiceDown
-        expr: up == 0
-        for: 1m
-        labels:
-          severity: critical
-        annotations:
-          summary: "{{ $labels.job }} is down"
-          description: "Prometheus cannot reach {{ $labels.instance }}"
+    - `MailQueueBackup` / `MailQueueCritical` / `HighBounceRate` / `CriticalBounceRate` — `postfix_*` series; **no Postfix exporter is deployed**.
+    - `DiskSpaceWarning` / `DiskSpaceCritical` — `node_filesystem_*`; **no node-exporter is deployed**.
+    - `KafkaConsumerLag` — the kafka-exporter job is commented out in `prometheus.yml`.
+    - `BruteForceDetected` / `DLPViolation` (the whole `security_alerts` group) — no service exports `auth_failures_total` / `dlp_violations_total` (auth failures are recorded in the `failed_auth_attempts` table, DLP violations in `dlp_violations`).
 
-      - alert: APIHighErrorRate
-        expr: >
-          rate(http_requests_total{status=~"5.."}[5m])
-          / rate(http_requests_total[5m]) > 0.05
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "API error rate above 5%"
-          description: "{{ $value | humanizePercentage }} of requests are failing"
+    `SpamSpike` was rewritten from the nonexistent `rspamd_actions_reject` to the labelled `rspamd_actions_total{type="reject"}` family; confirm the exact name against your live exposition (`curl http://localhost:11334/metrics | grep actions`). Disk pressure is covered separately by the monitoring service's own psutil checks (warning at 75%, critical at 85% — see [System Monitoring](system-monitoring.md)); everything in `backup_alerts.yml` is live.
 
-      - alert: APIDown
-        expr: up{job="api"} == 0
-        for: 30s
-        labels:
-          severity: critical
-        annotations:
-          summary: "FastAPI is unreachable"
-          description: "The API on :5000 is not responding"
-```
+### `backup_alerts.yml`
 
-### Infrastructure Alerts
+Backup and disaster-recovery rules — deliberately written against absence, so a backup that quietly stopped running looks exactly like one that failed loudly. These are written against the real, prefixed series and are live:
 
-```yaml
-# rules/infrastructure.yml
-groups:
-  - name: infrastructure
-    rules:
-      - alert: DiskSpaceLow
-        expr: >
-          (node_filesystem_avail_bytes{mountpoint="/"}
-          / node_filesystem_size_bytes{mountpoint="/"}) < 0.15
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "Disk space below 15%"
-          description: "{{ $value | humanizePercentage }} free on root filesystem"
+| Alert | Fires when | Severity |
+|-------|-----------|----------|
+| `NoRecentFullBackup` | `monitoring_backup_age_seconds{backup_type="full"} > 93600` (26 h) | critical |
+| `NoRecentIncrementalBackup` | incremental age > 7200 s (2 h) | warning |
+| `BackupMonitoringGone` | `absent(monitoring_backup_age_seconds)` for 15m | critical |
+| `BackupLastRunFailed` | `monitoring_backup_last_status == 0` after a prior success | warning |
+| `BackupNeverRun` | age gauge at its 10-year sentinel for 1h | critical |
+| `UnencryptedBackupsPresent` | `monitoring_backup_unencrypted_runs > 0` | warning |
+| `ArchiveSpoolNotDraining` | `archiver_archive_spool_depth > 0` for 30m | warning |
+| `ArchiveSpoolBacklogCritical` | spool depth > 5000 for 15m | critical |
+| `ArchiveStoreFailing` | `rate(archiver_archive_store_failures_total[15m]) > 0` | critical |
 
-      - alert: DiskSpaceCritical
-        expr: >
-          (node_filesystem_avail_bytes{mountpoint="/"}
-          / node_filesystem_size_bytes{mountpoint="/"}) < 0.05
-        for: 1m
-        labels:
-          severity: critical
-        annotations:
-          summary: "Disk space below 5%"
-          description: "Server will run out of disk soon"
-
-      - alert: HighMemoryUsage
-        expr: >
-          (1 - node_memory_MemAvailable_bytes
-          / node_memory_MemTotal_bytes) > 0.9
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "Memory usage above 90%"
-          description: "Available memory is critically low"
-
-      - alert: HighCPUUsage
-        expr: >
-          100 - (avg by(instance)
-          (irate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 85
-        for: 10m
-        labels:
-          severity: warning
-        annotations:
-          summary: "CPU usage above 85%"
-          description: "Sustained high CPU for 10+ minutes"
-```
-
-### Database Alerts
-
-```yaml
-# rules/database.yml
-groups:
-  - name: database
-    rules:
-      - alert: MySQLDown
-        expr: mysql_up == 0
-        for: 30s
-        labels:
-          severity: critical
-        annotations:
-          summary: "MySQL is down"
-          description: "Cannot connect to MySQL"
-
-      - alert: MySQLTooManyConnections
-        expr: >
-          mysql_global_status_threads_connected
-          / mysql_global_variables_max_connections > 0.8
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "MySQL connections above 80% of max"
-          description: "{{ $value | humanizePercentage }} of connection limit used"
-
-      - alert: MySQLSlowQueries
-        expr: rate(mysql_global_status_slow_queries[5m]) > 0.1
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "MySQL slow queries increasing"
-          description: "{{ $value }} slow queries per second"
-
-      - alert: RedisMemoryHigh
-        expr: >
-          redis_memory_used_bytes / redis_memory_max_bytes > 0.85
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "Redis memory usage above 85%"
-```
+The file's own header records the naming lesson: `shared/metrics.py` prepends the emitting service's name to every metric, so rules must be written against `monitoring_*` / `archiver_*`, never the bare names.
 
 ## Alert Severity Levels
 
 | Severity | Meaning | Response Time | Example |
 |----------|---------|--------------|---------|
-| `critical` | Service is down or data is at risk | Immediate | MySQL down, disk full |
-| `warning` | Something needs attention soon | Within hours | Queue growing, high CPU |
-| `info` | Worth knowing, no action needed | Next business day | Certificate expiring in 30 days |
+| `critical` | Service is down or data is at risk | Immediate | `ServiceDown`, `NoRecentFullBackup` |
+| `warning` | Something needs attention soon | Within hours | `RedisMemoryHigh`, `SlowQueries` |
 
 ## Alertmanager Configuration
 
-```yaml
-# monitoring/alertmanager/alertmanager.yml
-global:
-  resolve_timeout: 5m
-  smtp_from: alerts@yourdomain.com
-  smtp_smarthost: localhost:25
+The real config, `monitoring/alertmanager/alertmanager.yml`:
 
+```yaml
 route:
-  receiver: default
-  group_by: [alertname, severity]
+  receiver: 'webhook-notifications'
+  group_by: ['alertname', 'severity']
   group_wait: 30s
   group_interval: 5m
   repeat_interval: 4h
+
   routes:
-    - match:
+    - receiver: 'critical-alerts'
+      match:
         severity: critical
-      receiver: critical-alerts
+      group_wait: 10s
+      group_interval: 1m
       repeat_interval: 1h
-    - match:
+
+    - receiver: 'webhook-notifications'
+      match:
         severity: warning
-      receiver: warning-alerts
-      repeat_interval: 4h
 
 receivers:
-  - name: default
+  - name: 'webhook-notifications'
     webhook_configs:
-      - url: http://health-monitor:8080/webhook/alerts
+      - url: 'http://webhooks:8081/alertmanager'
+        send_resolved: true
 
-  - name: critical-alerts
-    slack_configs:
-      - api_url: ${SLACK_WEBHOOK_URL}
-        channel: "#mailyte-critical"
-        title: "CRITICAL: {{ .GroupLabels.alertname }}"
-        text: "{{ range .Alerts }}{{ .Annotations.description }}\n{{ end }}"
-    email_configs:
-      - to: oncall@yourdomain.com
-
-  - name: warning-alerts
-    slack_configs:
-      - api_url: ${SLACK_WEBHOOK_URL}
-        channel: "#mailyte-alerts"
-        title: "Warning: {{ .GroupLabels.alertname }}"
-        text: "{{ range .Alerts }}{{ .Annotations.description }}\n{{ end }}"
+  - name: 'critical-alerts'
+    webhook_configs:
+      - url: 'http://webhooks:8081/alertmanager'
+        send_resolved: true
 
 inhibit_rules:
   - source_match:
-      severity: critical
+      severity: 'critical'
     target_match:
-      severity: warning
-    equal: [alertname]
+      severity: 'warning'
+    equal: ['alertname']
+
+  - source_match:
+      alertname: 'ServiceDown'
+    target_match_re:
+      severity: '.*'
+    equal: ['job']
 ```
 
-> **Note:** The `inhibit_rules` section prevents warning alerts from firing when a critical alert for the same issue is already active. No need to get two alerts for one problem.
+There are no Slack/email/PagerDuty receivers configured — everything routes to the webhooks service. To add Slack or email, add the corresponding `slack_configs` / `email_configs` receivers per the upstream Alertmanager docs.
+
+Both receivers POST to `http://webhooks:8081/alertmanager`, which is served by the webhooks service's `POST /alertmanager` route (`worker/webhooks/app.py`, added 2026-08-30 — before that the route didn't exist and every notification 404'd). The route unpacks the standard Alertmanager payload and forwards **each alert individually** through the global webhook dispatcher (`shared/webhook_dispatcher.py`) as a signed `system.alert.firing` or `system.alert.resolved` event to the configured `WEBHOOK_URL`, with the alert's labels, annotations, timestamps, and fingerprint in `data`. If `WEBHOOK_URL` is unset in the webhooks container, dispatch silently no-ops and firing alerts remain visible only in the Prometheus (`:9090/alerts`) and Alertmanager (`:9093`) UIs. The monitoring service's own [webhook notifications](webhook-notifications.md) are a separate path for health events.
+
+> **Note:** The `inhibit_rules` section prevents warning alerts from firing when a critical alert for the same issue is already active, and suppresses everything else for a job whose `ServiceDown` is firing.
 
 ## Silencing Alerts
 
@@ -276,9 +134,9 @@ amtool silence add --alertmanager.url=http://localhost:9093 \
 
 # Silence a specific alert
 amtool silence add --alertmanager.url=http://localhost:9093 \
-  alertname=MailQueueHigh \
+  alertname=RedisMemoryHigh \
   --duration=1h \
-  --comment="Flushing queue manually"
+  --comment="Known cache warm-up"
 
 # List active silences
 amtool silence query --alertmanager.url=http://localhost:9093
@@ -304,8 +162,9 @@ curl -X POST http://localhost:9093/api/v2/alerts \
   }]'
 ```
 
-If your Slack channel doesn't get a message, check the Alertmanager logs:
+Then check it arrived (`http://localhost:9093`) and watch what the receiver did with it:
 
 ```bash
-docker compose logs alertmanager
+docker compose logs alertmanager | tail -20
+docker compose logs webhooks | grep -i alertmanager
 ```

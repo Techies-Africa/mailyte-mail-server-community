@@ -1,15 +1,114 @@
 # =============================================================================
-# Mailyte Email Server Community Edition - Production Override
+# Mailyte Email Server - Production Docker Compose Override
 # =============================================================================
 #
 # Usage:
 #   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 #
+# This file overrides docker-compose.yml with production-specific settings:
+#   - Traefik reverse proxy with automatic HTTPS (Let's Encrypt)
+#   - Resource limits (CPU/memory) for every service
+#   - Replica scaling for stateless services
+#   - Structured JSON logging with rotation
+#   - Removal of exposed ports for internal-only services
+#   - Production environment variables (no debug flags)
+#
+# Required environment variables (set in .env or export):
+#   DOMAIN            - Base domain (e.g. mailyte.com)
+#   ACME_EMAIL        - Email for Let's Encrypt certificate notifications
+#   TRAEFIK_DASHBOARD_USER / TRAEFIK_DASHBOARD_PASS - Dashboard basic auth
+#
+# Ports: every internal service is republished on 127.0.0.1 here, because
+# the base compose file publishes on 0.0.0.0 for single-host development.
+# Left as-is in production that exposed ~30 services straight to the
+# internet, bypassing Traefik and its TLS -- Prometheus, Qdrant and the
+# rspamd UI answered with no authentication at all, and Kafka accepted
+# connections. Reaching any of them is Traefik's job, over 443.
+#
+# The only ports that stay on 0.0.0.0 are the ones the internet legitimately
+# talks to:
+#   25 (SMTP), 465 (SMTPS), 587 (Submission), 143/993 (IMAP/S),
+#   110/995 (POP3/S), 4190 (ManageSieve), 80 (HTTP), 443 (HTTPS)
+#
+# Docker publishes past ufw by writing its own iptables rules, so a host
+# firewall is not a substitute for this -- the bind address is.
+#
+# =============================================================================
 
 services:
 
   # ===========================================================================
-  # Infrastructure
+  # Traefik Reverse Proxy
+  # ===========================================================================
+  traefik:
+    # 80/443 are the only ports this host should answer on for HTTP. 8080 is
+    # Traefik's own API/dashboard port and was published to 0.0.0.0 -- the
+    # dashboard is meant to be reached through the authenticated
+    # traefik.${DOMAIN} router below, not on a raw port with no auth in
+    # front of it.
+    ports: !override
+      - "80:80"
+      - "443:443"
+      - "127.0.0.1:8080:8080"
+    image: traefik:v2.11
+    container_name: traefik
+    restart: always
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - letsencrypt_traefik:/letsencrypt
+      - ./deployment/traefik/traefik.yml:/etc/traefik/traefik.yml:ro
+      # cert_manager writes real certs here (mail domains AND, since the
+      # ACME-conflict fix, Traefik's own admin-subdomain routers below --
+      # see traefik.yml's "Certificates" comment). Read-only: Traefik only
+      # ever reads these, cert_manager is the sole writer.
+      - ./storage/ssl_certs:/etc/ssl/certs:ro
+      - ./storage/ssl_private:/etc/ssl/private:ro
+      # traefik_certs.yml (cert_manager's file-provider config) lives here,
+      # alongside the Postfix/Dovecot SNI files it's generated next to.
+      - ./storage/sni_config:/etc/traefik/dynamic:ro
+    labels:
+      - "traefik.enable=true"
+      # Dashboard
+      - "traefik.http.routers.traefik-dashboard.rule=Host(`traefik.${DOMAIN}`)"
+      - "traefik.http.routers.traefik-dashboard.entrypoints=websecure"
+      - "traefik.http.routers.traefik-dashboard.tls=true"
+      - "traefik.http.routers.traefik-dashboard.service=api@internal"
+      - "traefik.http.routers.traefik-dashboard.middlewares=dashboard-auth"
+      - "traefik.http.middlewares.dashboard-auth.basicauth.users=${TRAEFIK_DASHBOARD_USER:-admin}:${TRAEFIK_DASHBOARD_PASS}"
+      # Catch-all HTTP->HTTPS redirect, now a router-level middleware
+      # instead of traefik.yml's old entrypoint-level one (see that file's
+      # comment) -- low priority so it only wins when nothing more
+      # specific (namely the acme_webroot router below) matches first.
+      # service=api@internal is a nominal target only; the redirect
+      # middleware returns a 301 before anything would actually forward
+      # there.
+      - "traefik.http.routers.http-catchall.rule=PathPrefix(`/`)"
+      - "traefik.http.routers.http-catchall.entrypoints=web"
+      - "traefik.http.routers.http-catchall.priority=1"
+      - "traefik.http.routers.http-catchall.service=api@internal"
+      - "traefik.http.routers.http-catchall.middlewares=redirect-to-https"
+      - "traefik.http.middlewares.redirect-to-https.redirectscheme.scheme=https"
+      - "traefik.http.middlewares.redirect-to-https.redirectscheme.permanent=true"
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - mailserver_network
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  # ===========================================================================
+  # Infrastructure Services
   # ===========================================================================
 
   redis:
@@ -41,7 +140,44 @@ services:
   # ===========================================================================
 
   postfix:
+    # 25/465/587 are real public mail ports and stay. 10026 is the internal
+    # rspamd reinjection listener -- master.cf already binds it to 127.0.0.1
+    # *inside* the container, so publishing it on 0.0.0.0 exposed a port that
+    # accepts TCP with nothing meant to be behind it.
+    ports: !override
+      - "25:25"
+      - "587:587"
+      - "465:465"
+      - "127.0.0.1:10026:10026"
     restart: always
+    # NET_ADMIN only so the entrypoint can add the marketing bridge alias
+    # (ip addr add); nothing else in the container needs it.
+    cap_add:
+      - NET_ADMIN
+    environment:
+      - HOSTNAME=${HOSTNAME:-mail.${DOMAIN:-example.com}}
+      - DOMAIN=${DOMAIN:-example.com}
+      - DB_HOST=mysql
+      - DB_PORT=3306
+      - DB_NAME=${DB_NAME:-mailserver}
+      - DB_USER=${DB_USER:-mailuser}
+      - DB_PASSWORD=${DB_PASSWORD:-mailpassword}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - TRACKING_SERVICE_URL=http://tracking:8086
+      - TRACKING_ENABLED=${TRACKING_ENABLED:-true}
+      - DEFAULT_TENANT_ID=${DEFAULT_TENANT_ID:-default}
+      - DEFAULT_DOMAIN_ID=${DEFAULT_DOMAIN_ID:-default}
+      - WEBHOOK_SECRET=${WEBHOOK_SECRET}
+      - WEBHOOK_SERVICE_URL=http://webhooks:8081
+      - DELIVERY_OPTIMIZER_URL=http://delivery_optimizer:8088
+      # Marketing stream (phase-01): unset = disabled, routing unchanged.
+      - MARKETING_BIND_IP=${MARKETING_BIND_IP:-}
+      - MARKETING_HELO_NAME=${MARKETING_HELO_NAME:-}
+      # Bridge-internal address the marketing transport binds; a host SNAT rule
+      # maps it to MARKETING_BIND_IP (Docker MASQUERADE would otherwise send it
+      # from the primary IP). Unset = bind MARKETING_BIND_IP directly.
+      - MARKETING_CONTAINER_BIND_IP=${MARKETING_CONTAINER_BIND_IP:-}
     logging:
       driver: json-file
       options:
@@ -54,6 +190,13 @@ services:
 
   dovecot:
     restart: always
+    volumes:
+      # Mail migrated from mailcow is mail_crypt-encrypted at rest. Without
+      # the plugin and the source system's global keys, every message FETCH
+      # fails while SEARCH still counts them -- mailboxes look full and read
+      # empty. See config/mailer/dovecot/local.conf for the full explanation.
+      - ./config/mailer/dovecot/local.conf:/etc/dovecot/local.conf:ro
+      - ./secrets/mail_crypt:/etc/dovecot/mail_crypt:ro
     logging:
       driver: json-file
       options:
@@ -65,7 +208,15 @@ services:
           memory: 1G
 
   rspamd:
+    # Bound to loopback: this service is reached over the compose network by
+    # its service name, and from outside only through Traefik on 443. The
+    # published 0.0.0.0 port bypassed TLS and, for several services, all
+    # authentication -- verified reachable from the public internet.
+    ports: !override
+      - "127.0.0.1:11332:11332"
+      - "127.0.0.1:11334:11334"
     restart: always
+
     logging:
       driver: json-file
       options:
@@ -78,8 +229,23 @@ services:
 
   cert_manager:
     restart: always
+
     environment:
+      - DB_HOST=mysql
+      - DB_PORT=3306
+      - DB_NAME=${DB_NAME:-mailserver}
+      - DB_USER=${DB_USER:-mailuser}
+      - DB_PASSWORD=${DB_PASSWORD:-mailpassword}
+      - ACME_EMAIL=${ACME_EMAIL:-admin@${DOMAIN:-example.com}}
+      - HOSTNAME=${HOSTNAME:-mail.${DOMAIN:-example.com}}
+      - DOMAIN=${DOMAIN:-example.com}
       - ACME_STAGING=false
+      - SSL_CERT_PATH=/etc/ssl/certs
+      - SSL_KEY_PATH=/etc/ssl/private
+      - CERT_RENEWAL_DAYS=${CERT_RENEWAL_DAYS:-30}
+      - CERT_CHECK_INTERVAL=${CERT_CHECK_INTERVAL:-21600}
+      - WEBHOOK_URLS=${WEBHOOK_URLS:-}
+      - WEBHOOK_SECRET=${WEBHOOK_SECRET}
     logging:
       driver: json-file
       options:
@@ -90,14 +256,55 @@ services:
         limits:
           memory: 256M
 
-  # ===========================================================================
-  # Worker Services
-  # ===========================================================================
-
   api:
+    # Replicated below — a fixed container_name (set in the base file for
+    # docker exec convenience in dev) collides with replica naming in prod.
+    container_name: !reset null
+    # Same reason: the base file's fixed host port (8083:8080) is for
+    # single-instance dev access. With replicas: 2 below, every replica
+    # would try to bind the same host port and only one could ever start
+    # ("port is already allocated") -- Traefik already reaches this service
+    # over the internal network via the labels below, so no host port
+    # publish is needed or safe here.
+    ports: !reset []
     restart: always
+
     environment:
+      - PORT=8080
+      # See the base file: without this Docker hands the api container an
+      # HOSTNAME of the container ID, which routes/domains.py then uses as
+      # the mail hostname in generated and verified DNS records.
+      - HOSTNAME=${HOSTNAME:-mail.${DOMAIN:-example.com}}
+      - DB_HOST=mysql
+      - DB_PORT=3306
+      - DB_NAME=${DB_NAME:-mailserver}
+      - DB_USER=${DB_USER:-mailuser}
+      - DB_PASSWORD=${DB_PASSWORD:-mailpassword}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+      - ADMIN_TOKEN_SECRET=${ADMIN_TOKEN_SECRET}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-eu-west-2}
+      - AWS_BUCKET=${AWS_BUCKET}
+      - AWS_S3_PREFIX=${AWS_S3_PREFIX:-mailyte}
       - FLASK_ENV=production
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.api.rule=Host(`api.${DOMAIN}`)"
+      - "traefik.http.routers.api.entrypoints=websecure"
+      - "traefik.http.routers.api.tls=true"
+      - "traefik.http.services.api.loadbalancer.server.port=8080"
+      # Bare domain never had a router at all -- courier.mailyte.com 404'd
+      # even though traefik already terminates TLS for it (cert_manager
+      # issues it a SAN cert alongside imap./mail./smtp.). Reuses the api
+      # service rather than defining a new one, so it serves the same
+      # landing page as api.${DOMAIN}.
+      - "traefik.http.routers.landing.rule=Host(`${DOMAIN}`)"
+      - "traefik.http.routers.landing.entrypoints=websecure"
+      - "traefik.http.routers.landing.tls=true"
+      - "traefik.http.routers.landing.service=api"
     volumes:
       - ./logs/worker/api:/app/logs
     logging:
@@ -106,13 +313,77 @@ services:
         max-size: "10m"
         max-file: "3"
     deploy:
+      replicas: 2
       resources:
         limits:
           memory: 512M
 
-  webhooks:
+  autoconfig:
+    # Bound to loopback: this service is reached over the compose network by
+    # its service name, and from outside only through Traefik on 443. The
+    # published 0.0.0.0 port bypassed TLS and, for several services, all
+    # authentication -- verified reachable from the public internet.
+    ports: !override
+      - "127.0.0.1:8100:8100"
     restart: always
+
     environment:
+      - PORT=8100
+      - DB_HOST=mysql
+      - DB_PORT=3306
+      - DB_NAME=${DB_NAME:-mailserver}
+      - DB_USER=${DB_USER:-mailuser}
+      - DB_PASSWORD=${DB_PASSWORD:-mailpassword}
+      - HOSTNAME=${HOSTNAME:-mail.${DOMAIN:-example.com}}
+      # The customer-facing name handed to mail clients, distinct from
+      # HOSTNAME (this server's own identity, used for PTR/HELO).
+      - MAIL_HOSTNAME=${MAIL_HOSTNAME:-}
+      - DOMAIN=${DOMAIN:-example.com}
+      - MTA_STS_MODE=${MTA_STS_MODE:-enforce}
+    labels:
+      - "traefik.enable=true"
+      # Client auto-setup has to answer for EVERY customer domain, not just
+      # this server's own. The rule was Host(`autoconfig.${DOMAIN}`) -- a
+      # single literal hostname -- so autoconfig.<customer-domain> and every
+      # autodiscover.* host 404'd, and the container only ever saw /metrics.
+      # The panel meanwhile tells customers to create exactly those records,
+      # which could never verify. mailcow served these; the migration lost it.
+      #
+      # HostRegexp with a named capture is Traefik v2 syntax (this deployment
+      # runs 2.11). Outlook uses autodiscover, Thunderbird uses autoconfig,
+      # and mta-sts is served by the same app.
+      - "traefik.http.routers.autoconfig.rule=HostRegexp(`autoconfig.{domain:.+}`) || HostRegexp(`autodiscover.{domain:.+}`) || HostRegexp(`mta-sts.{domain:.+}`)"
+      - "traefik.http.routers.autoconfig.entrypoints=websecure"
+      - "traefik.http.routers.autoconfig.tls=true"
+      - "traefik.http.services.autoconfig.loadbalancer.server.port=8100"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  webhooks:
+    # Replicated below — see the api service above for why container_name
+    # must be nulled out here.
+    container_name: !reset null
+    # See the api service above — same fixed-host-port-vs-replicas conflict.
+    ports: !reset []
+    restart: always
+
+    environment:
+      - WEBHOOK_URLS=${WEBHOOK_URLS}
+      - WEBHOOK_SECRET=${WEBHOOK_SECRET}
+      - DB_HOST=mysql
+      - DB_PORT=3306
+      - DB_NAME=${DB_NAME:-mailserver}
+      - DB_USER=${DB_USER:-mailuser}
+      - DB_PASSWORD=${DB_PASSWORD:-mailpassword}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
       - FLASK_ENV=production
     volumes:
       - ./logs/worker/webhooks:/app/logs
@@ -122,13 +393,32 @@ services:
         max-size: "10m"
         max-file: "3"
     deploy:
+      replicas: 2
       resources:
         limits:
           memory: 512M
 
   tracking:
+    # Replicated below — see the api service above for why container_name
+    # must be nulled out here.
+    container_name: !reset null
+    # See the api service above — same fixed-host-port-vs-replicas conflict.
+    ports: !reset []
     restart: always
+
     environment:
+      - DB_HOST=mysql
+      - DB_PORT=3306
+      - DB_USER=${DB_USER:-mailuser}
+      - DB_PASSWORD=${DB_PASSWORD:-mailpassword}
+      - DB_NAME=${DB_NAME:-mailserver}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - TRACKING_DOMAIN=${HOSTNAME:-mail.${DOMAIN:-example.com}}
+      # Without this, prod fell back to composing the unrouted track.<domain> host -- every injected tracking/unsubscribe URL was dead.
+      - TRACKING_BASE_URL=${TRACKING_BASE_URL:-https://api.${DOMAIN:-example.com}}
+      - WEBHOOK_SECRET=${WEBHOOK_SECRET}
+      - WEBHOOK_URLS=${WEBHOOK_URLS}
       - FLASK_ENV=production
     volumes:
       - ./logs/tracking:/app/logs
@@ -138,13 +428,77 @@ services:
         max-size: "10m"
         max-file: "3"
     deploy:
+      replicas: 2
       resources:
         limits:
           memory: 512M
 
   rate_limiter:
+    # Bound to loopback: this service is reached over the compose network by
+    # its service name, and from outside only through Traefik on 443. The
+    # published 0.0.0.0 port bypassed TLS and, for several services, all
+    # authentication -- verified reachable from the public internet.
+    ports: !override
+      - "127.0.0.1:8082:8082"
     restart: always
+
     environment:
+      - DB_HOST=mysql
+      - DB_PORT=3306
+      - DB_NAME=${DB_NAME:-mailserver}
+      - DB_USER=${DB_USER:-mailuser}
+      - DB_PASSWORD=${DB_PASSWORD:-mailpassword}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_URL=redis://redis:6379/0
+      - FLASK_ENV=production
+      # Bounce-rate tripwire (phase-01): scanning OFF by default until the
+      # thresholds have been watched against real traffic; a pause key set
+      # by hand is enforced regardless of the flag.
+      - TRIPWIRE_ENABLED=${TRIPWIRE_ENABLED:-false}
+      - TRIPWIRE_WINDOW_MINUTES=${TRIPWIRE_WINDOW_MINUTES:-60}
+      - TRIPWIRE_MIN_MESSAGES=${TRIPWIRE_MIN_MESSAGES:-50}
+      - TRIPWIRE_BOUNCE_RATE=${TRIPWIRE_BOUNCE_RATE:-0.05}
+      - TRIPWIRE_COMPLAINT_RATE=${TRIPWIRE_COMPLAINT_RATE:-0.003}
+      - TRIPWIRE_PAUSE_TTL_SECONDS=${TRIPWIRE_PAUSE_TTL_SECONDS:-21600}
+      # Send-credit enforcement (phase-03): OFF by default -- deploying the
+      # code and enabling it are two separate decisions, and the second
+      # needs someone watching real traffic.
+      - SEND_CREDIT_ENFORCEMENT=${SEND_CREDIT_ENFORCEMENT:-false}
+      # Inbound per-second limits keyed on the SENDER's org/domain. External
+      # senders (Google, Microsoft, DMARC aggregators) legitimately burst;
+      # the code defaults (10 / 2) are tight for them. Passed through so the
+      # .env value actually reaches the container -- an unpassed env var is
+      # a dead switch (the SEND_CREDIT_ENFORCEMENT lesson).
+      - ORG_INBOUND_SECOND_DEFAULT=${ORG_INBOUND_SECOND_DEFAULT:-10}
+      - DOMAIN_INBOUND_SECOND_DEFAULT=${DOMAIN_INBOUND_SECOND_DEFAULT:-2}
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  analytics:
+    # Bound to loopback: this service is reached over the compose network by
+    # its service name, and from outside only through Traefik on 443. The
+    # published 0.0.0.0 port bypassed TLS and, for several services, all
+    # authentication -- verified reachable from the public internet.
+    ports: !override
+      - "127.0.0.1:8087:8085"
+    restart: always
+
+    environment:
+      - DB_HOST=mysql
+      - DB_PORT=3306
+      - DB_NAME=${DB_NAME:-mailserver}
+      - DB_USER=${DB_USER:-mailuser}
+      - DB_PASSWORD=${DB_PASSWORD:-mailpassword}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
       - FLASK_ENV=production
     logging:
       driver: json-file
@@ -154,22 +508,17 @@ services:
     deploy:
       resources:
         limits:
-          memory: 256M
-
-  autoconfig:
-    restart: always
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "3"
-    deploy:
-      resources:
-        limits:
-          memory: 256M
+          memory: 512M
 
   templates:
+    # Bound to loopback: this service is reached over the compose network by
+    # its service name, and from outside only through Traefik on 443. The
+    # published 0.0.0.0 port bypassed TLS and, for several services, all
+    # authentication -- verified reachable from the public internet.
+    ports: !override
+      - "127.0.0.1:8095:8089"
     restart: always
+
     logging:
       driver: json-file
       options:
@@ -179,3 +528,184 @@ services:
       resources:
         limits:
           memory: 256M
+
+  docs:
+    # Bound to loopback: this service is reached over the compose network by
+    # its service name, and from outside only through Traefik on 443. The
+    # published 0.0.0.0 port bypassed TLS and, for several services, all
+    # authentication -- verified reachable from the public internet.
+    ports: !override
+      - "127.0.0.1:8000:80"
+      - "127.0.0.1:8443:443"
+    restart: always
+    environment:
+      - ACME_STAGING=false
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.docs.rule=Host(`docs.${DOMAIN}`)"
+      - "traefik.http.routers.docs.entrypoints=websecure"
+      - "traefik.http.routers.docs.tls=true"
+      - "traefik.http.services.docs.loadbalancer.server.port=80"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  # ===========================================================================
+  # Kafka & Zookeeper
+  # ===========================================================================
+
+  roundcube:
+    ports: !override
+      - "127.0.0.1:8880:80"
+
+  # ==========================================================================
+  # Mailyte Console (PRD §9 shipping model, ADR-002 §7)
+  #
+  # Prerequisites, in order — this service will not start without them:
+  #   1. ghcr.io/techies-africa/mailyte-console:<tag> is published. There is no ../mailyte-console
+  #      checkout on a production host, so `build:` is impossible here; the
+  #      image must come from a registry.
+  #   2. CONSOLE_VERSION is pinned in the DevPilot environment. `latest` on a
+  #      production mail console means it can change under you on any pull.
+  #   3. CONSOLE_ALLOWED_IPS lists the operator networks (comma-separated CIDR).
+  #   4. deployment/deploy.sh passes --profile console, or `dc config
+  #      --services` will not list this service and the deploy will skip it.
+  #
+  # Exposure is the part that matters. ADR-002 §7: VPN or IP allowlist, never
+  # public DNS. This console can read every tenant's metadata, revoke every
+  # session and delete organizations, so it is the highest-value target in the
+  # stack. The allowlist defaults to loopback only — if CONSOLE_ALLOWED_IPS is
+  # forgotten, nobody gets in. That is the correct direction to fail.
+  # ==========================================================================
+  # ==========================================================================
+  # Webmail. PUBLIC by design -- this is the mailbox holder's own mail client,
+  # not a staff tool. It deliberately carries NO ipallowlist middleware; the
+  # console's allowlist directly above must not be copied onto it.
+  #
+  # Before this can be deployed:
+  #   1. ghcr.io/techies-africa/mailyte-webmail:<tag> is published (the release
+  #      workflow in that repo publishes it on a v* tag). There is no
+  #      ../mailyte-webmail checkout on a production host, so `build:` is
+  #      impossible and the image must come from a registry.
+  #   2. WEBMAIL_VERSION is pinned in the DevPilot environment. `latest` on a
+  #      production webmail means it can change under you on any pull.
+  #   3. WEBMAIL_HOST points at a name whose DNS reaches THIS host and whose
+  #      certificate cert_manager issues. It defaults to webmail.${DOMAIN}
+  #      rather than mail.${DOMAIN} on purpose: mail.${DOMAIN} is usually
+  #      already the MX and the old webmail's address, and taking it needs the
+  #      migration to have happened first.
+  #   4. deployment/deploy.sh passes --profile webmail, or `dc config
+  #      --services` will not list this service and the deploy will skip it.
+  # ==========================================================================
+  webmail:
+    # No published port: traefik is the only way in, so nothing listens on a
+    # host interface.
+    ports: !override []
+    environment:
+      # Internal network only -- the browser never reaches the API directly.
+      - MAILBOX_API_BASE_URL=http://api:8080/api/v1
+      - NODE_ENV=production
+    labels:
+      - "traefik.enable=true"
+      # Two names, both serving the app directly. MAIL_HOSTNAME is the
+      # advertised IMAP/SMTP hostname (what autoconfig hands to clients), so
+      # it is the name people type into a browser expecting webmail -- the
+      # mail.google.com pattern. NOT mail.${DOMAIN}: in production DOMAIN is
+      # the server's PTR identity (courier.mailyte.com), not the brand domain
+      # -- the same split WEBMAIL_HOST exists for. Safe to dual-host: the app
+      # is host-agnostic by design (per-request API base, host-only session
+      # cookie), so the only effect is that sessions are per-hostname.
+      # cert_manager already issues certificates for both names.
+      - "traefik.http.routers.webmail.rule=Host(`${WEBMAIL_HOST:-webmail.${DOMAIN}}`) || Host(`${MAIL_HOSTNAME:-mail.${DOMAIN}}`)"
+      - "traefik.http.routers.webmail.entrypoints=websecure"
+      # tls=true and NO certresolver, matching every other router in this file.
+      # Traefik's built-in ACME is deliberately unused: configuring a
+      # certResolver makes it intercept /.well-known/acme-challenge/ on that
+      # entrypoint, which swallowed cert_manager's certbot challenges in
+      # production once already. One ACME client issues everything.
+      - "traefik.http.routers.webmail.tls=true"
+      - "traefik.http.services.webmail.loadbalancer.server.port=3000"
+      - "traefik.http.routers.webmail.middlewares=webmail-headers"
+      # HSTS and clickjacking protection. The app sets these itself too; having
+      # them at the edge means they survive even if a request never reaches it.
+      - "traefik.http.middlewares.webmail-headers.headers.stsSeconds=63072000"
+      - "traefik.http.middlewares.webmail-headers.headers.stsIncludeSubdomains=true"
+      - "traefik.http.middlewares.webmail-headers.headers.contentTypeNosniff=true"
+      - "traefik.http.middlewares.webmail-headers.headers.frameDeny=true"
+      - "traefik.http.middlewares.webmail-headers.headers.referrerPolicy=strict-origin-when-cross-origin"
+
+  console:
+    # No published port: traefik is the only way in, so nothing listens on a
+    # host interface (the same !override the roundcube entry above exists for).
+    ports: !override []
+    environment:
+      # Internal network only. The browser never talks to the API directly —
+      # the console proxies every call server-side, which is what keeps the
+      # mail server off any browser-reachable network.
+      - PLATFORM_API_URL=http://api:8080
+      - NODE_ENV=production
+    labels:
+      - "traefik.enable=true"
+      # Two names on purpose. CONSOLE_HOST is the one people should use --
+      # a service name on the apex survives the console moving to another
+      # server, whereas console.${DOMAIN} bakes THIS machine into the URL.
+      # The legacy name stays matched so existing bookmarks keep working;
+      # drop the second Host() once nobody is using it.
+      #
+      # With CONSOLE_HOST unset both halves are the same name, which is a
+      # valid (if redundant) rule -- so an untouched deployment behaves
+      # exactly as before.
+      - "traefik.http.routers.console.rule=Host(`${CONSOLE_HOST:-console.${DOMAIN}}`) || Host(`console.${DOMAIN}`)"
+      - "traefik.http.routers.console.entrypoints=websecure"
+      # tls=true and NO certresolver, matching every other router in this
+      # file. Traefik's built-in ACME is deliberately unused here: configuring
+      # a certResolver makes it intercept /.well-known/acme-challenge/ on that
+      # entrypoint, which swallowed cert_manager's certbot challenges in
+      # production once already (see deployment/traefik/traefik.yml). One ACME
+      # client issues everything; traefik reads the result via its file
+      # provider.
+      - "traefik.http.routers.console.tls=true"
+      - "traefik.http.services.console.loadbalancer.server.port=3100"
+      - "traefik.http.routers.console.middlewares=console-allowlist,console-headers"
+      # Fails closed: loopback-only unless CONSOLE_ALLOWED_IPS is set.
+      - "traefik.http.middlewares.console-allowlist.ipallowlist.sourcerange=${CONSOLE_ALLOWED_IPS:-127.0.0.1/32}"
+      # Operator sessions are IP-bound (ADR-002 §7).
+      #
+      # Deliberately NO ipstrategy.depth here. depth=1 was set on the
+      # assumption that "Traefik sets X-Forwarded-For itself" so the
+      # allowlist would read the real client. It does not work that way:
+      # Traefik only honours an inbound X-Forwarded-For from a proxy listed
+      # in the entrypoint's forwardedHeaders.trustedIPs, and there is no
+      # proxy in front of Traefik here, so a client-supplied header is
+      # discarded. Traefik adds X-Forwarded-For on the request it sends to
+      # the *backend*, which is after middlewares have already run.
+      #
+      # The result was that at middleware time the header was empty, depth=1
+      # selected nothing, and the allowlist denied every request -- the
+      # console returned 403 to everyone, including allowlisted addresses.
+      # Confirmed live: 403 with no header, with a correct X-Forwarded-For,
+      # and with a spoofed one alike.
+      #
+      # With no ipStrategy, Traefik falls back to the connection's remote
+      # address, which is the correct and unspoofable source at the edge. If
+      # a load balancer is ever put in front of Traefik, set
+      # forwardedHeaders.trustedIPs on the websecure entrypoint FIRST, then
+      # reintroduce a depth matching that topology.
+      - "traefik.http.middlewares.console-headers.headers.stsSeconds=31536000"
+      - "traefik.http.middlewares.console-headers.headers.stsIncludeSubdomains=true"
+      - "traefik.http.middlewares.console-headers.headers.forceSTSHeader=true"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+
+
+volumes:
+  letsencrypt_traefik:
+    driver: local

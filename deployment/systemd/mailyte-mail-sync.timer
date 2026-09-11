@@ -1,0 +1,15 @@
+[Unit]
+Description=15-minute Mailyte Maildir sync to S3
+Documentation=file:///var/www/mailyte-email-server/current/docs/operations/disaster-recovery.md
+
+[Timer]
+# The archive (DR-2) already makes message CONTENT durable within seconds.
+# This closes the other half -- which folder a message is in and whether it is
+# read/flagged/deleted -- which lives in Maildir filenames, not in the message.
+OnCalendar=*:0/15
+Persistent=true
+AccuracySec=30s
+Unit=mailyte-mail-sync.service
+
+[Install]
+WantedBy=timers.target

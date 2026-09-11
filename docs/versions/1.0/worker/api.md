@@ -1,7 +1,7 @@
 
 # API Gateway Service
 
-The API Gateway serves as the central entry point for all client interactions with the Mailyte Mail Server. It provides a unified REST API for managing organizations, domains, mailboxes, and accessing all system features.
+The API Gateway serves as the central entry point for all client interactions with the Enterprise Mail Server. It provides a unified REST API for managing organizations, domains, mailboxes, and accessing all system features.
 
 ## Overview
 
@@ -484,4 +484,4 @@ wrk -t10 -c100 -d30s http://localhost:5000/api/v1/organizations
 4. **Monitor Performance**: Track response times and error rates
 5. **Version APIs**: Use versioning for backward compatibility
 
-The API Gateway provides a robust, scalable foundation for all client interactions with the Mailyte Mail Server, ensuring secure and efficient access to all system capabilities.
+The API Gateway provides a robust, scalable foundation for all client interactions with the Enterprise Mail Server, ensuring secure and efficient access to all system capabilities.

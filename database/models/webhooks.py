@@ -24,12 +24,12 @@ from sqlalchemy.sql import func
 from shared.ulid_utils import generate_ulid
 
 from . import Base
-from .enums import WebhookDeliveryStatus
+from .enums import WebhookDeliveryStatus, enum_values
 
 
 # Webhook Management
 class WebhookURL(Base):
-    """Dynamic webhook URL management for production-grade distributed logging"""
+    """Dynamic webhook URL management for enterprise-grade distributed logging"""
 
     __tablename__ = "webhook_urls"
 
@@ -119,7 +119,7 @@ class WebhookDeliveryLog(Base):
 
     # Delivery status and tracking
     delivery_status = Column(
-        SQLEnum(WebhookDeliveryStatus),
+        SQLEnum(WebhookDeliveryStatus, values_callable=enum_values),
         nullable=False,
         default=WebhookDeliveryStatus.PENDING,
         index=True,

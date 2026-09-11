@@ -18,16 +18,26 @@ Endpoints:
 
 import logging
 import os
+import sys
+import time
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
 import mysql.connector
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi import Path as PathParam
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from lxml import etree
 from mysql.connector import pooling
+
+# Add shared directory to path. Import explicitly from shared: /app precedes
+# the appended shared path on sys.path, so a bare `from metrics import ...`
+# can silently resolve to the wrong local module -- always use shared.metrics.
+project_root = Path(__file__).parent.parent.parent
+sys.path.append(str(project_root / "shared"))
+from shared.metrics import get_metrics
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -38,7 +48,13 @@ DB_PORT = int(os.getenv("DB_PORT", "3306"))
 DB_NAME = os.getenv("DB_NAME", "mailserver")
 DB_USER = os.getenv("DB_USER", "mailuser")
 DB_PASSWORD = os.getenv("DB_PASSWORD", "")
-HOSTNAME = os.getenv("HOSTNAME", "mail.example.com")
+# The hostname mail clients are told to connect to. MAIL_HOSTNAME first,
+# because that is the customer-facing name (mail.mailyte.com) and the one the
+# certificate is issued for; HOSTNAME is the server's own identity
+# (courier.mailyte.com), used for its PTR and SMTP HELO. Handing a client the
+# HELO name works only by accident -- both resolve to the same host -- and
+# shows customers a name they were never told to expect.
+HOSTNAME = os.getenv("MAIL_HOSTNAME") or os.getenv("HOSTNAME", "mail.example.com")
 DOMAIN = os.getenv("DOMAIN", "example.com")
 MTA_STS_MODE = os.getenv("MTA_STS_MODE", "testing")
 PORT = int(os.getenv("PORT", "8100"))
@@ -103,8 +119,16 @@ def get_mx_hostname(domain: str) -> str:
             row = cursor.fetchone()
             cursor.close()
             if row:
-                # The MX record hostname is typically mail.<domain>
-                return f"mail.{row['domain']}"
+                # Every hosted domain connects to this shared server, so the
+                # client hostname is OUR name -- not mail.<their domain>.
+                #
+                # This returned f"mail.{domain}" and so handed Thunderbird and
+                # Outlook a hostname like mail.techies.africa, which does not
+                # exist and was never in any certificate. Auto-setup could not
+                # work for a single customer domain. The lookup still matters:
+                # it confirms the domain is actually hosted here before
+                # handing out settings for it.
+                return HOSTNAME
     except Exception:
         logger.warning("Could not query MX for domain %s, using HOSTNAME fallback", domain)
     return HOSTNAME
@@ -258,6 +282,30 @@ app = FastAPI(
     description="Email client auto-configuration and DNS record helper service",
     version="1.0.0",
 )
+
+# Initialize metrics
+metrics = get_metrics("autoconfig")
+
+
+@app.middleware("http")
+async def metrics_middleware(request: Request, call_next):
+    start_time = time.time()
+    response = await call_next(request)
+    duration = time.time() - start_time
+    metrics.record_request(
+        method=request.method,
+        path=request.url.path,
+        status_code=response.status_code,
+        duration=duration,
+    )
+    return response
+
+
+@app.get("/metrics")
+async def prometheus_metrics():
+    """Prometheus metrics endpoint"""
+    metrics_data = metrics.get_prometheus_metrics()
+    return PlainTextResponse(metrics_data)
 
 
 # ----- Mozilla Autoconfig ------------------------------------------------
@@ -435,7 +483,12 @@ async def dns_records(
         {
             "type": "TXT",
             "name": f"_dmarc.{domain}",
-            "value": f"v=DMARC1; p=quarantine; rua=mailto:dmarc-reports@{domain}; ruf=mailto:dmarc-forensics@{domain}; fo=1",
+            # dmarc@ (not dmarc-reports@/dmarc-forensics@): one convention
+            # across the platform, matching what mailyte-api publishes and
+            # what DmarcReportAliasService provisions a delivering alias for.
+            # Three rival conventions meant reports bounced 550 wherever the
+            # address nobody provisioned happened to be the published one.
+            "value": f"v=DMARC1; p=quarantine; rua=mailto:dmarc@{domain}; ruf=mailto:dmarc@{domain}; fo=1",
             "ttl": 3600,
             "description": "DMARC policy for email authentication reporting",
         },

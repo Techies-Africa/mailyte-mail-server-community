@@ -1,19 +1,19 @@
 ---
 title: Authorization
-description: How Mailyte enforces per-organization data isolation, admin vs user access, and the permission model.
+description: How Mailyte enforces per-organization data isolation, the platform/organization scope split, roles, and sender restrictions.
 ---
 
 # Authorization
 
-Authentication tells us *who* you are. Authorization tells us *what you can do*. Mailyte uses a multi-tenant model where every piece of data belongs to an organization, and access is strictly scoped.
+Authentication tells us *who* you are. Authorization tells us *what you can do*. Mailyte uses a multi-tenant model where every piece of tenant data belongs to an organization, and access is strictly scoped.
 
 ## Multi-Tenant Isolation
 
 ```mermaid
 graph TD
-    KEY1[API Key: Org A] --> ORGA[Organization A]
-    KEY2[API Key: Org B] --> ORGB[Organization B]
-    KEY3[API Key: Global] --> ORGA
+    KEY1[Credential: Org A] --> ORGA[Organization A]
+    KEY2[Credential: Org B] --> ORGB[Organization B]
+    KEY3[Platform credential] --> ORGA
     KEY3 --> ORGB
 
     ORGA --> DA[Domains A]
@@ -27,141 +27,88 @@ graph TD
 
 ### How Isolation Works
 
-Every database table that holds tenant data includes an `organization_id` column. Every query is filtered by this column.
+Every tenant-data table carries an `organization_id` column, and the API forces that filter server-side. When a credential is organization-scoped:
 
-When an API key is scoped to an organization:
+- Domain, mailbox, alias, analytics, queue, and log listings return only that org's rows
+- The requested `organization_id` in a query parameter is ignored — the credential's own org always wins
+- Cross-org lookups of a specific resource return **404, never 403** — the API does not leak the existence of other tenants' resources
 
-- `GET /api/v1/get/domain/all` only returns domains for that org
-- `POST /api/v1/add/mailbox` can only create mailboxes under that org's domains
-- `GET /api/v1/get/tracking/stats/...` only shows that org's tracking data
-- Queue, logs, analytics — all scoped to the org
+### Two scopes, never mixed (ADR-002)
 
-There's no API endpoint that returns data across organizations unless you're using a global (unscoped) key.
+| Scope | Who | What it can reach |
+|-------|-----|-------------------|
+| `organization` | Tenant credentials and dashboard sessions | Tenant routes only, filtered to their own org |
+| `platform` | Staff (platform operators, platform API keys) | Platform routes — monitoring, queue control, security administration, cross-org reads |
 
-### Database-Level Enforcement
+The load-bearing property: **a tenant credential can never reach a platform-scope route, regardless of its own permission flags**. Routes like service restart, auto-heal, security administration, and infrastructure monitoring are declared `scope="platform"` in the route decorator and reject organization credentials outright.
 
-Every tenant-scoped query includes the org filter:
+### Roles on platform scope
 
-```sql
--- API key scoped to "acme-corp"
-SELECT * FROM domains WHERE organization_id = 'acme-corp' AND active = 1;
+Platform operators carry an ordered role: `support` < `operator` < `admin` < `owner`. Routes gate on the minimum tier:
 
--- Even if you pass a domain_id from another org, it returns nothing
-SELECT * FROM email_accounts WHERE domain_id = 42 AND organization_id = 'acme-corp';
--- Returns 0 rows if domain 42 belongs to a different org
-```
+| Role | Examples of what it unlocks |
+|------|---------------------------|
+| `support` | Read health, service status, metrics, security listings |
+| `operator` | Restart services, trigger auto-heal, test webhooks, flush queues |
+| `admin` / `owner` | Operator management, destructive platform operations |
 
-This is enforced at the application layer. The API never constructs a query without the org filter when the key is scoped.
-
-## Access Levels
-
-### Global Admin
-
-- Uses `X-Admin-Password` header
-- Full access to everything
-- Can create API keys, manage all organizations
-- Not scoped to any organization
-- Should only be used for system administration
-
-### Global API Key
-
-- API key with `organization_id = NULL`
-- Can access all organizations
-- Used for management dashboards, billing integrations
-- Should be very carefully protected
-
-### Organization-Scoped API Key
-
-- API key with `organization_id = "some-org"`
-- Can only access that organization's data
-- Can create/read/update/delete domains, mailboxes, aliases within the org
-- Cannot see other organizations or their data
-- This is what you give to customers
-
-### Read-Only API Key
-
-- API key with `read_only = true`
-- Can only call GET endpoints
-- Cannot create, update, or delete anything
-- Useful for monitoring dashboards and reporting
+A missing or unrecognised role fails **closed** — it satisfies no role gate.
 
 ## Permission Model
 
-The `permissions` JSON field on API keys controls granular access:
+The `permissions` JSON field on API keys is coarse, not per-resource:
 
 ```json
-{
-  "permissions": [
-    "domain:read",
-    "domain:write",
-    "mailbox:read",
-    "mailbox:write",
-    "alias:read",
-    "alias:write",
-    "stats:read",
-    "tracking:read",
-    "webhook:read",
-    "webhook:write"
-  ]
-}
+{"read": true, "write": true}
 ```
 
-### Permission Types
+| Flag | Effect |
+|------|--------|
+| `read_only: true` | Write-level routes return `403` |
+| `admin_access: true` | Required for routes declared with `permission_level="admin"` |
 
-| Permission | Grants |
-|-----------|--------|
-| `domain:read` | List and view domains |
-| `domain:write` | Create, update, delete domains |
-| `mailbox:read` | List and view mailboxes |
-| `mailbox:write` | Create, update, delete mailboxes |
-| `alias:read` | List and view aliases |
-| `alias:write` | Create, update, delete aliases |
-| `dkim:read` | View DKIM keys |
-| `dkim:write` | Generate DKIM keys |
-| `stats:read` | View statistics and analytics |
-| `tracking:read` | View tracking events |
-| `webhook:read` | View webhook configuration |
-| `webhook:write` | Create, update, delete webhooks |
-| `queue:read` | View mail queue |
-| `queue:write` | Flush or delete queue messages |
-| `send:email` | Send emails via the API |
-
-When `permissions` is `NULL`, the key has all permissions (backward compatible).
+There is no per-resource permission list (`domain:read`-style grants do not exist). Scoping is done by organization and by the platform/organization scope split, not by fine-grained permission strings.
 
 ## SMTP Authorization
 
 SMTP authorization works differently. When a user authenticates via SASL:
 
-- They can only send email from addresses they own or aliases pointing to their mailbox
-- They can only access their own mailbox via IMAP/POP3
-- Dovecot enforces this through its `userdb` configuration
+- They can only access their own mailbox via IMAP/POP3 (Dovecot `userdb`)
+- On the submission ports, they can only send as addresses they own (`smtpd_sender_login_maps`, backed by MySQL)
+- SMTP API-key credentials may send as any address **at their own domain** — that's their defined scope
 
-### Sender Restrictions
+### Sender Restrictions — enforced on 587/465 only, deliberately
 
-Postfix checks that the authenticated user matches the sender address:
+`reject_sender_login_mismatch` is applied as a per-service override in `master.cf`, **first** in the restriction list so `permit_sasl_authenticated` cannot short-circuit it:
 
 ```
-# In Postfix config
-smtpd_sender_restrictions =
-    reject_sender_login_mismatch
+# master.cf
+submission (587) -o smtpd_sender_restrictions=reject_sender_login_mismatch,permit_sasl_authenticated,reject
+smtps      (465) -o smtpd_sender_restrictions=reject_sender_login_mismatch,permit_sasl_authenticated,reject
 ```
 
-This prevents `user@example.com` from sending as `admin@example.com`.
+This prevents an authenticated `user@example.com` from sending as `admin@example.com`.
+
+!!! danger "Never move this into the global `smtpd_sender_restrictions`"
+    Port 25 inherits the global value and carries *unauthenticated* mail from the internet by definition. With the mismatch check global, any inbound message whose envelope sender owns a mailbox on this server is rejected with `553 5.7.1 ... not logged in` — which **broke all inter-domain inbound mail in production on 2026-08-22**. The global `smtpd_sender_restrictions` in `main.cf` deliberately contains only `permit_mynetworks, permit_sasl_authenticated, reject_non_fqdn_sender, reject_unknown_sender_domain`, and the `main.cf` comment block documents the incident. Read it before touching sender restrictions.
+
+### Per-organization IP allowlists at SMTP
+
+Organizations can restrict which client IPs may relay for their domains. This is enforced live in the Postfix submission path by a policy service (`check_policy_service unix:private/policy-ip-access` → `ip_access_policy.py`), reading the `ip_access_rules` table that `/api/v1/security/ip-rules` manages. No rules for an org = all IPs allowed; any whitelist rules = only those IPs.
 
 ## Webhook Data Isolation
 
-Each organization can have its own webhook endpoints. Events are only sent to:
+Organization event webhooks are delivered only to that organization's registered endpoints (plus global endpoints). An event from Organization A is never sent to Organization B's webhook.
 
-1. The organization's registered webhook URLs
-2. Global webhook URLs (if any)
+## Revocation Caveats
 
-An event from Organization A is never sent to Organization B's webhook endpoint.
+- **API keys:** `active = 0` takes effect on the next request — there is no cache in front of the lookup.
+- **Mailbox and SMTP-credential auth:** Dovecot's auth cache keeps a revoked/changed credential working for up to **1 hour** unless flushed. SMTP-credential mutations flush automatically; mailbox mutations do not — see [Authentication](authentication.md#the-dovecot-auth-cache-delays-revocation).
 
 ## Best Practices
 
-1. **Use org-scoped keys** for customer-facing integrations
-2. **Use read-only keys** for dashboards and reporting
-3. **Set permissions explicitly** instead of relying on defaults
-4. **Audit API key usage** — check the `usage_count` and `last_used` fields
-5. **Delete unused keys** — stale keys are a security risk
-6. **Never share global keys** with external parties
+1. **Use org-scoped credentials** for customer-facing integrations — never hand out platform scope
+2. **Use `read_only` keys** for dashboards and reporting
+3. **Audit access** — auth events and key lifecycle land in `audit_logs` (`/api/v1/compliance/audit-log`)
+4. **Deactivate unused keys** — stale keys are a security risk
+5. **Flush the Dovecot auth cache** whenever a mailbox suspension or password change must bite immediately

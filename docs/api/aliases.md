@@ -1,24 +1,28 @@
 # Aliases
 
-Manage email aliases -- forwarding addresses that route mail to one or more destinations.
+Manage email aliases -- forwarding addresses that route mail to one or more
+destinations.
+
+All alias routes live under the `/api/v1/aliases` prefix. The request fields are
+`source` (the alias address) and `destination` (where mail goes) -- both must be
+full, valid email addresses. Tenant credentials can only manage aliases on domains
+their organization owns.
 
 ## Create Alias
 
 Create a new email alias.
 
 ```
-POST /api/v1/add/alias
+POST /api/v1/aliases/add
 ```
 
 **Request Body**
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `address` | string | Yes | The alias email address (e.g., `info@acme.com`) |
-| `goto` | string | Yes | Comma-separated destination addresses |
-| `active` | integer | No | `1` for active, `0` for inactive (default: `1`) |
-
-The domain in the `address` field must already exist and be active.
+| `source` | string | Yes | The alias email address (e.g., `info@acme.com`). Must be a full, valid address on an existing, active domain in your organization |
+| `destination` | string | Yes | Comma-separated destination addresses; every entry must be a valid email address |
+| `active` | integer | No | `1` for active (default), `0` for inactive |
 
 **Example Request**
 
@@ -26,11 +30,11 @@ The domain in the `address` field must already exist and be active.
 curl -X POST -H "X-API-Key: YOUR_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "address": "info@acme.com",
-    "goto": "john@acme.com, jane@acme.com",
+    "source": "info@acme.com",
+    "destination": "john@acme.com, jane@acme.com",
     "active": 1
   }' \
-  http://your-server:5000/api/v1/add/alias
+  http://your-server:8083/api/v1/aliases/add
 ```
 
 **Example Response**
@@ -40,42 +44,38 @@ curl -X POST -H "X-API-Key: YOUR_KEY" \
   "type": "success",
   "msg": "Alias info@acme.com created successfully",
   "data": {
-    "alias_id": 1,
-    "address": "info@acme.com"
+    "alias_id": "01J6EXAMPLEULID0000000000A",
+    "source": "info@acme.com"
   }
 }
 ```
 
-### Catch-All Aliases
+`alias_id` is the created row's ULID. (Before 2026-08-30 it always read `0` --
+the handler overwrote the ULID with `cursor.lastrowid`, which only tracks
+AUTO_INCREMENT columns; responses from older deployments may still show `0`.)
 
-To create a catch-all alias that receives mail for any address at a domain, use `@domain.com` as the address:
+Alias source addresses are globally unique; a duplicate returns `409`. A domain that
+does not exist, is inactive, or belongs to another organization returns `400`
+(`"Domain {domain} not found or inactive"`).
 
-```bash
-curl -X POST -H "X-API-Key: YOUR_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "address": "@acme.com",
-    "goto": "catchall@acme.com"
-  }' \
-  http://your-server:5000/api/v1/add/alias
-```
-
-!!! info "How catch-all works"
-    Any email sent to a non-existent address at the domain is delivered to the catch-all destination. For example, if `random123@acme.com` does not exist, the message goes to `catchall@acme.com`.
+!!! note "No catch-all syntax"
+    The `source` field must be a complete email address -- a bare `@domain.com`
+    catch-all is rejected by validation. Catch-all delivery is configured at the
+    domain level, not through this endpoint.
 
 ## List Aliases
 
-Retrieve all aliases, or look up a specific alias by ID or address.
+Retrieve aliases by ID, by source address, or list everything.
 
 ```
-GET /api/v1/get/alias/{alias_id}
+GET /api/v1/aliases/get/{alias_id}
 ```
 
 **Path Parameters**
 
 | Parameter | Type | Description |
 |---|---|---|
-| `alias_id` | string | Alias numeric ID, email address, or `all` to list everything |
+| `alias_id` | string | Alias ULID, alias source address, or `all` to list every **active** alias in your scope |
 
 **Query Parameters** (when `alias_id` is `all`)
 
@@ -88,14 +88,14 @@ GET /api/v1/get/alias/{alias_id}
 
 ```bash
 curl -H "X-API-Key: YOUR_KEY" \
-  "http://your-server:5000/api/v1/get/alias/all?page=1&per_page=25"
+  "http://your-server:8083/api/v1/aliases/get/all?page=1&per_page=25"
 ```
 
 **Example Request -- Get by Address**
 
 ```bash
 curl -H "X-API-Key: YOUR_KEY" \
-  http://your-server:5000/api/v1/get/alias/info@acme.com
+  http://your-server:8083/api/v1/aliases/get/info@acme.com
 ```
 
 **Example Response**
@@ -106,41 +106,48 @@ curl -H "X-API-Key: YOUR_KEY" \
   "msg": "Aliases retrieved successfully",
   "data": [
     {
-      "id": 1,
-      "address": "info@acme.com",
-      "goto": "john@acme.com, jane@acme.com",
-      "domain": "acme.com",
+      "id": "01J1ALS0000000000000000000",
+      "source": "info@acme.com",
+      "destination": "john@acme.com, jane@acme.com",
+      "domain_id": "01J1DOM0000000000000000000",
+      "domain_description": "Primary domain",
+      "organization_id": "01J1ABCDEF2345GHJKMNPQRSTV",
       "active": 1,
       "destination_count": 2,
       "destinations": ["john@acme.com", "jane@acme.com"],
-      "monthly_forwards": 142,
-      "created": "2025-01-20T09:00:00",
-      "modified": "2025-03-20T14:22:00"
+      "monthly_forwards": null,
+      "created_at": "2026-01-20T09:00:00",
+      "updated_at": "2026-03-20T14:22:00"
     }
   ]
 }
 ```
 
-## Update Alias
+!!! note "monthly_forwards is best-effort"
+    Per-alias forwarding counts depend on a `message_forwards` table that no
+    migration currently creates, so `monthly_forwards` is `null` on standard
+    deployments rather than a real count.
 
-Update one or more aliases. You can change the destination addresses or toggle active status.
+## Update Aliases
+
+Batch-update one or more aliases -- change destinations or toggle active status.
 
 ```
-POST /api/v1/edit/alias
+POST /api/v1/aliases/edit
 ```
 
 **Request Body**
 
 | Field | Type | Required | Description |
 |---|---|---|---|
-| `items` | array | Yes | List of alias IDs or addresses to update |
+| `items` | array | Yes | List of alias ULIDs or source addresses to update |
 | `attr` | object | Yes | Fields to update |
 
 **Allowed `attr` Fields**
 
 | Field | Type | Description |
 |---|---|---|
-| `goto` | string | New comma-separated destination addresses |
+| `destination` | string | New comma-separated destination addresses (each validated) |
 | `active` | integer | `1` or `0` |
 
 **Example Request**
@@ -151,11 +158,11 @@ curl -X POST -H "X-API-Key: YOUR_KEY" \
   -d '{
     "items": ["info@acme.com"],
     "attr": {
-      "goto": "john@acme.com, jane@acme.com, support@acme.com",
+      "destination": "john@acme.com, jane@acme.com, support@acme.com",
       "active": 1
     }
   }' \
-  http://your-server:5000/api/v1/edit/alias
+  http://your-server:8083/api/v1/aliases/edit
 ```
 
 **Example Response**
@@ -176,27 +183,18 @@ curl -X POST -H "X-API-Key: YOUR_KEY" \
 
 ## Delete Aliases
 
-Delete one or more aliases.
+Delete one or more aliases. Deleted aliases stop forwarding immediately.
 
 ```
-POST /api/v1/delete/alias
+POST /api/v1/aliases/delete
 ```
 
 **Request Body**
 
-An array of alias IDs or addresses:
+An array of alias ULIDs or source addresses:
 
 ```json
 ["info@acme.com", "sales@acme.com"]
-```
-
-**Example Request**
-
-```bash
-curl -X POST -H "X-API-Key: YOUR_KEY" \
-  -H "Content-Type: application/json" \
-  -d '["info@acme.com", "sales@acme.com"]' \
-  http://your-server:5000/api/v1/delete/alias
 ```
 
 **Example Response**
@@ -208,13 +206,13 @@ curl -X POST -H "X-API-Key: YOUR_KEY" \
   "data": [
     {
       "alias": "info@acme.com",
-      "address": "info@acme.com",
+      "source": "info@acme.com",
       "status": "success",
       "msg": "Alias info@acme.com deleted successfully"
     },
     {
       "alias": "sales@acme.com",
-      "address": "sales@acme.com",
+      "source": "sales@acme.com",
       "status": "success",
       "msg": "Alias sales@acme.com deleted successfully"
     }
@@ -224,17 +222,17 @@ curl -X POST -H "X-API-Key: YOUR_KEY" \
 
 ## Get Alias Statistics
 
-Get alias statistics for a specific domain, including forwarding volume.
+Get alias statistics for a specific domain.
 
 ```
-GET /api/v1/get/alias/stats/{domain}
+GET /api/v1/aliases/get/stats/{domain}
 ```
 
 **Example Request**
 
 ```bash
 curl -H "X-API-Key: YOUR_KEY" \
-  http://your-server:5000/api/v1/get/alias/stats/acme.com
+  http://your-server:8083/api/v1/aliases/get/stats/acme.com
 ```
 
 **Example Response**
@@ -251,26 +249,25 @@ curl -H "X-API-Key: YOUR_KEY" \
     },
     "top_destinations": [
       {
-        "goto": "john@acme.com",
+        "destination": "john@acme.com",
         "usage_count": 5
       }
     ],
-    "monthly_volume": [
-      {
-        "date": "2025-03-25",
-        "forwards_count": 42
-      }
-    ]
+    "monthly_volume": []
   }
 }
 ```
 
+`monthly_volume` depends on the same missing `message_forwards` table as
+`monthly_forwards` above and is an empty array on standard deployments.
+
 ## Bulk Create Aliases
 
-Create multiple aliases in a single request.
+Create multiple aliases in a single request. Each alias is validated independently
+-- invalid entries are skipped and reported while valid ones are created.
 
 ```
-POST /api/v1/add/alias/bulk
+POST /api/v1/aliases/add/bulk
 ```
 
 **Request Body**
@@ -278,32 +275,10 @@ POST /api/v1/add/alias/bulk
 ```json
 {
   "aliases": [
-    {
-      "address": "sales@acme.com",
-      "goto": "john@acme.com",
-      "active": 1
-    },
-    {
-      "address": "support@acme.com",
-      "goto": "jane@acme.com, helpdesk@acme.com",
-      "active": 1
-    }
+    {"source": "sales@acme.com", "destination": "john@acme.com", "active": 1},
+    {"source": "support@acme.com", "destination": "jane@acme.com, helpdesk@acme.com"}
   ]
 }
-```
-
-**Example Request**
-
-```bash
-curl -X POST -H "X-API-Key: YOUR_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "aliases": [
-      {"address": "sales@acme.com", "goto": "john@acme.com"},
-      {"address": "support@acme.com", "goto": "jane@acme.com, helpdesk@acme.com"}
-    ]
-  }' \
-  http://your-server:5000/api/v1/add/alias/bulk
 ```
 
 **Example Response**
@@ -319,16 +294,8 @@ curl -X POST -H "X-API-Key: YOUR_KEY" \
       "errors": 0
     },
     "results": [
-      {
-        "address": "sales@acme.com",
-        "status": "success",
-        "msg": "Alias created successfully"
-      },
-      {
-        "address": "support@acme.com",
-        "status": "success",
-        "msg": "Alias created successfully"
-      }
+      {"source": "sales@acme.com", "status": "success", "msg": "Alias created successfully"},
+      {"source": "support@acme.com", "status": "success", "msg": "Alias created successfully"}
     ]
   }
 }

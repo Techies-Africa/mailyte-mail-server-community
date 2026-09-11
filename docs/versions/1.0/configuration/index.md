@@ -1,7 +1,7 @@
 
 # Configuration Overview
 
-The Mailyte Mail Server uses a comprehensive configuration system based on environment variables, service-specific configuration files, and runtime parameters. This section provides complete guidance on configuring all aspects of the system.
+The Enterprise Mail Server uses a comprehensive configuration system based on environment variables, service-specific configuration files, and runtime parameters. This section provides complete guidance on configuring all aspects of the system.
 
 ## Configuration Hierarchy
 

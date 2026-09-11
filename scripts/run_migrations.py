@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
 """Migration entrypoint for the `migrate` compose service (phase-08 task 8.3).
 
-Ported from mailyte-email-server. `alembic upgrade head` alone isn't safe to
-run unconditionally, because two databases that are schema-identical can
-disagree about what alembic_version says:
+`alembic upgrade head` alone isn't safe to run unconditionally, because two
+databases that are schema-identical can disagree about what alembic_version
+says:
 
-  1. This repo's first-boot path: database/migrations/sql/*.sql via MySQL's
-     docker-entrypoint-initdb.d (unlike EE, CE keeps this mount -- it's
-     simpler and CE has no service with EE's ad-hoc-table race condition
-     bad enough to justify removing it). That produces the exact schema
+  1. CE's first-boot path (and this repo's own dev volumes, created before
+     this phase) run database/migrations/sql/*.sql via MySQL's
+     docker-entrypoint-initdb.d. That produces the exact schema
      0001_baseline describes, but alembic_version either doesn't exist or
      -- on any DB touched by 009_ulid_safe.sql -- holds a stray marker
      ('009_ulid_primary_keys') that isn't a real Alembic revision at all.
@@ -21,13 +20,14 @@ revision instead of executing it -- then `upgrade head` proceeds normally
 from there (case 2 is already a no-op at this point).
 
 "Which revision matches" depends on how far case (1) got before this ran:
-initdb.d only ever produces the 0001_baseline schema -- acme_account_stats
-(0002_adhoc_table_tracking) is created by cert_manager at its own startup,
-which now happens *after* this script (it depends_on migrate:
-service_completed_successfully). So a freshly initdb.d'd volume stamps to
-0001_baseline and then genuinely upgrades through 0002. A database that
-already has that table (any instance running before this phase shipped)
-stamps straight to 0002 -- replaying it would fail the same way.
+initdb.d only ever produces the 0001_baseline schema (70 tables) -- the two
+tables 0002_adhoc_table_tracking formalizes are created by cert_manager and
+delivery_optimizer at their own startup, which now happens *after* this
+script (they depend_on migrate: service_completed_successfully). So a
+freshly initdb.d'd volume stamps to 0001_baseline and then genuinely
+upgrades through 0002. A database that already has those two tables (any
+instance that was running before this phase shipped) stamps straight to
+0002 -- replaying it would fail the same "already exists" way.
 """
 
 import logging
@@ -53,7 +53,7 @@ logger = logging.getLogger("run_migrations")
 # Alembic revision has ever been applied -- used to tell "empty database"
 # apart from "schema already here, just untracked".
 _BASELINE_SENTINEL_TABLE = "organizations"
-_ADHOC_SENTINEL_TABLES = {"acme_account_stats"}
+_ADHOC_SENTINEL_TABLES = {"acme_account_stats", "suppression_list"}
 
 
 def get_database_url() -> str:
@@ -101,10 +101,13 @@ def main() -> None:
                 f"marker) -- stamping {stamp_target!r} instead of replaying its CREATE TABLE statements."
             )
             # Not `alembic stamp`: it first calls get_current_heads(), which
-            # tries to resolve `current` against the script directory and
-            # raises before ever getting a chance to overwrite it. Writing
-            # the row directly is exactly what conventions.md SS4 rule 9
-            # prescribes for this table: DELETE then INSERT, never UPDATE.
+            # tries to resolve `current` (e.g. 009_ulid_safe.sql's leftover
+            # marker row, or any other value no revision file defines)
+            # against the script directory and raises before purge ever
+            # gets a chance to clear it. Writing the row directly is exactly
+            # what conventions.md SS4 rule 9 prescribes for this table:
+            # DELETE then INSERT, never UPDATE (it has no PK to key an
+            # UPDATE off when the existing value doesn't matter).
             with engine.begin() as conn:
                 conn.execute(
                     text(

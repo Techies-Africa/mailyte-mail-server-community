@@ -1,159 +1,125 @@
 # Data Flow
 
-How an email actually travels through Mailyte — from the moment it hits the wire to the moment it lands in a mailbox (or leaves one).
+How an email actually travels through Mailyte — from the moment it hits the wire to the moment it lands in a mailbox (or leaves one). Verified against `mailer/postfix/config/main.cf`, `master.cf`, and the compose files, current as of 2026-08-30.
 
 ---
 
 ## Inbound Email (Receiving)
 
-When someone on the internet sends an email to one of your hosted domains, here's what happens step by step:
+When someone on the internet sends an email to one of your hosted domains:
 
 1. **DNS lookup**: The sender's mail server looks up your domain's MX record, which points to your Mailyte instance.
-2. **SMTP connection**: The remote server connects to Postfix on port 25.
-3. **Rate limiting**: Before accepting the message, the rate limiter checks whether this sender IP or domain has exceeded its limits. If yes, the connection is temporarily rejected (451).
-4. **Rspamd filtering**: Postfix passes the message to Rspamd via the milter protocol. Rspamd runs it through multiple checks — SPF, DKIM verification, DMARC, Bayesian spam scoring, and ClamAV virus scanning.
-5. **Accept or reject**: If the message scores above the spam threshold, it's rejected or quarantined. Otherwise, Postfix accepts it.
-6. **Local delivery**: Postfix hands the message to Dovecot's Local Delivery Agent (LDA), which drops it into the correct mailbox on disk.
-7. **Post-delivery hooks**: The system logs the delivery event to MySQL, fires any configured webhooks, and (if RAG is enabled for the org) queues the message for vector embedding.
+2. **SMTP connection**: The remote server connects to Postfix on port 25. Client restrictions run first — RBL checks (`zen.spamhaus.org`), pipelining rejection.
+3. **Recipient validation**: Postfix queries MySQL live — is this domain in `domains`? Is the recipient a real mailbox or an alias? Then the per-org IP access policy (`ip_access_policy.py`, a Unix policy service inside the Postfix container) runs.
+4. **Rspamd filtering**: The milter (`inet:rspamd:11332`) runs SPF, DKIM and DMARC verification, Bayesian scoring, and custom rules. `milter_default_action = accept` — if Rspamd is down, mail flows unscanned rather than deferring. (ClamAV antivirus is present in the Rspamd config but disabled — no ClamAV container is deployed.)
+5. **Rate limiting at DATA**: The rate-limit policy service (`rate_limit_policy.py`, which calls the `rate_limiter` service over HTTP) runs at the SMTP **DATA phase and nowhere else** on the inbound path — it once ran in three restriction lists at once, triple-counted every message, and deferred essentially all inbound mail. Over-limit senders get a `450`.
+6. **Local delivery over LMTP**: Postfix hands the message to Dovecot via LMTP (`virtual_transport = lmtp:inet:dovecot:24`), which stores it in the recipient's Maildir under `/var/mail/vhosts`.
+7. **Archive on delivery**: Dovecot's global Sieve pipes every delivered message to `archive-message`, which POSTs it to the `archiver` service (age-encrypted, written to S3, spooled locally if S3 is unreachable).
+8. **Logging & webhooks, after the fact**: `log_ingestor` tails Postfix's log and writes per-message rows to `mail_logs`, dispatching `email.delivered` / `email.bounced` / `email.deferred` / `email.rejected` webhooks as delivery lines appear.
 
 ```mermaid
 sequenceDiagram
     participant Sender as Remote MTA
     participant Postfix as Postfix (SMTP :25)
-    participant RL as Rate Limiter
-    participant Rspamd as Rspamd + ClamAV
-    participant Dovecot as Dovecot (LDA)
+    participant Rspamd as Rspamd (milter)
+    participant RL as rate_limiter (via policy service)
+    participant Dovecot as Dovecot (LMTP :24)
+    participant Archiver as Archiver
+    participant LI as log_ingestor
     participant MySQL as MySQL
-    participant Redis as Redis
-    participant Webhooks as Webhook Worker
-    participant RAG as RAG Worker
+    participant Webhooks as Webhook dispatch
 
-    Sender->>Postfix: SMTP connection
-    Postfix->>RL: Check rate limits
-    RL->>Redis: Lookup counters
-    Redis-->>RL: OK / over limit
-    RL-->>Postfix: Accept / reject (451)
-
+    Sender->>Postfix: SMTP connection (RBL, recipient checks)
     Postfix->>Rspamd: milter: scan message
-    Rspamd->>Rspamd: SPF, DKIM, DMARC, Bayes, ClamAV
-    Rspamd-->>Postfix: Score + action (accept/reject/quarantine)
-
-    Postfix->>Dovecot: Deliver to mailbox
-    Dovecot->>Dovecot: Store in user's Maildir
-
-    Dovecot-->>MySQL: Log delivery event
-    MySQL-->>Webhooks: Trigger delivery webhook
-    MySQL-->>RAG: Queue for embedding
+    Rspamd-->>Postfix: score + action (default: accept)
+    Postfix->>RL: DATA-phase policy check
+    RL-->>Postfix: OK / 450 rate limited
+    Postfix->>Dovecot: LMTP delivery
+    Dovecot->>Dovecot: Store in Maildir
+    Dovecot->>Archiver: sieve: archive-message copy
+    LI->>MySQL: tail mail.log → mail_logs row
+    LI->>Webhooks: email.delivered event
 ```
 
-!!! info "What happens during a spam storm"
-    If a sender trips the rate limiter, Postfix returns a 451 (temporary failure). Legitimate senders will retry later. Spammers usually won't. This is the first line of defense, before Rspamd even sees the message.
+!!! warning "No sender-login check on port 25 — on purpose"
+    `reject_sender_login_mismatch` is enforced only on the authenticated submission ports (587/465). Adding it to the global sender restrictions once rejected **all** inbound mail from any sender who owned a local mailbox (production outage, fixed 2026-08-22). Port 25 carries unauthenticated mail by definition.
 
 ## Outbound Email (Sending)
 
-When a user (or your application via the API) sends an email through Mailyte:
+When a user's email client sends through Mailyte:
 
-1. **Authentication**: The email client connects to Postfix on port 587 (STARTTLS) or 465 (implicit TLS). Postfix delegates authentication to Dovecot, which checks credentials against MySQL.
-2. **Message submission**: Once authenticated, the client submits the message.
-3. **Tracking injection**: If tracking is enabled for this org/domain, the tracking worker injects open-tracking pixels and rewrites links for click tracking.
-4. **DKIM signing**: Postfix signs the outgoing message with the domain's DKIM private key.
-5. **Queue**: The message enters Postfix's outbound queue.
-6. **Delivery**: Postfix resolves the recipient's MX record and delivers via SMTP. If delivery fails, the message stays in the queue for retry (configurable backoff).
-7. **Delivery tracking**: Once delivered (or bounced), the event is logged to MySQL, the queue record is updated, and webhooks fire.
+1. **Authentication**: The client connects to Postfix on 587 (STARTTLS) or 465 (implicit TLS). Postfix delegates SASL auth to Dovecot (`smtpd_sasl_type = dovecot`), which checks MySQL — mailbox passwords or per-key SMTP credentials.
+2. **Sender ownership**: `reject_sender_login_mismatch` runs **before** `permit_sasl_authenticated` on 587/465 — you cannot authenticate as one account and send as an address you don't own.
+3. **Rate limiting**: The submission service applies the same rate-limit policy check via a named restriction class.
+4. **Tracking content filter**: Submission ports carry `content_filter=tracking-filter:` — `tracking_injector.py` (inside the Postfix container) calls the `tracking` service to inject the open pixel and rewrite links, consults `delivery_optimizer`, hands the archiver an outbound copy, then reinjects the message on the loopback listener (10026).
+5. **DKIM signing**: **Rspamd** (not Postfix) signs the message with the sending domain's private key via the milter.
+6. **Queue & delivery**: The message enters Postfix's spool (a named volume — queued mail survives container recreation), the MX is resolved, and delivery is attempted with normal Postfix retry/backoff.
+7. **Logging & webhooks**: `log_ingestor` turns the delivery/bounce/deferral log lines into `mail_logs` rows and webhook events.
 
 ```mermaid
 sequenceDiagram
     participant Client as Email Client
-    participant Postfix as Postfix (SMTP :587/:465)
-    participant Dovecot as Dovecot (Auth)
-    participant MySQL as MySQL
-    participant Tracking as Tracking Worker
-    participant DKIM as DKIM Signing
+    participant Postfix as Postfix (:587/:465)
+    participant Dovecot as Dovecot (SASL)
+    participant TI as tracking_injector (content filter)
+    participant Tracking as tracking service
+    participant DO as delivery_optimizer
+    participant Rspamd as Rspamd (DKIM sign)
     participant Remote as Remote MTA
-    participant Webhooks as Webhook Worker
+    participant LI as log_ingestor
 
-    Client->>Postfix: SMTP AUTH + submit message
-    Postfix->>Dovecot: Verify credentials
-    Dovecot->>MySQL: Lookup account
-    MySQL-->>Dovecot: Valid / invalid
-    Dovecot-->>Postfix: Auth result
-
-    Postfix->>Tracking: Inject tracking (if enabled)
-    Tracking-->>Postfix: Modified message
-
-    Postfix->>DKIM: Sign with domain key
-    DKIM-->>Postfix: Signed message
-
-    Postfix->>Postfix: Queue for delivery
-    Postfix->>Remote: SMTP delivery
-
+    Client->>Postfix: SMTP AUTH + submit
+    Postfix->>Dovecot: verify credentials (MySQL-backed)
+    Dovecot-->>Postfix: auth OK
+    Note over Postfix: reject_sender_login_mismatch<br/>+ rate-limit policy class
+    Postfix->>TI: content_filter=tracking-filter
+    TI->>Tracking: inject pixel, rewrite links
+    TI->>DO: throttling/warming advice
+    TI-->>Postfix: reinject on :10026
+    Postfix->>Rspamd: milter: sign with domain DKIM key
+    Postfix->>Remote: SMTP delivery (queue + retry)
     Remote-->>Postfix: 250 OK / bounce
-    Postfix-->>MySQL: Log delivery/bounce event
-    MySQL-->>Webhooks: Trigger event webhook
+    LI->>LI: mail.log line → mail_logs + email.delivered/bounced webhook
 ```
 
-## API-Initiated Email
+## API / Webmail-Initiated Email
 
-When your application sends email via the REST API instead of SMTP:
+When the webmail or an API client sends through the gateway:
 
-1. **API request**: Your app sends a `POST` to the FastAPI server on port 5000 with an `X-API-Key` header.
-2. **Validation**: The API validates the key, checks that the sending domain belongs to the authenticated org, and validates the message payload.
-3. **Queue insertion**: The message is added to the mail queue (MySQL + Redis).
-4. **Queue manager picks it up**: The queue manager worker dequeues the message and hands it to Postfix for delivery.
-5. **From here, it follows the normal outbound flow** — DKIM signing, delivery, logging, webhooks.
+1. **API request**: `POST` to the FastAPI gateway (bind port 8080; `api.${DOMAIN}` behind Traefik in production) with the caller's credential (API key or webmail session).
+2. **Validation**: The gateway validates the credential and that the sending mailbox belongs to the authenticated context.
+3. **SMTP submission to the internal listener**: The gateway submits the message over SMTP to **`postfix:10587`** — Postfix's internal submission listener, which carries the tracking content filter. It deliberately does *not* use port 25, because 25 has no tracking filter (it must never touch inbound mail); sending on 25 was why no webmail message was ever tracked before this was fixed.
+4. **From there, the normal outbound flow applies** — tracking injection, DKIM signing by Rspamd, Postfix queue, delivery, log ingestion, webhooks.
 
-```mermaid
-sequenceDiagram
-    participant App as Your Application
-    participant API as FastAPI (:5000)
-    participant MySQL as MySQL
-    participant Redis as Redis
-    participant QM as Queue Manager
-    participant Postfix as Postfix
-
-    App->>API: POST /send (X-API-Key)
-    API->>MySQL: Validate API key + org
-    API->>MySQL: Insert into mail queue
-    API->>Redis: Signal new queued message
-    API-->>App: 202 Accepted (queued)
-
-    QM->>Redis: Poll for new messages
-    QM->>MySQL: Fetch message from queue
-    QM->>Postfix: Submit via SMTP
-    Postfix->>Postfix: DKIM sign + deliver
-```
-
-!!! tip "Why a queue instead of sending directly?"
-    The queue gives you retry logic, rate limiting, and backpressure for free. If the remote server is down, the message stays queued and retries automatically. It also means the API responds instantly (202) instead of blocking until delivery completes.
+!!! info "There is no separate application mail queue"
+    The outbound queue **is Postfix's spool**. The `queue_manager` service does not dequeue messages from MySQL and feed them to Postfix — it manages Postfix's own queue (`postqueue -p`, flush, hold, release, delete) over the shared spool volume. The `mail_queue` table exists in the schema but is not a send path.
 
 ## Tracking Events
 
-After an email is delivered, two things can generate tracking events:
+After an email is delivered, two things generate tracking events:
 
-- **Open tracking**: The email contains a tiny invisible image hosted by Mailyte. When the recipient's email client loads it, the tracking worker logs the open.
-- **Click tracking**: Links in the email are rewritten to pass through Mailyte's redirect endpoint. When clicked, the tracking worker logs the click and redirects to the original URL.
+- **Open tracking**: The injected pixel points at `https://api.${DOMAIN}/api/v1/tracking/pixel/{id}`. The gateway proxies the request to the `tracking` service, which records the open.
+- **Click tracking**: Rewritten links pass through the gateway's tracking redirect endpoint; the tracking service records the click and 302-redirects to the original URL.
 
-Both events are stored in MySQL, update analytics counters in Redis, and can trigger webhooks.
+Both are stored in MySQL (`email_tracking`, `tracking_statistics`) and can fire `tracking.open` / `tracking.click` webhooks. The tracking base URL must be a hostname that actually resolves and routes to the gateway — it is configured via `TRACKING_BASE_URL`.
 
 ## RAG Pipeline (AI Search)
 
-For organizations with RAG enabled, emails flow through an additional pipeline:
+For organizations with RAG enabled:
 
-1. New emails (inbound or outbound) are queued for processing.
-2. The RAG worker reads the email content, generates vector embeddings, and stores them in Qdrant.
-3. When a user searches via the API, the query is embedded and matched against stored vectors in Qdrant for semantically relevant results.
+1. Email content is embedded by the `rag` worker and stored in Qdrant.
+2. Search queries arrive via the gateway's `/api/v1/rag` module, get embedded, and are matched against stored vectors.
 
-This runs asynchronously and doesn't affect mail delivery speed.
+This runs asynchronously and doesn't affect mail delivery.
 
 ## What Gets Logged
 
-Every email that passes through the system generates log entries in multiple places:
-
-| What | Where | Why |
-|------|-------|-----|
-| SMTP transaction details | Postfix logs + MySQL (`MailLog`) | Debugging delivery issues |
-| Spam scores and actions | Rspamd logs + MySQL | Tuning spam filters |
-| Delivery/bounce events | MySQL (`MailQueue`) | Tracking message status |
-| Open/click events | MySQL (tracking tables) | Analytics |
-| API requests | FastAPI logs + MySQL | Audit trail |
-| Auth failures | fail2ban logs + MySQL | Security monitoring |
+| What | Where | Producer |
+|------|-------|----------|
+| Per-message delivery records | MySQL `mail_logs` | **log_ingestor** (tails Postfix's log; added 2026-08-22 — before that the table had no producer) |
+| Raw SMTP transactions | `logs/mailer/postfix/mail.log` | Postfix |
+| Spam scores and actions | Rspamd logs; score also lands on the `mail_logs` row | Rspamd / log_ingestor |
+| Open/click events | MySQL `email_tracking`, `tracking_statistics` | tracking service |
+| Webhook deliveries & failures | MySQL `webhook_delivery_logs`, `webhook_dead_letters` | shared webhook dispatcher |
+| API requests / mutations | Gateway logs (with per-request correlation IDs), MySQL `audit_logs` | api |
+| Auth failures | MySQL `failed_auth_attempts` | api |

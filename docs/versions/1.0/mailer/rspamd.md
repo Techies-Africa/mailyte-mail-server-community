@@ -1,7 +1,7 @@
 
 # Rspamd Anti-Spam Engine Implementation
 
-Rspamd serves as the advanced anti-spam and anti-virus engine in the Mailyte Mail Server, providing machine learning-based content analysis, DKIM signing, and comprehensive email filtering capabilities.
+Rspamd serves as the advanced anti-spam and anti-virus engine in the Enterprise Mail Server, providing machine learning-based content analysis, DKIM signing, and comprehensive email filtering capabilities.
 
 ## Architecture Overview
 
@@ -1277,4 +1277,4 @@ EXPOSE 11333 11334 11332
 CMD ["/usr/local/bin/start_rspamd.sh"]
 ```
 
-This comprehensive Rspamd implementation provides enterprise-grade spam filtering with machine learning, DKIM management, and advanced threat detection capabilities, forming a crucial security layer in the Mailyte Mail Server infrastructure.
+This comprehensive Rspamd implementation provides enterprise-grade spam filtering with machine learning, DKIM management, and advanced threat detection capabilities, forming a crucial security layer in the Enterprise Mail Server infrastructure.

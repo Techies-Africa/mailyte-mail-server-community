@@ -1,162 +1,103 @@
 # API Gateway
 
-The API gateway is the single entry point for managing the entire Mailyte mail server. It is a FastAPI application that exposes REST endpoints for organizations, domains, mailboxes, aliases, analytics, webhooks, tracking, RAG search, storage, compliance, migration, and more.
+The API gateway is the single entry point for managing the entire Mailyte mail server. It is a FastAPI application that exposes REST endpoints for organizations, domains, mailboxes, aliases, analytics, webhooks, tracking, RAG search, storage, compliance, migration, SMTP credentials, platform (console) operations, and the webmail's mailbox surface.
 
-If you are building an integration or admin panel, this is the service you talk to.
+If you are building an integration, the console, or the webmail, this is the service you talk to.
 
 ## What It Does
 
-- Centralized REST API on port **8083**
-- 20 route modules covering every management function
-- MySQL and Redis backends
-- Authentication via API key or admin password
-- CORS support for web dashboard integration
+- Centralized REST API -- container port **8080**, published as **8083** in dev; in production reached only through Traefik at `api.${DOMAIN}` (and the bare domain serves the same landing page)
+- 32 route modules, loaded dynamically at startup (`route_modules` in `app.py`)
+- MySQL and Redis backends; S3 for object storage
+- Auth: tenant API keys, tenant browser sessions, and operator (console) sessions -- one permission model, three credential types
+- Proxies to sibling workers (monitoring, queue, storage, rag, analytics, tracking, rate limiter, delivery optimizer) with org scoping enforced at the gateway
 - Global exception handling (no stack traces leak to clients)
 
-## Architecture
+## Route Modules
 
-```mermaid
-flowchart TB
-    Client["Admin Panel /\nExternal Integration"] -->|"HTTP :8083"| API["FastAPI App"]
+All mounted under `/api/v1/` (from `route_modules` in `worker/api/app.py`):
 
-    subgraph Routes["Route Modules"]
-        Orgs["/api/v1/organizations"]
-        Domains["/api/v1/domains"]
-        Mailboxes["/api/v1/mailboxes"]
-        Aliases["/api/v1/aliases"]
-        Analytics["/api/v1/analytics"]
-        Monitoring["/api/v1/monitoring"]
-        Queue["/api/v1/queue"]
-        Webhooks["/api/v1/webhooks"]
-        RateLimit["/api/v1/rate-limiter"]
-        Storage["/api/v1/storage"]
-        Tracking["/api/v1/tracking"]
-        RAG["/api/v1/rag"]
-        Filters["/api/v1/filters"]
-        SharedMB["/api/v1/shared-mailboxes"]
-        MsgTrace["/api/v1/message-trace"]
-        Transport["/api/v1/transport-rules"]
-        WhiteLabel["/api/v1/whitelabel"]
-        Reseller["/api/v1/reseller"]
-        Compliance["/api/v1/compliance"]
-        Migration["/api/v1/migration"]
-    end
+| Prefix | Purpose |
+|--------|---------|
+| `/api/v1/organizations` | Org CRUD and settings |
+| `/api/v1/domains` | Domain add/verify, DNS checks, DKIM setup |
+| `/api/v1/mailboxes` | Mailbox management (org-admin resource) |
+| `/api/v1/aliases` | Alias management |
+| `/api/v1/analytics` | Proxies the analytics worker |
+| `/api/v1/monitoring` | Proxies the monitoring worker |
+| `/api/v1/queue` | Proxies the queue manager |
+| `/api/v1/webhooks` | Webhook endpoint management |
+| `/api/v1/rate-limiter` | Proxies the rate limiter |
+| `/api/v1/storage` | Proxies storage usage |
+| `/api/v1/tracking` | Tracking pixel/click/suppression/stats (public pixel URLs live here) |
+| `/api/v1/rag` | Semantic search and indexing |
+| `/api/v1/filters` | Sieve filter management (via ManageSieve, `dovecot:4190`) |
+| `/api/v1/shared-mailboxes` | Shared mailboxes and ACLs |
+| `/api/v1/message-trace` | Delivery path tracing (reads `mail_logs`) |
+| `/api/v1/transport-rules` | Transport/routing rules |
+| `/api/v1/whitelabel` | White-label branding |
+| `/api/v1/reseller` | Reseller accounts |
+| `/api/v1/compliance` | GDPR exports, retention |
+| `/api/v1/migration` | Migration job management (fronts the migration worker) |
+| `/api/v1/ssl` | SSL certificate management |
+| `/api/v1/smtp-credentials` | SMTP API key lifecycle (two modules share this prefix; the second serves `{id}/events` and `{id}/usage`) |
+| `/api/v1/capabilities` | Edition/capability manifest (`MAILYTE_EDITION`) |
+| `/api/v1/bootstrap` | First-boot operator bootstrap |
+| `/api/v1/auth` | Tenant auth (sessions) |
+| `/api/v1/platform/auth` | Operator auth (registered before `/api/v1/platform` so the more specific prefix wins) |
+| `/api/v1/platform` | Console/platform operations |
+| `/api/v1/security` | Security module (console) |
+| `/api/v1/reputation` | Reputation module (console) |
+| `/api/v1/mailbox-auth` | Webmail login (registered before `/api/v1/mailbox`) |
+| `/api/v1/mailbox` | Webmail mailbox surface (distinct from `/api/v1/mailboxes`) |
 
-    API --> Routes
-    Routes --> MySQL[(MySQL)]
-    Routes --> Redis[(Redis)]
-    Routes -->|"HTTP"| Workers["Other Workers"]
-```
-
-## API Endpoints
-
-The API is versioned at `/api/v1/`. Here is what each route module provides:
-
-| Route Module | Prefix | Key Operations |
-|-------------|--------|---------------|
-| `organizations` | `/api/v1/organizations` | CRUD orgs, settings, billing |
-| `domains` | `/api/v1/domains` | Add/remove/verify domains, DNS checks, DKIM setup |
-| `mailboxes` | `/api/v1/mailboxes` | Create/update/delete mailboxes, password resets |
-| `aliases` | `/api/v1/aliases` | Email alias management, catch-all configs |
-| `analytics` | `/api/v1/analytics` | Delivery stats, domain breakdowns, trends |
-| `monitoring` | `/api/v1/monitoring` | Service health, system metrics |
-| `queue` | `/api/v1/queue` | View/flush/hold/delete queued messages |
-| `webhooks` | `/api/v1/webhooks` | Register/manage webhook endpoints |
-| `rate_limiter` | `/api/v1/rate-limiter` | View/update rate limits per org/domain/mailbox |
-| `storage` | `/api/v1/storage` | Storage usage reports, quota management |
-| `tracking` | `/api/v1/tracking` | Tracking stats, enable/disable per domain |
-| `rag` | `/api/v1/rag` | Semantic search queries, indexing status |
-| `filters` | `/api/v1/filters` | Sieve filter management |
-| `shared_mailboxes` | `/api/v1/shared-mailboxes` | Shared mailbox creation and ACL management |
-| `message_trace` | `/api/v1/message-trace` | Trace email delivery path by message ID |
-| `transport_rules` | `/api/v1/transport-rules` | Custom routing rules |
-| `whitelabel` | `/api/v1/whitelabel` | White-label branding per org |
-| `reseller` | `/api/v1/reseller` | Reseller account management |
-| `compliance` | `/api/v1/compliance` | GDPR exports, data retention policies |
-| `migration` | `/api/v1/migration` | Import from other mail servers |
-| `ssl` | `/api/v1/ssl` | SSL certificate management |
-
-### Common Endpoints
+### Top-Level Endpoints
 
 ```
-GET  /         -- API info and version
-GET  /health   -- Health check with database status
+GET /               -- Landing page (HTML)
+GET /features       -- Features page (HTML)
+GET /health         -- Health check with database status
+GET /metrics        -- Prometheus metrics
+GET /api-reference  -- ReDoc API reference
+GET /api-docs       -- Swagger UI (docs_url is customized; /docs is NOT served)
 ```
 
 ## Authentication
 
-The API supports two auth modes:
+Three credential types resolve to one permission model (`worker/api/utils/auth.py`):
 
-### API Key
+- **Tenant API keys** -- `X-API-Key` header; route handlers guard with `Depends(require_api_key('read'|'write'))`
+- **Tenant browser sessions** -- `mailyte_session` cookie (used by web UIs so no long-lived key sits in the browser); a thin layer over the same permission checks
+- **Operator sessions** -- `mailyte_operator_session` cookie, separate table and shorter lifetime (ADR-002); operator MFA is verified through the TOTP security service (`TOTP_SERVICE_URL`)
 
-Pass the key in the `X-API-Key` header:
+The webmail authenticates mailbox holders via `/api/v1/mailbox-auth` -- credentials are verified against Dovecot over IMAP (not a stored copy), and mail is sent through Postfix's internal submission listener.
 
-```bash
-curl -H "X-API-Key: your-api-key-here" \
-     http://localhost:8083/api/v1/organizations
-```
+## Mail Submission
 
-### Admin Password
-
-For quick admin access, use Basic Auth with the admin password:
-
-```bash
-curl -u admin:your-admin-password \
-     http://localhost:8083/api/v1/organizations
-```
-
-Auth logic lives in `worker/api/utils/auth.py`.
-
-## Database
-
-The API reads from and writes to MySQL. The database connection utility is in `worker/api/utils/database.py`.
-
-Key tables the API touches:
-
-| Table | Purpose |
-|-------|---------|
-| `organizations` | Multi-tenant org management |
-| `domains` | Email domains with DNS verification status |
-| `email_accounts` | Virtual mailboxes |
-| `aliases` | Email forwarding rules |
-| `mail_logs` | Delivery tracking |
-| `webhook_endpoints` | Registered webhook URLs |
-| `ssl_certificates` | SSL cert tracking |
-
-## CORS Configuration
-
-CORS is configured via the `CORS_ALLOWED_ORIGINS` environment variable:
-
-```python
-allow_origins = os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:3000").split(",")
-```
-
-For production, set this to your dashboard URL(s).
-
-## Error Handling
-
-The API has a global exception handler that catches unhandled errors and returns a clean JSON response instead of a stack trace:
-
-```json
-{"status": "error", "message": "Internal server error"}
-```
-
-Actual error details are logged server-side for debugging.
+Messages sent through the API/webmail are submitted to Postfix on the **internal submission listener `postfix:10587`** (`MAIL_SUBMIT_HOST`/`MAIL_SUBMIT_PORT`), not port 25. That listener carries the tracking content filter; port 25 deliberately does not, because it also receives all inbound mail. Sending on 25 is why no webmail message was ever tracked before 2026-08.
 
 ## Configuration
 
+The compose file is the reference; the load-bearing variables:
+
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DB_HOST` | `mysql` | MySQL host |
-| `DB_PORT` | `3306` | MySQL port |
-| `DB_NAME` | `mailserver` | Database name |
-| `DB_USER` | `mailuser` | Database user |
-| `DB_PASSWORD` | `mailpassword` | Database password |
-| `REDIS_HOST` | `redis` | Redis host |
-| `REDIS_PORT` | `6379` | Redis port |
+| `PORT` | `8080` | Bind port |
+| `HOSTNAME` | `mail.example.com` | The public mail hostname -- baked into generated MX/SPF records; without it Docker's container-ID hostname breaks DNS verification |
+| `MAIL_HOSTNAME` / `MAIL_SPF_HOST` | (unset) | Public MX name and SPF include host -- deliberately separate settings |
+| `MAIL_SUBMIT_HOST` / `MAIL_SUBMIT_PORT` | `postfix` / `10587` | Internal tracked submission |
+| `SIEVE_HOST` / `SIEVE_PORT` | `dovecot` / `4190` | ManageSieve for the filters module |
+| `DOVEADM_URL` / `DOVEADM_API_KEY` | `http://dovecot:24180` / -- | Flushes Dovecot's auth cache when SMTP credentials change -- without it, revocation takes up to 1h |
+| `IMAP_MASTER_USER` / `IMAP_MASTER_PASSWORD` | -- | IMAP impersonation |
+| `DB_*` / `REDIS_*` | `mysql` / `redis` | Backends |
+| `AWS_*` | -- | S3 access |
 | `CORS_ALLOWED_ORIGINS` | `http://localhost:3000` | Comma-separated allowed origins |
-| `API_KEY` | (empty) | API key for authentication |
-| `ADMIN_PASSWORD` | (empty) | Admin password for Basic Auth |
+| `MAILYTE_EDITION` | `enterprise` (compose) | Capability manifest; code defaults to `community` when unset |
+| `TOTP_SERVICE_URL` | `http://totp:8103` | Operator MFA |
+| `SMTP_HOST` / `SMTP_PORT` / `ALERT_FROM_ADDRESS` / `ALERT_EVAL_INTERVAL_SECONDS` | `postfix` / `25` / `ADMIN_EMAIL` / `60` | Alert rule evaluation and delivery (one evaluator runs across replicas via a MySQL advisory lock) |
+| `MONITORING_SERVICE_URL` / `QUEUE_SERVICE_URL` / `STORAGE_SERVICE_URL` / `RAG_SERVICE_URL` | sibling service defaults | Gateway proxy targets |
+| `PROMETHEUS_URL` | `http://prometheus:9090` | Backs the console's system-metrics range queries |
+| `MAILYTE_COOKIE_SECURE` | `true` | Secure flag on session cookies |
 
 ## Docker Configuration
 
@@ -166,32 +107,23 @@ api:
   container_name: api
   ports:
     - "8083:8080"
-  depends_on:
-    - mysql
-    - redis
+  volumes:
+    - ./worker/api:/app
+    - ./shared:/app/shared
+    - ./database:/app/database
+    - ./storage/api_data:/app/data          # writable data dir (uid 10001)
+    - ./secrets/encryption_kek:/run/secrets/encryption_kek:ro
 ```
 
-## Connections to Other Services
-
-The API gateway acts as an orchestrator. It talks to other workers when it needs data or actions beyond its own scope:
-
-- **Tracking worker** -- for tracking stats and injection config
-- **Webhooks worker** -- for webhook endpoint management
-- **Rate limiter worker** -- for rate limit status queries
-- **Queue manager** -- for mail queue operations
-- **Monitoring** -- for service health data
-- **RAG worker** -- for semantic search queries
-- **Storage usage** -- for disk usage reports
+In production (`docker-compose.prod.yml`) the service runs with **`replicas: 2`**: `container_name` and the host port are reset (fixed names/ports cannot be shared between replicas), and Traefik load-balances `api.${DOMAIN}` across the replicas. The bare `${DOMAIN}` router serves the same landing page.
 
 ## Gotchas
 
-!!! warning "Route Loading"
-    Routes are loaded dynamically at startup. If a route module fails to import (e.g., missing dependency), it is skipped with a warning log -- the API still starts but that route will return 404. Check startup logs if a route is missing.
+!!! warning "Route loading"
+    Routes are imported dynamically at startup. A route module that fails to import is skipped with a warning -- the API starts but that prefix 404s. Check startup logs when a module is missing.
 
-!!! warning "Database Connection"
-    The health endpoint tests the database connection. If MySQL is not ready when the API starts, the health check will report `"database": "failed"` until the connection succeeds.
+!!! warning "Blocking work in `async def`"
+    Many endpoints are declared `async def` while doing blocking DB/HTTP work, which stalls the event loop for every request in the process. When "the API is slow", check the endpoint's decorator before blaming a dependency.
 
-!!! tip "API Documentation"
-    FastAPI auto-generates OpenAPI docs. Access them at:
-    - Swagger UI: `http://localhost:8083/docs`
-    - ReDoc: `http://localhost:8083/redoc`
+!!! tip "API documentation"
+    Swagger UI at `/api-docs` (not `/docs`), ReDoc at `/api-reference`, raw schema at `/openapi.json`.

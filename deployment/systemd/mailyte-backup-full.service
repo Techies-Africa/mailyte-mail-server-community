@@ -1,6 +1,6 @@
 [Unit]
-Description=Mailyte full backup (MySQL, mail storage, DKIM, SSL, config)
-Documentation=file://__MAILYTE_ROOT__/docs/operations/backups.md
+Description=Mailyte full backup (MySQL, mail, secrets, config) to S3
+Documentation=file:///var/www/mailyte-email-server/current/docs/operations/disaster-recovery.md
 # The backup execs into the mysql and redis containers, so it is pointless
 # before Docker is up and actively harmful during shutdown.
 After=docker.service network-online.target
@@ -8,18 +8,29 @@ Requires=docker.service
 
 [Service]
 Type=oneshot
-# __MAILYTE_USER__ and __MAILYTE_ROOT__ are substituted by install-timers.sh.
-# They are baked in rather than read from an EnvironmentFile because systemd
-# does not expand variables in WorkingDirectory or User -- a unit that looked
-# parameterised but silently ran from / would be worse than a literal path.
-User=__MAILYTE_USER__
-WorkingDirectory=__MAILYTE_ROOT__
-ExecStart=/bin/bash __MAILYTE_ROOT__/scripts/backup.sh --full
+User=devops
+Group=devops
+# The `current` symlink, not a pinned deployment directory: deploy.sh repoints
+# it on every release, so this unit picks up new backup code without being
+# reinstalled. config/ is replaced each deploy but scripts/ and secrets/ are
+# not, which is why the DR config lives in secrets/dr.env.
+WorkingDirectory=/var/www/mailyte-email-server/current
+ExecStart=/bin/bash /var/www/mailyte-email-server/current/scripts/backup.sh --full
 
-# Niced so the backup never competes with Postfix or Dovecot for CPU. On a
-# self-hosted install that is usually the same small VPS.
+# A full backup is 3 GB of tar + gzip + age. Niced so it never competes with
+# Postfix or Dovecot for CPU on a machine that is also delivering mail.
 Nice=10
 IOSchedulingClass=idle
+
+# When a run cannot reach S3, backup.sh falls back to the age-based prune
+# rather than the "keep 3 fulls" rule -- correctly, since the local copies are
+# then the only copies. But at ~3 GB a night, a 30-day fallback fills the disk
+# in a fortnight and a full disk stops mail. 7 days bounds the worst case to
+# ~21 GB while still keeping a week of history through an S3 outage.
+Environment=BACKUP_RETENTION_DAYS=7
+
+# Generous: the upload is bandwidth-bound and a slow link must not truncate a
+# backup halfway through. Measured runtime is ~3 min local + upload.
 TimeoutStartSec=6h
 
 StandardOutput=journal

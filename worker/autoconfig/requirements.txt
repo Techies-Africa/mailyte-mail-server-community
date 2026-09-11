@@ -3,3 +3,5 @@ uvicorn>=0.24.0
 mysql-connector-python==9.4.0
 pydantic==2.13.4
 lxml>=4.9.0
+python-ulid
+psutil==6.1.0

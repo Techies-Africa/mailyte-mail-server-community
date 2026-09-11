@@ -32,6 +32,10 @@ print_info() {
     echo -e "${BLUE}ℹ${NC} $1"
 }
 
+print_warn() {
+    echo -e "${YELLOW}⚠${NC} $1"
+}
+
 wait_for_healthy() {
     local service=$1
     local max_wait=${2:-60}
@@ -118,7 +122,7 @@ sleep 5
 print_header "Stage 6: Starting Optional Services"
 
 print_info "Starting RAG, Encryption, Dashboard, ActiveSync, Cloud Sync..."
-docker compose up -d rag encryption dashboard activesync cloud_sync
+docker compose up -d rag encryption dashboard activesync
 
 sleep 10
 
@@ -132,11 +136,34 @@ wait_for_healthy docs 30
 
 sleep 3
 
+# Stage 8: Console (PRD SS9 shipping model -- the console comes up with the
+# stack, not as a separate startup). Last, because it depends on a healthy api.
+print_header "Stage 8: Starting Mailyte Console"
+
+# --profile console is needed while docker-compose.yml still gates the
+# service; naming an unused profile is harmless, so this keeps working once
+# that line is removed. A pull failure must not fail the whole startup: the
+# image is published on its own cadence and a mail server without a console
+# is still a working mail server.
+if docker compose --profile console up -d console 2>/dev/null; then
+    # `|| true` because set -e is active and wait_for_healthy returns 1 on
+    # timeout — a slow console must not abort the run just before the final
+    # status check, which is the output the operator actually needs.
+    wait_for_healthy console 40 || true
+    print_info "Console: http://localhost:${CONSOLE_PORT:-3100}"
+else
+    print_warn "Console did not start (image ghcr.io/techies-africa/mailyte-console not published yet?)"
+    print_info "The mail server is unaffected."
+fi
+
+sleep 2
+
 # Final Status Check
 print_header "Final Status Check"
 
 docker compose ps
 
 print_header "Startup Complete!"
-print_info "Run './start.sh' to open the management console"
+print_info "Console: http://localhost:${CONSOLE_PORT:-3100} (token: ./start.sh console-token)"
+print_info "Run './start.sh' for the management menu"
 print_info "Run './start.sh health' to run health checks"

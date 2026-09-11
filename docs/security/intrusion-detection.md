@@ -1,299 +1,130 @@
 ---
 title: Intrusion Detection
-description: Fail2ban configuration for Mailyte — jail rules for SMTP, IMAP, API, ban durations, and whitelisting.
+description: Brute-force protection in Mailyte — the Dovecot auth-policy server, progressive delays, IP blocking, and the security APIs behind them.
 ---
 
 # Intrusion Detection
 
-> **Enterprise Edition** — This feature is available in [Mailyte Enterprise](https://mailyte.com). The Community Edition does not include this functionality.
+Brute-force protection in Mailyte is built into the auth path itself, not bolted on as a log-watcher.
 
+!!! warning "Fail2ban is not part of the deployed stack"
+    The repository carries Fail2ban filter/jail configs and helper scripts under `mailer/intrusion_detection/`, but **nothing installs or runs them** — no container includes fail2ban, and no compose service references that directory. Treat it as optional host-level scaffolding (see [Optional: host-level Fail2ban](#optional-host-level-fail2ban)). The controls documented below are the ones that actually execute.
 
-Fail2ban monitors log files for suspicious patterns and automatically bans offending IPs. It's your automated bouncer.
+## The Dovecot Auth-Policy Server
 
-## How Fail2ban Works
+Every IMAP/POP3/SMTP authentication passes through a policy server (`mailer/dovecot/scripts/dovecot-auth-policy.py`, run by supervisord inside the Dovecot container and wired in `dovecot.conf`):
 
-1. Fail2ban watches log files for patterns (filters)
-2. When a pattern matches, it counts failures per IP
-3. After `maxretry` failures within `findtime`, the IP is banned
-4. The ban blocks the IP at the firewall level (iptables)
-5. After `bantime`, the IP is automatically unbanned
+```
+auth_policy_server_url = http://127.0.0.1:8090/
+auth_policy_check_before_auth = yes
+auth_policy_check_after_auth = yes
+auth_policy_report_after_auth = yes
+auth_policy_reject_on_fail = no     # policy-server outage degrades open, never blocks all auth
+```
+
+### What it does
 
 ```mermaid
 graph LR
-    LOGS[Log Files] --> F2B[Fail2ban]
-    F2B -->|Match pattern| COUNT[Count failures]
-    COUNT -->|Exceeds threshold| BAN[iptables DROP]
-    BAN -->|After bantime| UNBAN[Remove rule]
+    C[Auth attempt] --> P[Policy server]
+    P -->|clean| A[Allow]
+    P -->|recent failures| D["Delay 2s → 4s → 8s → 16s → 32s"]
+    P -->|threshold exceeded| B[Block IP / user]
+    P --> R[(Redis state)]
+    P --> M[(failed_auth_attempts, audit_logs, ip_reputation)]
 ```
 
-## Installation
+- **Progressive delay:** exponential backoff per failure count — `2^(failures-1) * 2s`, capped at 60 s. Slows credential-stuffing to uselessness without hard-locking real users who typo once.
+- **IP blocking:** after `MAX_AUTH_FAILURES_PER_IP` (default **10**) failures within the window, the IP is blocked.
+- **Per-user blocking:** after `MAX_AUTH_FAILURES_PER_USER` (default **5**) failures, the account is protected regardless of source IP spread.
+- **Windows:** failures are counted over `AUTH_FAILURE_WINDOW_SECS` (default **900 s / 15 min**); blocks last `AUTH_BLOCK_DURATION_SECS` (default **3600 s / 1 hour**).
+- **Redis-backed state** — survives container restarts and is shared across instances.
+- **Every failure is recorded** in MySQL: an upsert into `failed_auth_attempts` (IP, username, service, attempt count, timestamps), an `auth.failed` row in `audit_logs`, and a negative adjustment to `ip_reputation`.
 
-Fail2ban runs on the host (not inside Docker):
+### Tuning
+
+Set these in the Dovecot container's environment:
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `MAX_AUTH_FAILURES_PER_IP` | 10 | IP block threshold |
+| `MAX_AUTH_FAILURES_PER_USER` | 5 | Per-account threshold |
+| `AUTH_FAILURE_WINDOW_SECS` | 900 | Counting window |
+| `AUTH_BLOCK_DURATION_SECS` | 3600 | Block duration |
+
+## API-Level Brute-Force Protection
+
+Independently of SMTP/IMAP, the API gateway rate-limits invalid `X-API-Key` attempts: **20 invalid keys per 5 minutes per IP**, exponential backoff from the 5th failure, `429` once blocked — checked before the key lookup so a blocked client gets no free guesses.
+
+## Managing Blocks: the Security API
+
+The `/api/v1/security` routes (platform scope) expose the failed-auth pipeline for operators:
+
+| Endpoint | What it does |
+|----------|-------------|
+| `GET /api/v1/security/failed-auth` | List failed auth attempts (filter by IP, user, service, time range) |
+| `GET /api/v1/security/failed-auth/summary` | Hourly buckets, top offender IPs |
+| `POST /api/v1/security/failed-auth/{ip}/block` | Manually block an IP (`blocked_until`) |
+| `DELETE /api/v1/security/failed-auth/{ip}/block` | Unblock (attempt counters are kept as evidence) |
+| `GET/POST/PUT/DELETE /api/v1/security/ip-rules` | Per-organization SMTP IP allow/deny rules (`ip_access_rules`) — enforced live by the Postfix `policy-ip-access` service |
+
+## Postfix-Level Abuse Controls
+
+Rate and connection abuse on the SMTP side is handled inside Postfix (`main.cf`):
+
+```
+smtpd_client_connection_rate_limit = 30
+smtpd_client_connection_count_limit = 50
+smtpd_client_message_rate_limit = 100
+smtpd_client_recipient_rate_limit = 200
+anvil_rate_time_unit = 60s
+```
+
+Plus two live policy services in the submission path (`master.cf`):
+
+- `policy-rate-limit` — per-organization submission rate limits
+- `policy-ip-access` — per-organization IP allowlists
+
+And Rspamd contributes greylisting, DNSBL checks, and phishing detection on inbound mail.
+
+## Relay Probing
+
+Relay attempts are rejected by the restriction chain (`permit_mynetworks` covers only loopback; everything unauthenticated to a non-local recipient hits `reject_unauth_destination`). Watch for probes in the Postfix log:
 
 ```bash
-# Ubuntu/Debian
-sudo apt install fail2ban
-
-# CentOS/RHEL
-sudo yum install fail2ban
-
-# Start and enable
-sudo systemctl enable --now fail2ban
+docker compose logs postfix | grep "Relay access denied" | tail -20
 ```
 
-## Configuration
+## Monitoring Intrusion Attempts
 
-### Main Config
+```sql
+-- Top attacking IPs, last 24h
+SELECT client_ip, SUM(attempt_count) AS attempts, MAX(last_attempt_at)
+FROM failed_auth_attempts
+WHERE last_attempt_at >= NOW() - INTERVAL 24 HOUR
+GROUP BY client_ip ORDER BY attempts DESC LIMIT 20;
 
-```ini
-# /etc/fail2ban/jail.local
-[DEFAULT]
-# Ban for 1 hour by default
-bantime = 3600
-
-# Look at the last 10 minutes
-findtime = 600
-
-# Ban after 5 failures
-maxretry = 5
-
-# Don't ban these IPs
-ignoreip = 127.0.0.1/8 ::1 10.0.0.0/8 172.16.0.0/12
-
-# Send notifications
-action = %(action_mwl)s
-
-# Use iptables for banning
-banaction = iptables-multiport
+-- Currently blocked IPs
+SELECT client_ip, blocked_until FROM failed_auth_attempts
+WHERE blocked_until > NOW();
 ```
 
-## Jail Rules
-
-### SMTP Authentication (Postfix/Dovecot)
-
-```ini
-# /etc/fail2ban/jail.d/mailyte-smtp.conf
-[mailyte-smtp-auth]
-enabled = true
-port = 25,465,587
-filter = mailyte-smtp-auth
-logpath = /path/to/mailyte/logs/mailer/dovecot/auth.log
-          /path/to/mailyte/logs/mailer/postfix/maillog
-maxretry = 5
-findtime = 600
-bantime = 3600
-```
-
-Filter:
-
-```ini
-# /etc/fail2ban/filter.d/mailyte-smtp-auth.conf
-[Definition]
-failregex = .*auth.*fail.*rip=<HOST>.*
-            .*Password mismatch.*rip=<HOST>.*
-            .*warning.*authentication failed.*\[<HOST>\].*
-            .*SASL.*authentication failed.*\[<HOST>\].*
-
-ignoreregex =
-```
-
-### IMAP/POP3 Authentication
-
-```ini
-# /etc/fail2ban/jail.d/mailyte-imap.conf
-[mailyte-imap-auth]
-enabled = true
-port = 143,993,110,995
-filter = mailyte-imap-auth
-logpath = /path/to/mailyte/logs/mailer/dovecot/auth.log
-maxretry = 5
-findtime = 600
-bantime = 3600
-```
-
-Filter:
-
-```ini
-# /etc/fail2ban/filter.d/mailyte-imap-auth.conf
-[Definition]
-failregex = .*imap-login.*Login failed.*rip=<HOST>.*
-            .*pop3-login.*Login failed.*rip=<HOST>.*
-            .*auth.*fail.*rip=<HOST>.*
-
-ignoreregex =
-```
-
-### API Authentication
-
-```ini
-# /etc/fail2ban/jail.d/mailyte-api.conf
-[mailyte-api-auth]
-enabled = true
-port = 443,8083
-filter = mailyte-api-auth
-logpath = /path/to/mailyte/logs/worker/api/*.log
-maxretry = 10
-findtime = 600
-bantime = 1800
-```
-
-Filter:
-
-```ini
-# /etc/fail2ban/filter.d/mailyte-api-auth.conf
-[Definition]
-failregex = .*<HOST>.*401.*Unauthorized.*
-            .*<HOST>.*403.*Forbidden.*
-
-ignoreregex = .*health.*
-              .*metrics.*
-```
-
-### Postfix Relay Abuse
-
-```ini
-# /etc/fail2ban/jail.d/mailyte-relay.conf
-[mailyte-postfix-relay]
-enabled = true
-port = 25,465,587
-filter = mailyte-postfix-relay
-logpath = /path/to/mailyte/logs/mailer/postfix/maillog
-maxretry = 3
-findtime = 600
-bantime = 7200
-```
-
-Filter:
-
-```ini
-# /etc/fail2ban/filter.d/mailyte-postfix-relay.conf
-[Definition]
-failregex = .*NOQUEUE: reject.*Relay access denied.*\[<HOST>\].*
-            .*NOQUEUE: reject.*Recipient address rejected.*\[<HOST>\].*
-
-ignoreregex =
-```
-
-## Ban Durations
-
-| Jail | Max Retries | Find Time | Ban Time | Rationale |
-|------|------------|-----------|----------|-----------|
-| SMTP auth | 5 | 10 min | 1 hour | Brute force prevention |
-| IMAP auth | 5 | 10 min | 1 hour | Brute force prevention |
-| API auth | 10 | 10 min | 30 min | Higher threshold for API clients |
-| Relay abuse | 3 | 10 min | 2 hours | Aggressive — relay probing is bad |
-
-### Progressive Banning
-
-For repeat offenders, increase ban duration:
-
-```ini
-# /etc/fail2ban/jail.d/mailyte-recidive.conf
-[recidive]
-enabled = true
-filter = recidive
-logpath = /var/log/fail2ban.log
-banaction = iptables-allports
-maxretry = 3
-findtime = 86400     # 24 hours
-bantime = 604800     # 1 week
-```
-
-This bans IPs that get banned 3 or more times within 24 hours for a full week.
-
-## Whitelisting
-
-### Always Whitelist
-
-- Your own server IPs
-- Your office IPs
-- Known monitoring service IPs
-- Docker internal network (172.16.0.0/12)
-
-```ini
-# In jail.local [DEFAULT]
-ignoreip = 127.0.0.1/8 ::1 10.0.0.0/8 172.16.0.0/12 YOUR_OFFICE_IP
-```
-
-### Temporary Whitelist
+Or use the summary endpoint, which powers the console's security screens:
 
 ```bash
-# Whitelist an IP for testing
-sudo fail2ban-client set mailyte-smtp-auth addignoreip 203.0.113.100
-
-# Remove whitelist
-sudo fail2ban-client set mailyte-smtp-auth delignoreip 203.0.113.100
+curl -s -H "X-API-Key: $PLATFORM_KEY" \
+  "https://<api-host>/api/v1/security/failed-auth/summary?hours=24" | python3 -m json.tool
 ```
 
-## Managing Bans
+!!! note "Grafana's brute-force panels are empty by design"
+    The provisioned security dashboard queries Prometheus series (`auth_failures_total`, `blocked_ips_total`) that no service exports. The live data is in the tables and endpoints above. See [Security Monitoring](security-monitoring.md).
 
-```bash
-# Check status of all jails
-sudo fail2ban-client status
+## Optional: Host-Level Fail2ban
 
-# Check a specific jail
-sudo fail2ban-client status mailyte-smtp-auth
+If you want firewall-level bans on top of the built-in protection, the unused configs in `mailer/intrusion_detection/` (filters for Postfix/Dovecot auth failures, a webhook ban action, and `scripts/install.sh`) can be installed on the **host**. Points to check before relying on them:
 
-# Manually ban an IP
-sudo fail2ban-client set mailyte-smtp-auth banip 203.0.113.50
+- Fail2ban must run on the host, not in a container, to program iptables
+- The `logpath` values must point at the bind-mounted log directories (`logs/mailer/...`) — verify the filters actually match your current log format with `fail2ban-regex` before trusting a jail
+- Whitelist your own IPs and the Docker subnets (`ignoreip = 127.0.0.1/8 ::1 172.16.0.0/12 <your-ips>`) or auto-healing traffic can ban your own infrastructure
 
-# Manually unban an IP
-sudo fail2ban-client set mailyte-smtp-auth unbanip 203.0.113.50
-
-# Check if an IP is banned
-sudo fail2ban-client get mailyte-smtp-auth banned | grep 203.0.113.50
-
-# View all currently banned IPs
-sudo fail2ban-client banned
-```
-
-## Monitoring Fail2ban
-
-### Prometheus Metrics
-
-Export Fail2ban stats to Prometheus:
-
-```bash
-# /var/lib/node-exporter/textfile/fail2ban.prom
-# Updated by cron every minute
-#!/bin/bash
-for jail in mailyte-smtp-auth mailyte-imap-auth mailyte-api-auth mailyte-postfix-relay; do
-  banned=$(sudo fail2ban-client status $jail 2>/dev/null | grep "Currently banned" | awk '{print $NF}')
-  total=$(sudo fail2ban-client status $jail 2>/dev/null | grep "Total banned" | awk '{print $NF}')
-  echo "fail2ban_banned_current{jail=\"$jail\"} ${banned:-0}"
-  echo "fail2ban_banned_total{jail=\"$jail\"} ${total:-0}"
-done > /var/lib/node-exporter/textfile/fail2ban.prom
-```
-
-### Alert on High Ban Rate
-
-```yaml
-- alert: HighBanRate
-  expr: rate(fail2ban_banned_total[1h]) > 10
-  for: 10m
-  labels:
-    severity: warning
-  annotations:
-    summary: "High ban rate on {{ $labels.jail }}: {{ $value }} bans/hour"
-```
-
-## Testing
-
-### Test a Filter
-
-```bash
-# Test if the filter matches log lines
-sudo fail2ban-regex /path/to/mailyte/logs/mailer/dovecot/auth.log /etc/fail2ban/filter.d/mailyte-imap-auth.conf
-```
-
-### Simulate a Ban
-
-```bash
-# Trigger 5 failed logins from a test IP (from another machine)
-for i in {1..5}; do
-  openssl s_client -connect mail.yourdomain.com:993 < /dev/null
-done
-
-# Check if the IP got banned
-sudo fail2ban-client status mailyte-imap-auth
-```
+This path is unmaintained relative to the built-in controls — treat it as an add-on you own, not a shipped feature.

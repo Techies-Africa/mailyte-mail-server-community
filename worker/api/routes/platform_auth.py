@@ -1,36 +1,28 @@
 #!/usr/bin/env python3
 """
-Operator Auth API (ADR-002, ADR-004)
+Operator Auth API (phase-06 task 6.7, ADR-002)
 
-CE's entire login path for the Mailyte Console. Replaces the static
-ADMIN_TOKEN_SECRET shared password with real, individually-revocable
-identities: a shared secret is not a person, is not individually revocable,
-is not MFA-capable, and produces no attributable audit trail.
+Replaces the static ADMIN_TOKEN_SECRET shared-password mechanism with real,
+individually-revocable staff identities. Structurally parallel to
+routes/auth.py (tenant dashboard login) but deliberately not sharing any of
+its cookies, tables, or session machinery -- ADR-002's entire premise is
+that a tenant credential must never reach platform scope and vice versa.
 
-On a CE box the operator is the self-hoster themselves -- ADR-004's insight
-is that a self-hoster IS the platform operator of their own instance, which
-is why the same tables, roles, and endpoints serve both deployments.
-
-Login is two-step: POST /login exchanges email+password for a partial session
-(mfa_satisfied=0, which grants nothing except the two /mfa endpoints); POST
-/mfa exchanges a TOTP code for a full session.
-
-DIFFERENCE FROM mailyte-email-server: EE delegates the TOTP algorithm to a
-separate `totp` container over HTTP. CE's docker-compose.yml has no such
-service, so this router calls utils/totp.py in-process instead -- same
-RFC 6238 algorithm, same `totp_secrets` table, no service hop. See
-utils/totp.py's own docstring.
+Login is two-step: POST /login exchanges email+password for a partial
+session (mfa_satisfied=0, grants nothing else); POST /mfa exchanges a TOTP
+code for a full session. MFA is mandatory, never optional, for every
+operator (ADR-002 SS3) -- there is no single-step login path.
 """
 
-import contextlib
 import logging
 import os
 import secrets
 from datetime import datetime
+from pathlib import Path
 
+import requests
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from pydantic import BaseModel, Field, field_validator
-from utils import totp
 from utils.auth import (
     OPERATOR_CSRF_COOKIE_NAME,
     OPERATOR_SESSION_ABSOLUTE_TIMEOUT,
@@ -53,30 +45,21 @@ from utils.auth import (
 )
 from utils.database import get_db_connection
 
+project_root = Path(__file__).parent.parent.parent.parent
+import sys
+
+sys.path.insert(0, str(project_root))
 from shared.ulid_utils import generate_ulid
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
+TOTP_SERVICE_URL = os.getenv("TOTP_SERVICE_URL", "http://totp:8103")
 _OPERATOR_SESSION_COOKIE_MAX_AGE = int(OPERATOR_SESSION_ABSOLUTE_TIMEOUT.total_seconds())
 
-# Matches app.py's own constant (duplicated rather than imported, to avoid a
-# route module importing the app module that imports it).
+# Matches app.py's own constant (duplicated rather than imported -- same
+# pattern routes/bootstrap.py already uses for BOOTSTRAP_TOKEN_PATH).
 OPERATOR_BOOTSTRAP_TOKEN_PATH = "/app/data/operator-bootstrap-token"
-
-
-def _mfa_optional() -> bool:
-    """ADR-004's homelab escape hatch: `MAILYTE_CONSOLE_MFA=optional`.
-
-    The default stays ON, in both editions and in every deployment mode --
-    anything other than the exact string "optional" leaves MFA mandatory, so
-    a typo fails closed. The hatch exists because a single-operator CE
-    instance with a lost authenticator and no second owner is bricked, and
-    the ADR judged that a self-hoster on their own hardware may make that
-    trade knowingly. It is never appropriate for a hosted deployment, and
-    every login taken through it is logged at WARNING.
-    """
-    return os.getenv("MAILYTE_CONSOLE_MFA", "required").strip().lower() == "optional"
 
 
 class OperatorLoginRequest(BaseModel):
@@ -85,9 +68,7 @@ class OperatorLoginRequest(BaseModel):
 
 
 class OperatorMfaRequest(BaseModel):
-    token: str = Field(
-        ..., description="6-digit TOTP code from the authenticator app, or a backup code"
-    )
+    token: str = Field(..., description="6-digit TOTP code from the authenticator app")
 
 
 class OperatorBootstrapRequest(BaseModel):
@@ -97,8 +78,7 @@ class OperatorBootstrapRequest(BaseModel):
     )
     password: str = Field(
         ...,
-        description="Password for the first operator "
-        "(utils.auth.validate_password_strength's policy)",
+        description="Password for the first operator (utils.auth.validate_password_strength's policy)",
     )
 
     @field_validator("password")
@@ -115,9 +95,10 @@ class OperatorBootstrapRequest(BaseModel):
     summary="One-time first-operator bootstrap",
     description="Creates the first platform operator (role='owner'), single-use, guarded by the "
     "X-Bootstrap-Token app.py writes to /app/data/operator-bootstrap-token at startup "
-    "when no operator exists yet. Refuses with 409 if any operator already exists, "
-    "regardless of token validity. MFA enrollment happens on first login "
-    "(POST /mfa/setup), not here.",
+    "when no operator exists yet. Independent of POST /api/v1/bootstrap's own token -- "
+    "an install can have organizations with zero operators or vice versa. Refuses with "
+    "409 if any operator already exists, regardless of token validity. MFA enrollment "
+    "happens on first login (POST /mfa/setup), not here.",
 )
 async def operator_bootstrap(
     body: OperatorBootstrapRequest, x_bootstrap_token: str = Header(..., alias="X-Bootstrap-Token")
@@ -169,8 +150,7 @@ async def operator_bootstrap(
     try:
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT INTO platform_operators "
-            "(id, email, full_name, password_hash, role, mfa_required, is_active) "
+            "INSERT INTO platform_operators (id, email, full_name, password_hash, role, mfa_required, is_active) "
             "VALUES (%s, %s, %s, %s, 'owner', 1, 1)",
             (operator_id, email, body.full_name, password_hash),
         )
@@ -180,15 +160,14 @@ async def operator_bootstrap(
         logger.error(f"Operator bootstrap failed: {exc}")
         raise HTTPException(
             status_code=500, detail=create_api_response("error", "Bootstrap failed")
-        ) from exc
+        )
     finally:
         conn.close()
 
-    # Single-use: the token is consumed whether or not anything else goes
-    # right after this point. A failure to unlink is not worth failing the
-    # bootstrap over -- the 409 on operator_count above is the real guard.
-    with contextlib.suppress(OSError):
+    try:
         os.remove(OPERATOR_BOOTSTRAP_TOKEN_PATH)
+    except OSError:
+        pass
 
     logger.info(f"Operator bootstrap complete: operator={operator_id} email={email} role=owner")
 
@@ -217,8 +196,6 @@ def _set_operator_session_cookies(response: Response, session_token: str, csrf_t
     response.set_cookie(
         OPERATOR_CSRF_COOKIE_NAME,
         csrf_token,
-        # Readable by the console's JS on purpose -- it has to echo the value
-        # back in X-CSRF-Token for the double-submit check to mean anything.
         httponly=False,
         secure=secure,
         samesite="lax",
@@ -232,15 +209,31 @@ def _clear_operator_session_cookies(response: Response) -> None:
     response.delete_cookie(OPERATOR_CSRF_COOKIE_NAME, path="/")
 
 
+def _totp_enrolled(email: str) -> bool:
+    """Direct read of totp_secrets rather than a round-trip to the totp
+    service -- this is metadata (is a secret already set up and enabled?),
+    not the TOTP algorithm itself, which stays exclusively in that service
+    (task 6.7: "reuse totp_secrets, don't build a second implementation")."""
+    conn = get_db_connection()
+    if not conn:
+        raise HTTPException(
+            status_code=500, detail=create_api_response("error", "Database connection failed")
+        )
+    try:
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("SELECT enabled FROM totp_secrets WHERE user_email = %s", (email,))
+        row = cursor.fetchone()
+        return bool(row and row["enabled"])
+    finally:
+        conn.close()
+
+
 @router.post(
     "/login",
     summary="Operator login, step 1 of 2",
     description="Exchanges operator email+password for a partial session (mfa_satisfied=0), which "
-    "grants nothing except POST /mfa and POST /mfa/setup. Rate-limited harder than any "
-    "tenant credential: 3 failures in 15 minutes triggers a lockout on both the IP and "
-    "the email. When MAILYTE_CONSOLE_MFA=optional (ADR-004's homelab hatch, off by "
-    "default) and the operator has no enrolled authenticator, the session is issued "
-    "complete and no second step is required.",
+    "grants nothing except POST /mfa and POST /mfa/setup. Rate-limited harder than tenant "
+    "login: 3 failures in 15 minutes triggers a lockout.",
 )
 async def operator_login(
     body: OperatorLoginRequest,
@@ -271,8 +264,8 @@ async def operator_login(
         cursor.execute("SELECT * FROM platform_operators WHERE email = %s", (email,))
         operator = cursor.fetchone()
 
-        # Constant-time regardless of whether the account exists -- otherwise
-        # response latency alone enumerates valid operator emails.
+        # Constant-time regardless of whether the account exists (matches
+        # routes/auth.py's tenant login -- same timing-based enumeration risk).
         password_ok = verify_password(
             body.password, operator["password_hash"] if operator else _dummy_password_hash()
         )
@@ -286,13 +279,6 @@ async def operator_login(
 
         clear_operator_login_failures(cursor, client_ip, email)
 
-        mfa_enrolled = totp.is_enrolled(operator["email"])
-        # The hatch only applies to an operator with no authenticator at all.
-        # Once enrolled, MFA is enforced regardless of the env var: silently
-        # dropping a second factor an operator already set up is how a
-        # config change becomes a downgrade attack.
-        skip_mfa = _mfa_optional() and not mfa_enrolled
-
         now = datetime.now()
         session_token = generate_session_token()
         session_row_id = generate_ulid()
@@ -301,31 +287,18 @@ async def operator_login(
 
         cursor.execute(
             "INSERT INTO operator_sessions "
-            "(id, operator_id, token_hash, ip_address, user_agent, mfa_satisfied, "
-            "expires_at, absolute_expiry) "
-            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            "(id, operator_id, token_hash, ip_address, user_agent, mfa_satisfied, expires_at, absolute_expiry) "
+            "VALUES (%s, %s, %s, %s, %s, 0, %s, %s)",
             (
                 session_row_id,
                 operator["id"],
                 hash_session_token(session_token),
                 client_ip,
                 request.headers.get("User-Agent"),
-                1 if skip_mfa else 0,
                 expires_at,
                 absolute_expiry,
             ),
         )
-        if skip_mfa:
-            cursor.execute(
-                "UPDATE platform_operators SET last_login_at = %s WHERE id = %s",
-                (now, operator["id"]),
-            )
-            logger.warning(
-                "Operator %s logged in WITHOUT MFA: MAILYTE_CONSOLE_MFA=optional and no "
-                "authenticator is enrolled. This is ADR-004's homelab escape hatch and is "
-                "never appropriate for an instance reachable by anyone but you.",
-                operator["email"],
-            )
         conn.commit()
 
         csrf_token = generate_session_token()
@@ -333,15 +306,15 @@ async def operator_login(
 
         return create_api_response(
             "success",
-            "Signed in" if skip_mfa else "Password verified -- MFA required",
+            "Password verified -- MFA required",
             {
                 "operator": {
                     "id": operator["id"],
                     "email": operator["email"],
                     "role": operator["role"],
                 },
-                "mfa_required": not skip_mfa,
-                "mfa_enrolled": mfa_enrolled,
+                "mfa_required": True,
+                "mfa_enrolled": _totp_enrolled(operator["email"]),
             },
         )
 
@@ -349,9 +322,7 @@ async def operator_login(
         raise
     except Exception as e:
         logger.error(f"Operator login error: {e}")
-        raise HTTPException(
-            status_code=500, detail=create_api_response("error", "Login failed")
-        ) from e
+        raise HTTPException(status_code=500, detail=create_api_response("error", "Login failed"))
     finally:
         cursor.close()
         conn.close()
@@ -360,57 +331,60 @@ async def operator_login(
 @router.post(
     "/mfa/setup",
     summary="Begin MFA enrollment",
-    description="Generates a new TOTP secret for the operator on the pending (post-password) "
-    "session and returns the otpauth:// URI to render as a QR code, plus one-time backup "
-    "codes. The backup codes are shown exactly once and are the only way back in on a "
-    "single-operator instance. Call POST /mfa with the first code to finish.",
+    description="Generates a new TOTP secret for the operator on the pending (post-password) session "
+    "and returns the QR otpauth:// URI plus one-time backup codes. Only usable before "
+    "enrollment completes -- call POST /mfa with the first code to finish.",
 )
 async def operator_mfa_setup(request: Request):
     session = get_pending_operator_session(request)
 
-    if totp.is_enrolled(session["email"]):
-        # Re-enrolling would silently invalidate the authenticator the
-        # operator is currently using. Resetting MFA is an owner-only action
-        # (POST /api/v1/platform/operators/{id}/mfa-reset), on purpose: a
-        # stolen session must not be able to swap out the second factor of
-        # the account it stole.
+    try:
+        resp = requests.post(
+            f"{TOTP_SERVICE_URL}/totp/setup",
+            json={"user_email": session["email"]},
+            timeout=10,
+        )
+    except requests.RequestException as e:
+        logger.error(f"TOTP service unreachable during setup: {e}")
         raise HTTPException(
-            status_code=409,
-            detail=create_api_response(
-                "error",
-                "MFA is already enrolled for this operator. An owner must reset it first.",
-            ),
+            status_code=503, detail=create_api_response("error", "MFA service unavailable")
         )
 
-    enrollment = totp.begin_enrollment(session["email"])
-    if not enrollment:
+    if resp.status_code != 200:
         raise HTTPException(
-            status_code=500, detail=create_api_response("error", "MFA enrollment failed")
+            status_code=resp.status_code, detail=create_api_response("error", "MFA setup failed")
         )
 
     return create_api_response(
-        "success", "Scan the QR code, then confirm with POST /mfa", enrollment
+        "success", "Scan the QR code, then confirm with POST /mfa", resp.json().get("data")
     )
 
 
 @router.post(
     "/mfa",
     summary="Operator login, step 2 of 2",
-    description="Exchanges a TOTP code for a full session. If the operator has no enrolled TOTP "
-    "secret yet, this confirms enrollment (call /mfa/setup first); otherwise it verifies "
-    "a normal login code, or one single-use backup code. Either way, success promotes the "
-    "pending session to mfa_satisfied=1.",
+    description="Exchanges a TOTP code for a full session. If the operator has no enrolled TOTP secret "
+    "yet, this confirms enrollment (call /mfa/setup first); otherwise it verifies a normal "
+    "login code. Either way, success promotes the pending session to mfa_satisfied=1.",
 )
 async def operator_mfa(body: OperatorMfaRequest, request: Request):
     session = get_pending_operator_session(request)
-    enrolled = totp.is_enrolled(session["email"])
+    enrolled = _totp_enrolled(session["email"])
+    totp_endpoint = "verify" if enrolled else "enable"
 
-    verified = (
-        totp.verify_login_token(session["email"], body.token)
-        if enrolled
-        else totp.confirm_enrollment(session["email"], body.token)
-    )
-    if not verified:
+    try:
+        resp = requests.post(
+            f"{TOTP_SERVICE_URL}/totp/{totp_endpoint}",
+            json={"user_email": session["email"], "token": body.token},
+            timeout=10,
+        )
+    except requests.RequestException as e:
+        logger.error(f"TOTP service unreachable during verify: {e}")
+        raise HTTPException(
+            status_code=503, detail=create_api_response("error", "MFA service unavailable")
+        )
+
+    if resp.status_code != 200:
         raise HTTPException(
             status_code=401, detail=create_api_response("error", "Invalid MFA code")
         )
@@ -482,8 +456,7 @@ async def operator_logout(
 @router.get(
     "/me",
     summary="Current operator identity",
-    description="Returns the caller's operator id, email, and role. Requires a full "
-    "(MFA-satisfied) session.",
+    description="Returns the caller's operator id, email, and role. Requires a full (MFA-satisfied) session.",
 )
 async def operator_me(
     request: Request, ctx: AuthContext = Depends(require_scope("platform", "read"))

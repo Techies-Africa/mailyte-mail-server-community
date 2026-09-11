@@ -1,15 +1,12 @@
 # Multi-Tenant Isolation
 
-> **Enterprise Edition** — This feature is available in [Mailyte Enterprise](https://mailyte.com). The Community Edition does not include this functionality.
-
-
 How Mailyte keeps tenant data separate — what's shared, what's isolated, and how each boundary is enforced.
 
 ---
 
 ## The Core Principle
 
-Every piece of tenant data belongs to exactly one Organization. There is no cross-tenant data access in normal operation. The admin API (authenticated with `X-Admin-Password`) is the only path that can see across org boundaries, and that's by design — it's for platform operators, not tenants.
+Every piece of tenant data belongs to exactly one Organization. There is no cross-tenant data access in normal operation. The only paths that can see across org boundaries are **platform-scoped credentials** — an operator session (console login + TOTP MFA) or an API key issued with `scope='platform'` — and that's by design: they're for platform operators, not tenants. A tenant-scoped credential can never reach a platform endpoint, regardless of its own permission flags.
 
 ## What's Isolated vs What's Shared
 
@@ -30,7 +27,7 @@ Every piece of tenant data belongs to exactly one Organization. There is no cros
 | MySQL | **Shared** | Single database, isolation via `organization_id` |
 | Redis | **Shared** | Single instance, key prefixing per org where needed |
 | Qdrant | **Shared** | Single instance, metadata filtering per org |
-| TLS certificates | **Shared** | Managed globally by the cert manager |
+| TLS certificates | **Mostly shared** | Managed globally by cert_manager; per-domain SNI certs are issued for customer mail hostnames |
 | IP addresses | **Shared** | All orgs send from the same IPs (unless you configure dedicated IPs) |
 
 ## How Isolation is Enforced
@@ -40,25 +37,22 @@ Every piece of tenant data belongs to exactly one Organization. There is no cros
 Almost every table has an `organization_id` column. The API layer adds a `WHERE organization_id = ?` clause to every query automatically. This is handled in the data access layer, not sprinkled through individual endpoints — so forgetting to filter in one endpoint doesn't leak data.
 
 ```python
-# Simplified example of how queries are scoped
-def get_domains(db: Session, org_id: int):
+# Simplified example of how queries are scoped.
+# Org IDs are 26-char ULID strings, not integers.
+def get_domains(db: Session, org_id: str):
     return db.query(Domain).filter(Domain.organization_id == org_id).all()
 ```
 
 The org ID comes from the authenticated API key, not from the request body. A tenant can't forge another org's ID because the API key determines which org they are.
 
-!!! warning "The admin bypass"
-    The `X-Admin-Password` path bypasses per-org filtering. This is intentional — platform operators need to manage all orgs. But it means the admin password must be treated as a root credential. Never give it to tenants.
+!!! warning "The platform bypass"
+    Platform-scoped credentials (operator sessions, `scope='platform'` API keys) bypass per-org filtering. This is intentional — platform operators need to manage all orgs. It also means those credentials are root-equivalent for tenant data: never issue platform scope to a tenant, and keep the console behind its IP allowlist.
 
 ### Per-Org Rate Limits
 
-Each organization has its own sending rate limit, tracked independently in Redis:
+Each organization has its own rate limits (the `rate_limits` JSON on the org, overridable per domain), tracked as independent per-org counters with TTLs in Redis by the `rate_limiter` service.
 
-```
-rate_limit:org:{org_id}:hourly -> counter with TTL
-```
-
-One org hitting its limit has zero effect on other orgs. The rate limiter checks the calling org's counter and only throttles that org.
+One org hitting its limit has zero effect on other orgs. Enforcement happens where mail actually enters the system: Postfix's policy service consults the rate limiter per sender at the SMTP DATA phase (inbound) and on the submission path (outbound).
 
 ### Per-Org Webhooks
 
@@ -68,7 +62,7 @@ There's no way for org A to register a webhook that receives org B's events. The
 
 ### Per-Org Storage Quotas
 
-Each org has a total storage budget (`storage_quota_mb`), divided among its accounts. The storage usage worker calculates actual disk usage per account and compares it to quotas.
+Each org has a storage budget (the `storage_quotas` JSON on the organization, overridable per domain), divided among its accounts (`storage_quota` on each account). The `storage_usage` worker measures actual usage per mailbox — over Dovecot's IMAP QUOTA, the same figure Dovecot maintains for enforcement — and compares it to quotas, firing `storage.quota.warning` / `storage.quota.exceeded` webhooks.
 
 ```mermaid
 graph LR
@@ -91,7 +85,7 @@ When an account exceeds its individual quota, Dovecot rejects new deliveries for
 
 ### Per-Org Analytics
 
-Analytics are pre-aggregated per org. The `AnalyticsSnapshot` and `DomainStats` tables both include `organization_id`. When the API serves analytics data, it filters by the authenticated org.
+Analytics are pre-aggregated per org. The `AnalyticsData` rollups carry the org/domain context, and the gateway's analytics endpoints (which proxy to the `analytics` service) filter by the authenticated org.
 
 This means analytics queries are fast (they hit pre-aggregated tables) and isolated (no risk of seeing another org's numbers).
 
@@ -104,15 +98,7 @@ At the Postfix/Dovecot level, isolation works differently than in the API. Mail 
 
 ### Redis Key Isolation
 
-Redis is a flat key-value store with no built-in multi-tenancy. Mailyte uses key prefixing to keep tenant data separate:
-
-```
-rate_limit:org:42:hourly
-cache:org:42:domain_list
-webhook_queue:org:42
-```
-
-Workers always include the org ID in Redis key operations. There's no global key that mixes data from multiple orgs.
+Redis is a flat key-value store with no built-in multi-tenancy. Mailyte keeps tenant data separate by including the tenant identifier (org ULID, sender address, or API key ID, depending on the counter) in every key a worker writes. There's no global key that mixes data from multiple orgs.
 
 ### Qdrant Isolation
 
@@ -122,7 +108,7 @@ Vector embeddings in Qdrant are tagged with the organization ID as metadata. Sea
 {
   "filter": {
     "must": [
-      { "key": "organization_id", "match": { "value": 42 } }
+      { "key": "organization_id", "match": { "value": "01J5YGKB3ZJR4DPNZN9SMTHF4R" } }
     ]
   }
 }
@@ -132,19 +118,12 @@ This ensures RAG search results only include emails from the requesting org.
 
 ## What Happens When You Delete an Org
 
-Deleting an organization cascades through the hierarchy:
+Deletion is deliberately **bottom-up, not cascading**. `DELETE /api/v1/organizations/{id}` (a platform-level action) refuses with a `400` while the org still has domains or email accounts — you delete accounts, then domains, then the org. That ordering is the safety mechanism: there is no single call that silently takes a tenant's mailboxes with it.
 
-1. All API keys for the org are revoked.
-2. All webhook endpoints are removed.
-3. All email accounts are deactivated (Dovecot stops serving them).
-4. All domains are deactivated (Postfix stops accepting mail for them).
-5. Mailbox files are marked for deletion (handled by a cleanup job).
-6. Database records are soft-deleted (retained for audit purposes, with a configurable hard-delete schedule).
-7. Qdrant embeddings for the org are deleted.
-8. Redis keys for the org expire naturally via TTLs.
+If the goal is to stop mail flow rather than remove data, **deactivate** instead: setting `active = false` on the org (or a single domain, or a single account) stops Postfix accepting mail for it and Dovecot serving it, and is reversible.
 
-!!! info "Soft delete by default"
-    Org deletion is a soft delete. Records stay in the database with a `deleted_at` timestamp. This is for safety — if someone accidentally deletes an org, you can restore it. Hard deletion happens on a schedule (configurable, default 30 days).
+!!! warning "Dovecot's auth cache outlives the change"
+    Deactivating or deleting a mailbox does not end its cached credentials — Dovecot's auth cache keeps them working for up to 1 hour (`auth_cache_ttl`) unless it is flushed. The SMTP-credential lifecycle endpoints flush it automatically via the doveadm API; direct database changes do not.
 
 ## Isolation Boundaries Summary
 

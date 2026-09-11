@@ -1,128 +1,114 @@
 # Storage & Quotas
 
-> **Enterprise Edition** — This feature is available in [Mailyte Enterprise](https://mailyte.com). The Community Edition does not include this functionality.
+**Track how much disk space each mailbox, domain, and organization is using — and enforce limits before things get out of hand.**
 
-
-**Track how much disk space each mailbox, domain, and organization is using -- and enforce limits before things get out of hand.**
-
-The Storage Usage service (port `8084`) periodically scans the mail filesystem, calculates real disk usage per mailbox, rolls it up to domain and org totals, and compares everything against configured quotas. When usage crosses a threshold, it fires webhook alerts so you (or your dashboard) can respond.
+The Storage Usage service (port `8092`) tracks disk usage per mailbox, rolls it up to domain and organization totals, compares everything against configured quotas, and fires webhook alerts when thresholds are crossed. Hard enforcement at delivery time is done by Dovecot's quota plugin.
 
 ## How it works
 
 ```mermaid
 flowchart TD
-    A[Storage Usage Worker] -->|periodic scan| B[Filesystem\n/var/mail/vhosts]
-    A -->|attachment sizes| C[Attachment Storage\n/storage/attachments]
-    B --> D[Calculate per-mailbox usage]
+    A[Storage Usage Service :8092] -->|periodic calculation| B[Mail data\n/var/mail]
+    A -->|attachment sizes| C[Attachment Storage]
+    B --> D[Per-mailbox usage]
     C --> D
     D --> E[Roll up to domain totals]
     E --> F[Roll up to org totals]
     F --> G{Compare against quotas}
-    G -->|Under limit| H[Update DB + cache]
-    G -->|Warning threshold| I[Send warning webhook]
-    G -->|Over quota| J[Send critical alert\n+ reject new mail]
+    G -->|Under limit| H[Update DB + Redis cache]
+    G -->|>= 80%| I[storage.quota.warning webhook]
+    G -->|>= 95%| J[storage.quota.exceeded webhook]
+    K[Dovecot quota plugin] -->|at delivery| L[Reject when mailbox full]
 ```
 
 ### Why not just use Dovecot quotas?
 
-Dovecot has built-in quota support, and Mailyte does use it at the IMAP level. But the Storage Usage service adds a layer on top that gives you:
+Dovecot enforces per-mailbox quotas at delivery time (and its `quota-warning` script fires as usage grows). The Storage Usage service adds:
 
-- **Organization-level totals.** Dovecot only knows about individual mailboxes. The service aggregates across all mailboxes in a domain, and all domains in an org.
-- **Webhook integration.** Get proactive alerts before a mailbox fills up, not after delivery starts bouncing.
-- **Dashboard-friendly API.** Query usage stats programmatically for billing, reporting, or admin dashboards.
-- **Attachment tracking.** Counts storage used by attachments stored in S3/filesystem, not just maildir size.
+- **Organization-level totals.** Dovecot only knows individual mailboxes; the service aggregates across domains and orgs.
+- **Webhook integration.** Proactive `storage.quota.warning` / `storage.quota.exceeded` events through the [centralized dispatcher](webhooks.md), before delivery starts bouncing.
+- **Dashboard-friendly API.** Query usage programmatically for billing, reporting, or admin dashboards.
+- **Attachment tracking.** Separately counts externally stored attachment sizes.
 
 ## Configuration
 
-### Service settings
-
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `STORAGE_USAGE_SERVICE_URL` | `http://localhost:8084` | Service URL |
-| `STORAGE_DATA_PATH` | `/storage/mail_data` | Path to mail data |
-| `STORAGE_ATTACHMENT_PATH` | `/storage/attachments` | Path to attachment storage |
-| `STORAGE_TEMP_PATH` | `/tmp/storage_calculations` | Temp directory for calculations |
-| `STORAGE_CALCULATION_INTERVAL` | `3600` | Seconds between recalculations |
+| `MAIL_DATA_PATH` | `/var/mail` | Path to mail data |
+| `ATTACHMENT_PATH` | `/var/attachments` | Path to attachment storage |
+| `TEMP_PATH` | `/tmp/storage_calc` | Temp directory for calculations |
+| `STORAGE_CALC_INTERVAL` | `3600` | Seconds between recalculations |
+| `STORAGE_CLEANUP_INTERVAL` | `86400` | Seconds between cleanup runs |
 | `STORAGE_BATCH_SIZE` | `1000` | Mailboxes to process per batch |
+| `MAX_CALC_TIME` | `300` | Max seconds for a calculation run |
+| `STORAGE_WARNING_THRESHOLD` | `80` | Usage % that triggers a warning |
+| `STORAGE_CRITICAL_THRESHOLD` | `95` | Usage % that triggers a critical alert |
+| `STORAGE_ALERT_COOLDOWN` | `3600` | Seconds between repeat alerts for the same entity |
+| `REDIS_DB` | `2` | Redis database used for caching |
 
-### Quota defaults
+Quotas themselves are set per-mailbox, per-domain, and per-org in the database, via the platform API (`/api/v1/domains/{id}/quotas`, mailbox `storage_quota`, org caps). There is no single "default quota" env var.
 
-Quotas are set per-mailbox in the database (via the API). There's no single env var for "default mailbox quota" because quotas are managed through the organization and domain setup in the admin API.
-
-### Webhook URLs
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `STORAGE_ALERT_WEBHOOK_URL` | *(empty)* | URL for storage threshold alerts |
-| `STORAGE_REPORT_WEBHOOK_URL` | *(empty)* | URL for periodic storage reports |
-| `QUOTA_EXCEEDED_WEBHOOK_URL` | *(empty)* | URL for quota-exceeded notifications |
-
-If these are empty, alerts go through the default webhook system.
+Alert webhooks go through the centralized dispatcher by default; the service's webhook config can also carry dedicated `STORAGE_ALERT_WEBHOOK_URL` / `QUOTA_EXCEEDED_WEBHOOK_URL` destinations.
 
 ## API endpoints
 
-The storage service runs on port **8084**.
+The service runs on port **8092**. The platform API proxies storage management under `/api/v1/storage/`.
 
-### Get mailbox usage
-
-```bash
-curl http://localhost:8084/usage/mailbox/user@example.com
-```
-
-```json
-{
-  "mailbox": "user@example.com",
-  "usage_mb": 245.7,
-  "quota_mb": 500,
-  "usage_percent": 49.14,
-  "attachment_mb": 82.3,
-  "last_calculated": "2026-03-25T10:00:00Z"
-}
-```
-
-### Get domain usage
+### Get usage
 
 ```bash
-curl http://localhost:8084/usage/domain/example.com
-```
+curl http://localhost:8092/storage/usage/mailbox/user@example.com
+curl http://localhost:8092/storage/usage/domain/example.com
+curl http://localhost:8092/storage/usage/organization/org_123
 
-### Get organization usage
-
-```bash
-curl http://localhost:8084/usage/organization/org_123
+# Full hierarchy roll-up for an entity
+curl http://localhost:8092/storage/usage/domain/example.com/hierarchy
 ```
 
 ### Trigger recalculation
 
 ```bash
-curl -X POST http://localhost:8084/recalculate
+curl -X POST http://localhost:8092/storage/calculate/mailbox/user@example.com
+curl -X POST http://localhost:8092/storage/filesystem/scan
 ```
 
-Forces an immediate storage recalculation instead of waiting for the next scheduled run.
+### Other endpoints
+
+```
+POST /storage/increment                          # count added/removed bytes
+GET  /storage/quota-check                        # check headroom before an operation
+POST /storage/alerts/{entity_type}/{identifier}  # force an alert evaluation
+GET  /storage/config/{entity_type}/{identifier}  # read quota config
+PUT  /storage/config/{entity_type}/{identifier}  # update quota config
+POST /storage/cleanup                            # prune old usage records
+GET  /storage/stats
+POST /storage/webhook/test
+GET  /health
+GET  /metrics
+```
 
 ## Quota enforcement
 
 Quotas are enforced at two points:
 
-1. **Dovecot (IMAP delivery):** Dovecot checks per-mailbox quotas at delivery time. If a mailbox is full, the message bounces with a "Mailbox full" error.
+1. **Dovecot (hard enforcement).** The `quota` plugin checks per-mailbox quotas at LMTP delivery time. A full mailbox rejects the message ("Quota exceeded"), and Dovecot's `quota-warning` script (`mailer/dovecot/scripts/dovecot-quota-warning.sh`) fires as usage crosses warning levels.
 
-2. **Storage Usage service (proactive):** The service monitors usage percentages and sends alerts at configurable thresholds:
+2. **Storage Usage service (proactive).** Monitors usage percentages and dispatches webhook events:
 
-| Threshold | Action |
-|-----------|--------|
-| 80% | Warning webhook |
-| 90% | Critical webhook |
-| 95% | Alert + flag in dashboard |
+| Threshold | Event |
+|-----------|-------|
+| 80% | `storage.quota.warning` |
+| 95% | `storage.quota.exceeded` |
 | 100% | Delivery rejected by Dovecot |
 
 ## Things to know
 
-- **Storage calculations are eventually consistent.** The service recalculates every hour by default (`STORAGE_CALCULATION_INTERVAL=3600`). Between runs, the displayed usage might lag behind reality. If you need up-to-the-minute accuracy, trigger a manual recalculation via the API.
+- **Storage calculations are eventually consistent.** Recalculation runs hourly by default (`STORAGE_CALC_INTERVAL`); between runs, displayed usage can lag reality. Trigger a manual recalculation when you need current numbers.
 
-- **Attachment storage is counted separately.** When emails have attachments stored externally (S3 or filesystem), those sizes are tracked under `attachment_mb` and added to the mailbox total. This prevents the classic surprise of "my maildir is only 100MB, why is my quota at 400MB?"
+- **Attachment storage is counted separately** and added to the mailbox total, so externally stored attachments don't hide from quota accounting.
 
-- **Batch processing prevents I/O storms.** The service processes mailboxes in batches of 1,000 by default. On a server with 50,000 mailboxes, a full recalculation takes multiple batches with pauses between them, so you don't spike disk I/O.
+- **Batch processing prevents I/O storms.** Mailboxes are processed in batches of 1,000 with a per-run time cap, so a full recalculation doesn't spike disk I/O.
 
-- **Quotas are per-organization.** In a multi-tenant setup, each org gets its own quota pool. An org with a 10GB total quota can distribute that across its domains and mailboxes however it wants.
+- **Alerts are rate-limited.** The same entity won't re-alert within the `STORAGE_ALERT_COOLDOWN` window (1 hour by default).
 
-- **Users don't see quota errors until Dovecot enforces them.** The webhook alerts are for administrators. End users only discover they're over quota when email delivery starts bouncing. Set up proactive notifications in your application to warn users before they hit the wall.
+- **Users don't see quota errors until Dovecot enforces them.** The webhook alerts are for administrators and integrations — surface warnings to end users in your application before they hit the wall.

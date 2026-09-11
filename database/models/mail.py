@@ -22,7 +22,7 @@ from sqlalchemy.sql import func
 from shared.ulid_utils import generate_ulid
 
 from . import Base
-from .enums import MailStatus
+from .enums import MailStatus, enum_values
 
 
 # Mail Processing and Queue
@@ -39,7 +39,7 @@ class MailQueue(Base):
     body = Column(Text, nullable=False)
     headers = Column(JSON, nullable=True)
     priority = Column(Integer, nullable=False, default=5, index=True)
-    status = Column(SQLEnum(MailStatus), nullable=False, default=MailStatus.QUEUED, index=True)
+    status = Column(SQLEnum(MailStatus, values_callable=enum_values), nullable=False, default=MailStatus.QUEUED, index=True)
     attempts = Column(Integer, nullable=False, default=0)
     max_attempts = Column(Integer, nullable=False, default=3)
     scheduled_at = Column(DateTime, nullable=False, default=func.now(), index=True)
@@ -65,7 +65,7 @@ class MailLog(Base):
     recipient = Column(String(255), nullable=False, index=True)
     organization_id = Column(String(26), ForeignKey("organizations.id"), nullable=True, index=True)
     subject = Column(Text, nullable=True)
-    status = Column(SQLEnum(MailStatus), nullable=False, index=True)
+    status = Column(SQLEnum(MailStatus, values_callable=enum_values), nullable=False, index=True)
     message_id = Column(String(255), nullable=True, index=True)
     size = Column(Integer, nullable=True)
     relay = Column(String(255), nullable=True)
@@ -75,9 +75,9 @@ class MailLog(Base):
     # Additional fields for analytics
     bounce_reason = Column(Text, nullable=True)
     spam_score = Column(Float, nullable=True)
-    # Authenticated SASL identity from the smtpd client= line (0011) -- what
+    # Authenticated SASL identity from the smtpd client= line (0018) -- what
     # ties a delivery to the SMTP API key that sent it. NULL for inbound and
-    # for pre-0011 rows.
+    # for pre-0018 rows.
     sasl_username = Column(String(255), nullable=True)
 
     __table_args__ = (

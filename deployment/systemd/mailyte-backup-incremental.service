@@ -1,17 +1,18 @@
 [Unit]
-Description=Mailyte incremental backup (MySQL binlog + new mail)
-Documentation=file://__MAILYTE_ROOT__/docs/operations/backups.md
+Description=Mailyte incremental backup (MySQL binlog + new mail) to S3
+Documentation=file:///var/www/mailyte-email-server/current/docs/operations/disaster-recovery.md
 After=docker.service network-online.target
 Requires=docker.service
-# Never run alongside a full backup: both drive mysqldump --flush-logs and
-# would fight over the same binlog position file.
+# Never run alongside a full backup: both would drive mysqldump --flush-logs
+# and fight over the same binlog position file.
 Conflicts=mailyte-backup-full.service
 
 [Service]
 Type=oneshot
-User=__MAILYTE_USER__
-WorkingDirectory=__MAILYTE_ROOT__
-ExecStart=/bin/bash __MAILYTE_ROOT__/scripts/backup.sh --incremental
+User=devops
+Group=devops
+WorkingDirectory=/var/www/mailyte-email-server/current
+ExecStart=/bin/bash /var/www/mailyte-email-server/current/scripts/backup.sh --incremental
 Nice=10
 IOSchedulingClass=idle
 # Must finish well inside its own hourly period.

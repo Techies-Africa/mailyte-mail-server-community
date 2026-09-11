@@ -18,41 +18,6 @@ exclude = ["database/migrations/archive", "alembic/versions"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "UP", "B", "SIM"]
 
-[tool.ruff.lint.flake8-bugbear]
-# B008 ("do not perform function call in argument defaults") is exactly wrong
-# for FastAPI: `Depends(...)`, `Query(...)`, `Header(...)` in a parameter
-# default IS the framework's dependency-injection syntax, and the values are
-# not mutable state shared between calls. Naming them here is ruff's own
-# documented answer for FastAPI codebases, and is narrower than a blanket
-# per-file suppression -- a genuine mutable default anywhere else still fails.
-extend-immutable-calls = [
-    "fastapi.Body",
-    "fastapi.Cookie",
-    "fastapi.Depends",
-    "fastapi.File",
-    "fastapi.Form",
-    "fastapi.Header",
-    "fastapi.Path",
-    "fastapi.Query",
-    "fastapi.Security",
-    # This repo's own dependency factory, used the same way and for the same
-    # reason: `Depends(require_scope('platform', 'read', role='owner'))`
-    # builds a fresh closure per route at import time (utils/auth.py). It
-    # holds no mutable state, so the argument-default rule does not apply.
-    "utils.auth.require_scope",
-]
-
-[tool.ruff.lint.per-file-ignores]
-# E402 ("module level import not at top of file") is unavoidable here by
-# design. app.py must run two things before it may import anything else:
-# the fail-closed secrets check (phase-07 C3 -- pointless if a module that
-# reads a secret has already been imported and cached it), and the
-# sys.path setup that makes `shared.*` importable at all. Every import
-# after those is flagged, so the rule is suppressed for this one file
-# rather than scattered across seven `# noqa` comments. A genuine
-# out-of-order import anywhere else in the repo still fails.
-"worker/api/app.py" = ["E402"]
-
 [tool.ruff.format]
 quote-style = "double"
 

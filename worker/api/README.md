@@ -23,40 +23,23 @@ External Clients → API Gateway → Internal Services
 
 ## Versioned API Endpoints
 
-All API endpoints are versioned under `/api/v1/` to ensure backward compatibility:
+All API endpoints are versioned under `/api/v1/`. 32 route modules are mounted dynamically from the `route_modules` list in `app.py` -- organizations, domains, mailboxes, aliases, analytics, monitoring, queue, webhooks, rate_limiter, storage, tracking, rag, filters, shared_mailboxes, message_trace, transport_rules, whitelabel, reseller, compliance, migration, ssl, smtp_credentials (+ reports), capabilities, bootstrap, auth, platform_auth, platform, security, reputation, mailbox_auth, mailbox.
 
-### Domain Management (`/api/v1/domains/`)
-- `POST /add/domain` - Add new email domain
-- `GET /get/domain/{domain_id}` - Retrieve domain information
-- `POST /edit/domain` - Update domain settings
-- `POST /delete/domain` - Remove domain
-- `GET /get/domain/stats/{domain}` - Domain statistics
-
-### Mailbox Management (`/api/v1/mailboxes/`)
-- `POST /add/mailbox` - Create user mailbox
-- `GET /get/mailbox/{mailbox_id}` - Get mailbox details
-- `POST /edit/mailbox` - Update mailbox settings
-- `POST /delete/mailbox` - Remove mailbox
-- `GET /get/mailbox/stats/{domain}` - Mailbox statistics
-
-### Alias Management (`/api/v1/aliases/`)
-- `POST /add/alias` - Create email alias
-- `GET /get/alias/{alias_id}` - Retrieve alias information
-- `POST /edit/alias` - Update alias configuration
-- `POST /delete/alias` - Remove alias
-- `POST /add/alias/bulk` - Bulk alias creation
+Resource modules use RESTful paths (e.g. `GET/POST /api/v1/domains/`, `GET/PUT/DELETE /api/v1/domains/{domain_id}`, `POST /api/v1/domains/{domain_id}/verify-dns`, DKIM management under `/{domain_id}/dkim*`), with some legacy `/add` / `/edit` / `/delete` compatibility routes still present in domains/mailboxes/aliases. Consult `/api-docs` (Swagger UI -- `docs_url` is customized, `/docs` is not served) or `/api-reference` (ReDoc) on a running instance for the authoritative list.
 
 ### Service Proxying
 
-The API Gateway proxies requests to internal services (without versioning the internal calls):
+The API Gateway proxies to internal services over the compose network (target = service name : container port):
 
-- **Tracking System** (`/api/v1/tracking/`) → Internal port 8081
-- **Webhook Management** (`/api/v1/webhooks/`) → Internal port 8083
-- **Rate Limiting** (`/api/v1/rate-limiter/`) → Internal port 8082
-- **Storage Management** (`/api/v1/storage/`) → Internal port 8084
-- **RAG System** (`/api/v1/rag/`) → Internal port 8090
-- **Queue Management** (`/api/v1/queue/`) → Internal port 5001
-- **Analytics** (`/api/v1/analytics/`) → Internal port 8087
+- **Tracking** (`/api/v1/tracking/`) → `tracking:8086`
+- **Rate Limiting** (`/api/v1/rate-limiter/`) → `rate_limiter:8082`
+- **Analytics** (`/api/v1/analytics/`) → `analytics:8085`
+- **Monitoring** (`/api/v1/monitoring/`) → `monitoring:8085`
+- **Queue Management** (`/api/v1/queue/`) → `queue_manager:8090`
+- **Storage** (`/api/v1/storage/`) → `storage_usage:8092`
+- **RAG** (`/api/v1/rag/`) → `rag:8090`
+
+Webhook endpoint management (`/api/v1/webhooks/endpoints*`) is served from the gateway's own database, not proxied.
 
 ## Authentication
 
@@ -64,8 +47,10 @@ The API Gateway proxies requests to internal services (without versioning the in
 ```bash
 curl -H "X-API-Key: your-api-key" \
      -H "Content-Type: application/json" \
-     http://your-server:5000/api/v1/domains/all
+     http://your-server:8083/api/v1/domains/
 ```
+
+Besides tenant API keys, the gateway supports tenant browser sessions (`mailyte_session` cookie) and operator sessions (`mailyte_operator_session` cookie, separate table and lifetime) -- see `utils/auth.py`.
 
 ### Key Management
 - Keys support read/write permissions
@@ -113,11 +98,11 @@ python app.py
 
 ### Testing
 ```bash
-# Health check
-curl http://0.0.0.0:5000/health
+# Health check (container binds 8080; published as 8083 in dev)
+curl http://localhost:8083/health
 
 # API test with key
-curl -H "X-API-Key: test-key" http://0.0.0.0:5000/api/v1/health
+curl -H "X-API-Key: test-key" http://localhost:8083/api/v1/organizations
 ```
 
 ## Dependencies

@@ -40,14 +40,16 @@ docker compose logs --tail=100 postfix
 
 ### Check container health
 
+Container names match service names (`api`, `postfix`, `mysql`, ...):
+
 ```bash
-docker inspect --format='{{.State.Health.Status}}' mailyte-api
+docker inspect --format='{{.State.Health.Status}}' api
 ```
 
 ### Check which ports are in use
 
 ```bash
-ss -tlnp | grep -E '25|587|465|143|993|110|995|5000|8080'
+ss -tlnp | grep -E ':(25|587|465|143|993|110|995|8083|11334)\b'
 ```
 
 ### Test if a port is reachable
@@ -89,6 +91,22 @@ docker compose logs <container-name>
 ```
 
 ### Common causes
+
+**The secrets check failed.**
+A `secrets-check` container validates your secrets before anything else starts, and a failure blocks the entire stack -- every other service just never comes up. Two containers are *supposed* to exit: `secrets-check` and `migrate` both show `Exited (0)` when healthy.
+
+```bash
+docker compose logs secrets-check
+# If it names a weak/missing secret, fix it with:
+./scripts/generate-secrets.sh
+```
+
+**A migration failed.**
+The one-shot `migrate` container must complete successfully before the api and most workers will start.
+
+```bash
+docker compose logs migrate
+```
 
 **The container depends on a service that is not ready yet.**
 MySQL and Redis need a few seconds to initialize. Most Mailyte services have health-check-based dependencies, but if you see "connection refused" errors in the logs, the dependency just was not ready in time.
@@ -154,8 +172,8 @@ sudo systemctl stop postfix  # if system Postfix is installed
 sudo systemctl disable exim4
 ```
 
-**Another application is on port 5000.**
-On macOS, AirPlay Receiver uses port 5000. Disable it in System Settings > AirDrop & Handoff, or change the API port in your `.env`.
+**Another application is on one of the worker ports.**
+The base compose file publishes host ports 8081-8104 (workers), 8083 (API), 8000 (docs), 3000 (Grafana), and more. If something on your machine already owns one of them, copy `docker-compose.override.yml.example` to `docker-compose.override.yml` and remap the conflicting port there -- Compose loads that file automatically, it is gitignored, and it uses the `!override` tag so the conflicting binding is actually replaced rather than appended to.
 
 !!! warning "Do not change standard mail ports"
     Ports 25, 587, 465, 143, and 993 are internet standards. Other mail servers expect to reach you on these ports. Change them only if you are running behind a proxy that handles the mapping.
@@ -166,25 +184,25 @@ On macOS, AirPlay Receiver uses port 5000. Disable it in System Settings > AirDr
 
 ### Symptoms
 
-The API or worker logs show errors like `Can't connect to MySQL server on 'db'` or `Access denied for user 'mailyte'`.
+The API or worker logs show errors like `Can't connect to MySQL server on 'mysql'` or `Access denied for user 'mailuser'`.
 
 ### Diagnosis
 
 ```bash
 # Check if the database container is running
-docker compose ps db
+docker compose ps mysql
 
 # Check database logs
-docker compose logs db
+docker compose logs mysql
 
 # Try connecting manually from inside the network
-docker compose exec db mysql -u mailyte -p
+docker compose exec mysql mysql -u mailuser -p
 ```
 
 ### Common causes
 
 **The database has not finished initializing.**
-On first run, MySQL creates the database schema. This takes 30-60 seconds. If the API starts before MySQL is ready, it fails.
+On first run, MySQL initializes its data directory and the `migrate` container then applies the schema. This takes 30-60 seconds. The compose file gates the API on both, but a manually started container can race them.
 
 ```bash
 # Wait for MySQL to be healthy, then restart the API
@@ -203,12 +221,14 @@ If you changed `DB_PASSWORD` in `.env` after the database was already created, t
 
 === "Option B: Update the password inside MySQL"
 
+    The root password lives in `secrets/db_root_password` (kept in sync with `.env`'s `DB_ROOT_PASSWORD` by `scripts/generate-secrets.sh`):
+
     ```bash
-    docker compose exec db mysql -u root -p
+    docker compose exec mysql sh -c 'mysql -u root -p"$(cat /run/secrets/db_root_password)"'
     ```
 
     ```sql
-    ALTER USER 'mailyte'@'%' IDENTIFIED BY 'your-new-password';
+    ALTER USER 'mailuser'@'%' IDENTIFIED BY 'your-new-password';
     FLUSH PRIVILEGES;
     ```
 
@@ -227,7 +247,7 @@ Email clients refuse to connect. Browser shows certificate warnings when accessi
 docker compose logs postfix | grep -i tls
 
 # Verify the certificate files exist inside the container
-docker compose exec postfix ls -la /etc/ssl/certs/mailyte/
+docker compose exec postfix ls -la /etc/ssl/certs/custom/
 
 # Test the certificate from outside
 openssl s_client -connect localhost:465 -quiet
@@ -237,36 +257,27 @@ openssl s_client -connect localhost:465 -quiet
 
 **Certificate files are missing or have wrong permissions.**
 
-The container expects `fullchain.pem` and `privkey.pem` at the path specified by `SSL_CERT_PATH`. Verify they exist on the host and are mounted correctly:
+Postfix and Dovecot mount `./storage/ssl_certs` and `./storage/ssl_private` from the host. In development, `start.sh` generates a self-signed pair there on first run (`server.crt` / `server.key`); in production, the `cert_manager` service writes real Let's Encrypt certificates into the same directories. Verify they exist on the host:
 
 ```bash
-ls -la /etc/mailyte/ssl/
+ls -la storage/ssl_certs/ storage/ssl_private/
 ```
 
-The private key must be readable by the container process:
+The private key should be readable only by its owner:
 
 ```bash
-# Fix permissions if needed
-sudo chmod 644 /etc/mailyte/ssl/fullchain.pem
-sudo chmod 600 /etc/mailyte/ssl/privkey.pem
+chmod 600 storage/ssl_private/server.key
 ```
 
 **Certificate has expired.**
 Check the expiry date:
 
 ```bash
-openssl x509 -enddate -noout -in /etc/mailyte/ssl/fullchain.pem
+openssl x509 -enddate -noout -in storage/ssl_certs/server.crt
 ```
 
-!!! tip "Self-signed certificates for development"
-    If you just need TLS working locally and do not care about browser trust:
-
-    ```bash
-    openssl req -x509 -newkey rsa:4096 -keyout privkey.pem -out fullchain.pem \
-      -sha256 -days 365 -nodes -subj "/CN=mail.localhost"
-    ```
-
-    Place the files where `SSL_CERT_PATH` points and restart the mail services.
+!!! tip "Regenerating the development certificate"
+    Delete `storage/ssl_certs/server.crt` and `storage/ssl_private/server.key`, then run `./start.sh` again -- it recreates the self-signed pair automatically. For real certificates, see `cert_manager` in the [Production Setup](../deployment/production-setup.md) guide; do not run your own certbot next to it.
 
 ---
 
@@ -280,14 +291,14 @@ Outgoing emails get stuck in the queue. Postfix logs show `Host or domain name n
 
 ```bash
 # Check Postfix mail queue
-docker compose exec postfix mailq
+docker compose exec postfix postqueue -p
 
 # Test DNS resolution from inside the container
-docker compose exec postfix dig example.com MX
+docker compose exec postfix getent hosts example.com
 
 # Test DNS resolution from the host
 dig mail.example.com
-nslookup mail.example.com
+dig example.com MX
 ```
 
 ### Common causes
@@ -307,7 +318,7 @@ Some Docker configurations use internal DNS that cannot resolve public domains.
 
 ```bash
 # Test from inside a container
-docker compose exec api ping -c 2 google.com
+docker compose exec api python3 -c "import socket; print(socket.gethostbyname('google.com'))"
 ```
 
 If this fails, add a DNS server to your Docker daemon configuration. Create or edit `/etc/docker/daemon.json`:
@@ -337,10 +348,11 @@ Everything looks healthy. The API accepts send requests. But emails never arrive
 
 ```bash
 # Check the Postfix queue
-docker compose exec postfix mailq
+docker compose exec postfix postqueue -p
 
-# Check Postfix logs for delivery attempts
-docker compose logs postfix | grep "status="
+# Check the Postfix mail log for delivery attempts
+# (the container logs to a file, not to stdout)
+tail -100 logs/mailer/postfix/mail.log | grep "status="
 
 # Check Rspamd logs for rejected messages
 docker compose logs rspamd | grep "reject"
@@ -349,7 +361,7 @@ docker compose logs rspamd | grep "reject"
 ### Common causes
 
 **Rspamd is rejecting the message.**
-Check the Rspamd web UI at `http://localhost:8080` to see if your test messages are being flagged. During initial setup, Rspamd might be aggressive with messages from unconfigured domains.
+Check the Rspamd web UI at `http://localhost:11334` to see if your test messages are being flagged. During initial setup, Rspamd might be aggressive with messages from unconfigured domains.
 
 **Postfix relay restrictions.**
 If you are trying to send to an external address and Postfix logs show `Relay access denied`, the sending account may not be properly authenticated. For local-to-local delivery (sending to a mailbox on the same server), this should not happen.
@@ -373,7 +385,7 @@ If none of the above solved your problem:
 
 1. **Collect the logs.** Run `docker compose logs > mailyte-logs.txt` and save the output.
 2. **Check the full documentation.** The [Guides > Troubleshooting](../guides/troubleshooting/email-delivery-issues.md) section covers more advanced scenarios.
-3. **Search existing issues.** Someone else may have hit the same problem. Check the [GitHub issues](https://github.com/TechiesAfrica/mailyte-email-server/issues).
+3. **Search existing issues.** Someone else may have hit the same problem. Check the [GitHub issues](https://github.com/Techies-Africa/mailyte-email-server/issues).
 
 !!! tip "When asking for help, include these three things"
     1. The output of `docker compose ps`

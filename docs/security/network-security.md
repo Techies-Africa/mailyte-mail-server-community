@@ -1,6 +1,6 @@
 ---
 title: Network Security
-description: Firewall rules, port exposure, Docker network isolation, and reverse proxy configuration.
+description: Port exposure, the 2026-08-22 loopback lockdown, Docker network isolation, and ingress configuration.
 ---
 
 # Network Security
@@ -9,232 +9,116 @@ The network is the first line of defense. Mailyte exposes a minimal set of ports
 
 ## Port Exposure
 
-### Public Ports (must be accessible from the internet)
+### Public Ports (accessible from the internet)
 
 | Port | Service | Protocol | Purpose |
 |------|---------|----------|---------|
 | 25 | SMTP | TCP | Receiving email from other servers |
 | 465 | SMTPS | TCP | Sending email from clients (implicit TLS) |
 | 587 | Submission | TCP | Sending email from clients (STARTTLS) |
-| 993 | IMAPS | TCP | Reading email (IMAP over TLS) |
-| 995 | POP3S | TCP | Reading email (POP3 over TLS) |
-| 80 | HTTP | TCP | Let's Encrypt ACME challenges |
-| 443 | HTTPS | TCP | API, web interfaces |
+| 143 / 993 | IMAP / IMAPS | TCP | Reading email |
+| 110 / 995 | POP3 / POP3S | TCP | Reading email |
+| 80 | HTTP (Traefik) | TCP | ACME challenges, redirect to HTTPS |
+| 443 | HTTPS (Traefik) | TCP | API, webmail, console, autoconfig |
 
-### Internal Ports (block from external access)
+### Everything else is loopback-only in production
 
-| Port | Service | Why it must be internal |
-|------|---------|----------------------|
-| 3306 | MySQL | Database access — full data exposure |
-| 6379 | Redis | Cache — no authentication by default |
-| 6333 | Qdrant | Vector DB — no authentication |
-| 9090 | Prometheus | Metrics — exposes system internals |
-| 3000 | Grafana | Dashboards — has its own auth but still |
-| 8080-8090 | Workers | Internal APIs — no auth required |
-| 11332 | Rspamd | Milter — can control spam filtering |
-| 11334 | Rspamd UI | Web UI — can modify spam rules |
+Since **2026-08-22**, `docker-compose.prod.yml` uses `ports: !override` to republish **every internal service on `127.0.0.1`**. Before that date, roughly 30 internal services were published on `0.0.0.0` — including **Prometheus (9090) and Qdrant (6333), both of which have no authentication at all** — and were verified reachable from the public internet. The published ports bypassed TLS and, for several services, all authentication.
+
+The current production posture:
+
+| Binding | Services |
+|---------|----------|
+| `127.0.0.1` only | All workers (8082–8104), Prometheus 9090, Grafana 3000, Alertmanager 9093, mysql-exporter 9104, redis-exporter 9121, Qdrant 6333, Rspamd 11332/11334, Kafka 9092, Radicale 5232, Traefik dashboard 8080, rspamd reinjection 10026 |
+| No host port at all (`ports: !reset []`) | `api`, `webhooks`, `analytics` — they run with replicas behind Traefik, reachable only via 443 |
+| No host port | MySQL 3306, Redis 6379 — internal Docker network only |
+
+To reach an internal service in production, use SSH port-forwarding:
+
+```bash
+ssh -L 9090:127.0.0.1:9090 devops@<mail-host>   # then open http://localhost:9090
+```
+
+!!! warning "The dev compose file publishes on 0.0.0.0"
+    The base `docker-compose.yml` maps worker ports without a bind address for development convenience. Never run the base file alone on an internet-facing host — always layer `docker-compose.prod.yml` (or replicate its `ports: !override` blocks).
 
 ## Firewall Configuration
+
+Host firewalls are defense-in-depth on top of the loopback bindings — with the bindings in place, there is nothing on the internal ports for the firewall to protect, but keep both.
 
 ### UFW (Ubuntu/Debian)
 
 ```bash
-# Reset to defaults
 sudo ufw default deny incoming
 sudo ufw default allow outgoing
 
-# Allow public mail ports
+# Public mail ports
 sudo ufw allow 25/tcp    comment 'SMTP'
 sudo ufw allow 465/tcp   comment 'SMTPS'
 sudo ufw allow 587/tcp   comment 'Submission'
+sudo ufw allow 143/tcp   comment 'IMAP'
 sudo ufw allow 993/tcp   comment 'IMAPS'
+sudo ufw allow 110/tcp   comment 'POP3'
 sudo ufw allow 995/tcp   comment 'POP3S'
 
-# Allow web (cert renewal + API)
+# Web (cert renewal + HTTPS ingress)
 sudo ufw allow 80/tcp    comment 'HTTP - ACME'
-sudo ufw allow 443/tcp   comment 'HTTPS - API'
+sudo ufw allow 443/tcp   comment 'HTTPS'
 
-# Allow SSH (don't lock yourself out!)
+# SSH (don't lock yourself out!)
 sudo ufw allow 22/tcp    comment 'SSH'
 
-# Enable
 sudo ufw enable
 ```
 
-### iptables
-
-```bash
-# Flush existing rules
-iptables -F
-
-# Default policies
-iptables -P INPUT DROP
-iptables -P FORWARD DROP
-iptables -P OUTPUT ACCEPT
-
-# Allow loopback
-iptables -A INPUT -i lo -j ACCEPT
-
-# Allow established connections
-iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
-
-# Allow SSH
-iptables -A INPUT -p tcp --dport 22 -j ACCEPT
-
-# Allow mail ports
-iptables -A INPUT -p tcp --dport 25 -j ACCEPT
-iptables -A INPUT -p tcp --dport 465 -j ACCEPT
-iptables -A INPUT -p tcp --dport 587 -j ACCEPT
-iptables -A INPUT -p tcp --dport 993 -j ACCEPT
-iptables -A INPUT -p tcp --dport 995 -j ACCEPT
-
-# Allow web
-iptables -A INPUT -p tcp --dport 80 -j ACCEPT
-iptables -A INPUT -p tcp --dport 443 -j ACCEPT
-
-# Save
-iptables-save > /etc/iptables/rules.v4
-```
+!!! danger "Docker bypasses ufw for published ports"
+    Docker programs its own iptables NAT rules, so a `0.0.0.0` port publish is reachable regardless of ufw's INPUT policy. This is exactly why the production compose binds to `127.0.0.1` at the publish level rather than relying on the host firewall — the binding is enforced where the hole is made.
 
 ## Docker Network Isolation
 
-All Mailyte containers run on an internal Docker network (`mailserver_network`). Containers can talk to each other by name, but external access requires explicit port mapping.
+All Mailyte containers run on the `mailserver_network` bridge. Containers talk to each other by service name; external access requires an explicit port publish. A second network, `internal_only`, carries the Docker socket proxy so that `docker-proxy` is not reachable from the general service network.
 
-### Default Network
+### The Docker socket
 
-```yaml
-# docker-compose.yml
-networks:
-  mailserver_network:
-    driver: bridge
-```
+No application container mounts `/var/run/docker.sock`. The monitoring service's restart capability goes through `docker-proxy` (`tecnativa/docker-socket-proxy`) which allows only `CONTAINERS`, `POST`, and `ALLOW_RESTARTS` — no exec, no images, no volumes, no secrets.
 
-### Don't Bind Internal Ports to Host
-
-In `docker-compose.yml`, only external-facing services should map ports:
-
-```yaml
-# Good — only accessible within Docker network
-mysql:
-  ports: []  # No port mapping
-
-# Or bind to localhost only
-mysql:
-  ports:
-    - "127.0.0.1:3306:3306"  # Only accessible from the host
-```
-
-!!! danger "Never bind MySQL or Redis to 0.0.0.0"
-    The default `docker-compose.yml` may bind internal ports for development convenience. In production, remove those port mappings or bind to `127.0.0.1`.
-
-### Production Port Mappings
-
-```yaml
-# Production docker-compose.override.yml
-services:
-  mysql:
-    ports: []  # No external access
-
-  redis:
-    ports: []  # No external access
-
-  prometheus:
-    ports:
-      - "127.0.0.1:9090:9090"  # localhost only
-
-  grafana:
-    ports:
-      - "127.0.0.1:3000:3000"  # localhost only
-```
-
-## Reverse Proxy
-
-Put the API behind a reverse proxy for TLS termination, rate limiting, and access control.
-
-### Nginx Configuration
-
-```nginx
-server {
-    listen 443 ssl http2;
-    server_name api.yourdomain.com;
-
-    ssl_certificate /etc/ssl/certs/api.crt;
-    ssl_certificate_key /etc/ssl/private/api.key;
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256;
-
-    # Rate limiting
-    limit_req_zone $binary_remote_addr zone=api:10m rate=10r/s;
-
-    # Security headers
-    add_header X-Content-Type-Options nosniff;
-    add_header X-Frame-Options DENY;
-    add_header X-XSS-Protection "1; mode=block";
-    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload";
-
-    location /api/ {
-        limit_req zone=api burst=20 nodelay;
-        proxy_pass http://api:8080;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-
-    # Block access to internal endpoints
-    location /metrics {
-        deny all;
-        return 403;
-    }
-}
-```
-
-### Grafana Access
-
-If you need external Grafana access, use the reverse proxy with authentication:
-
-```nginx
-server {
-    listen 443 ssl http2;
-    server_name grafana.yourdomain.com;
-
-    # Restrict to specific IPs
-    allow 10.0.0.0/8;
-    allow YOUR_OFFICE_IP;
-    deny all;
-
-    location / {
-        proxy_pass http://grafana:3000;
-    }
-}
-```
-
-## IP Whitelisting
-
-### API Keys
-
-Restrict API keys to specific IPs:
+### Verifying the posture
 
 ```bash
-curl -X POST http://localhost:8083/api/v1/admin/api-keys \
-  -H "X-Admin-Password: ADMIN_PASS" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "description": "Production key",
-    "ip_whitelist": ["203.0.113.1", "10.0.0.0/24"]
-  }'
+# On the production host: anything listening on a public interface?
+ss -tlnp | grep -v '127.0.0.1\|\[::1\]'
+# Expect only: 25, 80, 110, 143, 443, 465, 587, 993, 995 (and sshd)
 ```
+
+!!! note "Probing gotcha"
+    `bash`'s `/dev/tcp` probes resolve through the loopback happily — test public reachability from a *different* host (`nc -vz <public-ip> 9090`), not from the server itself.
+
+## Ingress: Traefik
+
+Traefik terminates TLS for all HTTP surfaces and routes by hostname (API, webmail, console, autoconfig, JMAP, CalDAV, Grafana where enabled). Notes that matter for security:
+
+- The Traefik dashboard is bound to `127.0.0.1:8080` — reach it via SSH forwarding, and via the authenticated `traefik.${DOMAIN}` router, never a raw port
+- Traefik only routes to containers whose Docker healthcheck passes
+- The console's IP allowlist middleware (`CONSOLE_ALLOWED_IPS`) defaults to `127.0.0.1/32` unless overridden — as of 2026-08-22 the deployed value is deliberately open (`0.0.0.0/0`) with authentication carried by the app itself
+
+## IP Restrictions
+
+### Per-organization SMTP allowlists
+
+Organizations can restrict which client IPs may relay mail for their domains. Enforced live in Postfix's submission path via the `policy-ip-access` policy service, managed at `/api/v1/security/ip-rules` (table `ip_access_rules`, CIDR-capable).
+
+### SMTP API-key credentials
+
+Each SMTP credential can carry an `allowed_ips` list, enforced inside the Dovecot passdb query — see [Authentication](authentication.md#smtp-api-key-credentials).
 
 ### Postfix mynetworks
 
-Restrict which networks can send without authentication:
-
 ```
-# Only localhost and Docker network
-mynetworks = 127.0.0.0/8 [::1]/128 172.16.0.0/12
+# main.cf -- deliberately minimal
+mynetworks = 127.0.0.0/8 [::1]/128
 ```
 
-Never add public IPs to `mynetworks` — that creates an open relay.
+Never add public IPs (or the whole Docker subnet) to `mynetworks` — `permit_mynetworks` short-circuits every later restriction, which is open-relay territory.
 
 ## DNS Security
 

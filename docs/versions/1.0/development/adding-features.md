@@ -1,7 +1,7 @@
 
-# Adding New Features to Mailyte Mail Server
+# Adding New Features to Enterprise Mail Server
 
-This comprehensive guide walks you through adding new features to the Mailyte Mail Server, from planning to deployment.
+This comprehensive guide walks you through adding new features to the Enterprise Mail Server, from planning to deployment.
 
 ## 🎯 **Feature Development Process**
 
@@ -1108,4 +1108,4 @@ Before submitting your feature:
 - [ ] Monitoring integration
 - [ ] Deployment integration
 
-This comprehensive guide provides everything needed to add robust, production-ready features to the Mailyte Mail Server. Follow these patterns to maintain consistency and quality across the codebase.
+This comprehensive guide provides everything needed to add robust, production-ready features to the Enterprise Mail Server. Follow these patterns to maintain consistency and quality across the codebase.

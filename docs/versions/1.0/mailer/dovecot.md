@@ -1,7 +1,7 @@
 
 # Dovecot IMAP/POP3 Server Implementation
 
-Dovecot serves as the Mail Delivery Agent (MDA) in the Mailyte Mail Server, providing secure IMAP and POP3 access with virtual user management, quota enforcement, and real-time monitoring capabilities.
+Dovecot serves as the Mail Delivery Agent (MDA) in the Enterprise Mail Server, providing secure IMAP and POP3 access with virtual user management, quota enforcement, and real-time monitoring capabilities.
 
 ## Architecture Overview
 
@@ -1137,4 +1137,4 @@ EXPOSE 143 993 110 995 24
 CMD ["/usr/local/bin/start_dovecot.sh"]
 ```
 
-This comprehensive Dovecot implementation provides secure, scalable email access with advanced authentication, quota management, and monitoring capabilities, making it a robust component of the Mailyte Mail Server infrastructure.
+This comprehensive Dovecot implementation provides secure, scalable email access with advanced authentication, quota management, and monitoring capabilities, making it a robust component of the Enterprise Mail Server infrastructure.

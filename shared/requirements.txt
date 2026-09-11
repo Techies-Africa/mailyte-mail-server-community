@@ -1,0 +1,26 @@
+# Dependencies of the shared/ modules that essentially every service imports:
+# logging_config, webhook_dispatcher, and ulid_utils (which webhook_dispatcher
+# pulls in). Everything else those three import is stdlib.
+#
+# This file exists so an image that does `COPY shared/` has a way to declare
+# that it depends on shared/'s own requirements. Without it, a service's
+# package list and the shared code it bakes in could drift apart silently --
+# which is exactly what happened to totp/dlp/geo_blocking: they crash-looped
+# on `ModuleNotFoundError: No module named 'ulid'` because their inline pip
+# list was never updated when shared/ gained ulid_utils.
+#
+# Deliberately NOT listed here are the heavier optional dependencies of shared
+# modules most services never import:
+#   object_storage.py      -> boto3, botocore
+#   envelope_encryption.py -> cryptography
+#   metrics.py             -> psutil
+# A service importing one of those declares it in its own requirements file,
+# so small services stay small.
+
+python-ulid==4.0.1
+
+# python-ulid 4.0.1 imports typing_extensions but declares no dependencies at
+# all (`pip show python-ulid` -> Requires: empty), so pip will not install it.
+# Services built on fastapi/pydantic happen to get it transitively; minimal
+# ones do not, and fail at import time. Name it rather than rely on luck.
+typing_extensions==4.16.0

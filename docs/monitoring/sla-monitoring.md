@@ -1,23 +1,37 @@
 # SLA Monitoring
 
-> **Enterprise Edition** — This feature is available in [Mailyte Enterprise](https://mailyte.com). The Community Edition does not include this functionality.
-
-
 Track your uptime promises and delivery targets — know before your customers do if you're falling short.
 
 ## What SLAs to Track
 
 For an email server, three SLAs matter most:
 
-| SLA | Target | Measurement |
-|-----|--------|-------------|
-| **Uptime** | 99.9% (8.7h downtime/year) | Health monitor availability |
-| **Delivery Success** | > 95% within 5 minutes | Postfix delivery metrics |
-| **API Response Time** | p95 < 500ms | FastAPI metrics |
+| SLA | Target | Measured from |
+|-----|--------|---------------|
+| **Uptime** | 99.9% (8.7h downtime/year) | `health_checks` table + Prometheus `up` |
+| **Delivery Success** | > 95% | `tracking_events` / `delivery_events` tables |
+| **API Response Time** | p95 < 500ms | `api_http_request_duration_seconds{quantile="0.95"}` |
+
+## The Built-In SLA Numbers
+
+The monitoring service computes a 24-hour SLA summary on every sweep (`worker/monitoring/enterprise_metrics.py`):
+
+```bash
+curl -s http://localhost:8085/api/metrics | python3 -c "
+import json, sys
+print(json.load(sys.stdin).get('sla'))
+"
+```
+
+| Field | How it's computed |
+|-------|-------------------|
+| `uptime_percentage` | Share of non-`down` rows in `health_checks` over the last 24 h |
+| `delivery_success_rate` | Share of `delivered` rows in `tracking_events` over the last 24 h |
+| `sla_compliance` | `min(uptime, delivery_rate)` |
+
+For per-message delivery evidence (which messages, when, to whom), use `mail_logs` / `delivery_events` — produced by the `log_ingestor` service since 2026-08-22 — via `/api/v1/analytics` and the message-trace endpoints.
 
 ## Uptime Tracking
-
-Uptime is the percentage of time all critical services are available.
 
 ### What Counts as Downtime
 
@@ -33,24 +47,20 @@ Uptime is the percentage of time all critical services are available.
 
 ### Prometheus Queries
 
+`up` exists for every deployed scrape job (api, monitoring, rspamd, mysql, redis, and the other workers — but **not** postfix/dovecot, whose exporters aren't deployed; their uptime is in the `health_checks` table via the monitoring service's probes):
+
 ```promql
-# Uptime percentage over 30 days
+# Uptime percentage over 30 days for the API
 avg_over_time(up{job="api"}[30d]) * 100
 
-# Per-service uptime
-avg_over_time(mailyte_service_up[30d]) * 100
-
-# Combined system uptime (all critical services)
-(
-  avg_over_time(mailyte_service_up{service="postfix"}[30d])
-  * avg_over_time(mailyte_service_up{service="dovecot"}[30d])
-  * avg_over_time(mailyte_service_up{service="api"}[30d])
-  * avg_over_time(mailyte_service_up{service="mysql"}[30d])
-) * 100
+# Per-job uptime
+avg_over_time(up[30d]) * 100
 
 # Minutes of downtime in the last 30 days
 (1 - avg_over_time(up{job="api"}[30d])) * 30 * 24 * 60
 ```
+
+Prometheus retention is 30 days, so windows beyond `[30d]` are not answerable from Prometheus — use the `health_checks` table for longer history.
 
 ### Uptime Table
 
@@ -64,25 +74,18 @@ avg_over_time(mailyte_service_up[30d]) * 100
 
 ## Delivery SLA
 
-Track what percentage of emails are delivered successfully within your target window.
+```sql
+-- Delivery success rate, last 24 hours
+SELECT
+  SUM(status = 'delivered') / COUNT(*) * 100 AS delivery_rate
+FROM tracking_events
+WHERE created_at >= NOW() - INTERVAL 24 HOUR;
 
-```promql
-# Delivery success rate (last 24h)
-(
-  increase(postfix_delivery_total[24h])
-  - increase(postfix_bounce_total[24h])
-)
-/ increase(postfix_delivery_total[24h]) * 100
-
-# Emails delivered within 5 minutes (percentage)
-histogram_quantile(1,
-  rate(postfix_delivery_delay_seconds_bucket{le="300"}[1h])
-)
-/ rate(postfix_delivery_delay_seconds_count[1h]) * 100
-
-# Average delivery time
-rate(postfix_delivery_delay_seconds_sum[1h])
-/ rate(postfix_delivery_delay_seconds_count[1h])
+-- Outcome breakdown from the delivery log
+SELECT event_type, COUNT(*)
+FROM delivery_events
+WHERE created_at >= NOW() - INTERVAL 24 HOUR
+GROUP BY event_type;
 ```
 
 **Delivery SLA targets:**
@@ -90,27 +93,17 @@ rate(postfix_delivery_delay_seconds_sum[1h])
 | Metric | Target | Alert Threshold |
 |--------|--------|----------------|
 | Delivery rate | > 95% | < 93% |
-| Delivered within 1 min | > 80% | < 70% |
-| Delivered within 5 min | > 95% | < 90% |
 | Bounce rate | < 3% | > 5% |
 
 ## API Response Time SLA
 
 ```promql
-# Percentage of requests under 500ms
-sum(rate(http_request_duration_seconds_bucket{le="0.5"}[1h]))
-/ sum(rate(http_request_duration_seconds_count[1h])) * 100
+# p95 response time (summary quantile)
+api_http_request_duration_seconds{quantile="0.95"}
 
-# p95 response time trend
-histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[5m]))
-
-# Requests meeting SLA by endpoint
-sum by (endpoint) (
-  rate(http_request_duration_seconds_bucket{le="0.5"}[1h])
-)
-/ sum by (endpoint) (
-  rate(http_request_duration_seconds_count[1h])
-) * 100
+# Average over the evaluation window
+rate(api_http_request_duration_seconds_sum[1h])
+/ rate(api_http_request_duration_seconds_count[1h])
 ```
 
 ## SLA Dashboard
@@ -119,24 +112,17 @@ Build a dedicated SLA dashboard in Grafana:
 
 ```
 +----------------------------+----------------------------+
-|    System Uptime (30d)     |    Delivery Rate (30d)     |
-|    99.97%  [gauge]         |    96.2%  [gauge]          |
+|    API Uptime (30d)        |    Delivery Rate (24h)     |
+|    avg_over_time(up...)    |    from /api/metrics       |
 +----------------------------+----------------------------+
-|   API SLA Compliance       |   Delivery Time SLA        |
-|   98.5% < 500ms [gauge]   |   94.1% < 5min [gauge]     |
+|   API p95 Latency          |   Backup Freshness         |
+|   {quantile="0.95"}        |   monitoring_backup_age_s  |
 +----------------------------+----------------------------+
 |   Uptime Over Time (daily, time series)                 |
-|   ------------------------------------------------      |
-|   Shows daily uptime % with 99.9% target line           |
-+---------------------------------------------------------+
-|   SLA Breach Log (table)                                |
-|   Date | Service | Duration | Impact                    |
 +---------------------------------------------------------+
 ```
 
 ### Gauge Thresholds
-
-Configure Grafana gauges with color-coded thresholds:
 
 | Range | Color | Meaning |
 |-------|-------|---------|
@@ -145,6 +131,8 @@ Configure Grafana gauges with color-coded thresholds:
 | < target - 1% | Red | SLA breached |
 
 ## SLA Alerting Rules
+
+Rules you can add to `monitoring/prometheus/rules/` — written against series that exist:
 
 ```yaml
 groups:
@@ -156,25 +144,10 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "24h uptime dropped below 99.9%"
-          description: "Current 24h uptime: {{ $value | humanizePercentage }}"
-
-      - alert: DeliverySLABreach
-        expr: >
-          (increase(postfix_delivery_total[24h])
-           - increase(postfix_bounce_total[24h]))
-          / increase(postfix_delivery_total[24h]) < 0.95
-        for: 30m
-        labels:
-          severity: critical
-        annotations:
-          summary: "Delivery rate below 95% SLA target"
+          summary: "24h API uptime dropped below 99.9%"
 
       - alert: APILatencySLABreach
-        expr: >
-          histogram_quantile(0.95,
-            rate(http_request_duration_seconds_bucket[1h])
-          ) > 0.5
+        expr: api_http_request_duration_seconds{quantile="0.95"} > 0.5
         for: 15m
         labels:
           severity: warning
@@ -182,25 +155,23 @@ groups:
           summary: "API p95 latency exceeds 500ms SLA target"
 ```
 
-## Monthly SLA Reports
+Delivery-rate breaches can't be alerted from Prometheus today (no per-message delivery series); watch the `/api/metrics` SLA payload or add a periodic check against the database.
 
-Generate a monthly report with this script:
+## Monthly SLA Reports
 
 ```bash
 #!/bin/bash
 # monthly-sla-report.sh
 
 PROM="http://localhost:9090"
-PERIOD="30d"
 
 echo "=== Mailyte SLA Report ==="
-echo "Period: Last 30 days"
 echo "Generated: $(date)"
 echo ""
 
-echo "--- Uptime ---"
+echo "--- API Uptime (30d) ---"
 curl -s "$PROM/api/v1/query" \
-  --data-urlencode "query=avg_over_time(up{job=\"api\"}[$PERIOD]) * 100" \
+  --data-urlencode "query=avg_over_time(up{job=\"api\"}[30d]) * 100" \
   | python3 -c "
 import json, sys
 data = json.load(sys.stdin)
@@ -209,26 +180,12 @@ for r in data['data']['result']:
 "
 
 echo ""
-echo "--- Delivery ---"
-curl -s "$PROM/api/v1/query" \
-  --data-urlencode "query=(increase(postfix_delivery_total[$PERIOD]) - increase(postfix_bounce_total[$PERIOD])) / increase(postfix_delivery_total[$PERIOD]) * 100" \
-  | python3 -c "
+echo "--- Delivery (24h, from monitoring service) ---"
+curl -s http://localhost:8085/api/metrics | python3 -c "
 import json, sys
-data = json.load(sys.stdin)
-for r in data['data']['result']:
-    print(f\"  Delivery Rate: {float(r['value'][1]):.2f}%\")
-"
-
-echo ""
-echo "--- API Latency ---"
-curl -s "$PROM/api/v1/query" \
-  --data-urlencode "query=histogram_quantile(0.95, rate(http_request_duration_seconds_bucket[$PERIOD]))" \
-  | python3 -c "
-import json, sys
-data = json.load(sys.stdin)
-for r in data['data']['result']:
-    ms = float(r['value'][1]) * 1000
-    print(f\"  p95 Response Time: {ms:.1f}ms\")
+sla = json.load(sys.stdin).get('sla', {})
+print(f\"  Delivery Rate: {sla.get('delivery_success_rate')}%\")
+print(f\"  Uptime (health checks): {sla.get('uptime_percentage')}%\")
 "
 ```
 
@@ -243,7 +200,7 @@ For a 99.9% uptime SLA over 30 days:
 - **Burn rate:** How fast you're consuming the budget
 
 ```promql
-# Error budget remaining (percentage)
+# Error budget remaining (fraction)
 1 - (
   (1 - avg_over_time(up{job="api"}[30d]))
   / (1 - 0.999)

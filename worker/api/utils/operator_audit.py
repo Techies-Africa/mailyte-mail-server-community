@@ -1,16 +1,15 @@
 """
-Operator audit logging (ADR-002 §6).
+Operator audit logging (phase-06 task 6.8, ADR-002 SS6).
 
 Written by middleware (app.py's operator_audit_middleware), never by
 individual route handlers -- a handler that forgets to log is a security
-hole, and middleware cannot forget. Logs every request that either targeted a
-platform-scope route or was made by a platform-scope credential, regardless
-of outcome: a tenant credential denied at a platform-only endpoint is exactly
-the compromise signal ADR-002 §8 cares about, and it must be captured even
-though that caller has no operator identity at all (hence
-operator_id/operator_email being nullable -- see migration
-0005_operator_identity's docstring for why this deviates from ADR-002's own
-draft schema).
+hole, and middleware cannot forget. Logs every request that either targeted
+a platform-scope route or was made by a platform-scope credential,
+regardless of outcome: a tenant credential denied at a platform-only
+endpoint is exactly the compromise signal ADR-002 SS8 cares about, and it
+must be captured even though that caller has no operator identity at all
+(hence operator_id/operator_email being nullable -- see migration 0006's
+docstring for why this deviates from ADR-002's own draft schema).
 """
 
 import json
@@ -24,9 +23,7 @@ from .database import get_db_connection
 logger = logging.getLogger(__name__)
 
 # Recursively stripped from request_body before storage, case-insensitively
-# matched against JSON key names. ADR-002 §6: "request_body JSON -- redacted
-# of secrets". The audit trail records what was attempted, never the
-# credential that attempted it.
+# matched against JSON key names.
 _REDACTED_KEYS = {
     "password",
     "token",
@@ -35,6 +32,13 @@ _REDACTED_KEYS = {
     "authorization",
     "admin_password",
     "admin_token",
+    # POST /platform/alerts/channels. Matching here is EXACT, not substring
+    # ("secret" above does not cover "signing_secret"), so a new
+    # secret-shaped field has to be added by name or it lands in
+    # operator_audit.request_body in plaintext -- which would put the
+    # channel's HMAC key in the audit trail while the column that stores it
+    # is envelope-encrypted, defeating the encryption entirely.
+    "signing_secret",
 }
 
 
@@ -106,9 +110,9 @@ def write_operator_audit(
 ) -> None:
     conn = get_db_connection()
     if not conn:
-        # Fail open on the audit write itself -- refusing to serve a request
-        # because the audit table is unreachable would turn a logging outage
-        # into an availability outage, which is worse.
+        # Fail open on the audit write itself -- refusing to serve a
+        # request because the audit table is unreachable would turn a
+        # logging outage into an availability outage, which is worse.
         logger.error("operator_audit write skipped: database unavailable")
         return
     try:
@@ -144,14 +148,13 @@ def write_operator_audit(
 
 async def maybe_audit(request: Request, response: Response, raw_body: bytes) -> None:
     """Called from app.py's operator_audit_middleware after the response is
-    known. Logs when either the ROUTE required platform scope
-    (require_api_key(..., scope='platform', ...) / require_scope('platform'))
-    or the CALLER actually resolved to platform scope -- the first covers a
-    tenant credential denied outright (ctx never got set to platform), the
-    second covers a platform credential's cross-org reads of tenant-scoped
-    resources (ADR-002 §8: "sudo sees all" is itself a privileged action
-    worth logging even though the route's own required_scope is
-    'organization').
+    known. Logs when either the ROUTE required platform scope (task 6.5's
+    require_api_key(..., scope='platform', ...)) or the CALLER actually
+    resolved to platform scope -- the first covers a tenant credential
+    denied outright (ctx never got set to platform), the second covers a
+    platform credential's cross-org reads of tenant-scoped resources
+    (ADR-002 SS8: "sudo sees all" is itself a privileged action worth
+    logging even though the route's own required_scope is 'organization').
     """
     required_scope = getattr(request.state, "required_scope", None)
     ctx = getattr(request.state, "auth_context", None)
@@ -178,8 +181,5 @@ async def maybe_audit(request: Request, response: Response, raw_body: bytes) -> 
         request_body=redact(raw_body),
         result=result,
         ip_address=(request.client.host if request.client else "unknown"),
-        # CE's app.py has no correlation-id middleware, so this is normally
-        # None. Kept as a header read rather than dropped: a reverse proxy in
-        # front of the API can set it, and the column is nullable either way.
         correlation_id=response.headers.get("X-Correlation-Id"),
     )

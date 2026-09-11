@@ -9,7 +9,7 @@ Everything you need to observe, measure, and respond to what's happening inside 
 
 ---
 
-Mailyte ships with a complete monitoring stack built on **Prometheus**, **Grafana**, and a **custom health monitor**. You get metrics, dashboards, alerts, and auto-healing out of the box — no third-party setup required.
+Mailyte ships with a monitoring stack built on **Prometheus**, **Grafana**, and a **custom monitoring service** (`worker/monitoring`). You get metrics, dashboards, alerts, and auto-healing out of the box — no third-party setup required.
 
 ## Architecture at a Glance
 
@@ -18,48 +18,46 @@ graph LR
     subgraph Services
         PF[Postfix]
         DV[Dovecot]
-        RS[Rspamd]
-        API[FastAPI :5000]
+        RS[Rspamd :11334]
+        API[API gateway :8080]
         DB[(MySQL)]
         RD[(Redis)]
-        WK[Workers]
+        WK[~20 worker services]
     end
 
     subgraph Monitoring Stack
-        HM[Health Monitor :8080]
+        MON[Monitoring service :8085]
         PR[Prometheus :9090]
         GR[Grafana :3000]
         AM[Alertmanager :9093]
     end
 
-    PF --> PR
-    DV --> PR
     RS --> PR
     API --> PR
-    DB --> PR
-    RD --> PR
     WK --> PR
+    DB -->|mysql-exporter :9104| PR
+    RD -->|redis-exporter :9121| PR
 
-    HM --> PF
-    HM --> DV
-    HM --> RS
-    HM --> API
-    HM --> DB
-    HM --> RD
-    HM --> WK
+    MON -->|SMTP/IMAP/HTTP probes| PF
+    MON --> DV
+    MON --> RS
+    MON --> API
 
     PR --> GR
     PR --> AM
-    AM --> WH[Webhooks / Email / Slack]
+    AM -->|webhook| WH[Webhook receivers]
 ```
 
 ## The Three Pillars
 
 | Pillar | Tool | What It Gives You |
 |--------|------|-------------------|
-| **Metrics** | Prometheus | Time-series data from every service — queue depths, delivery rates, error counts, latency |
-| **Visualization** | Grafana | Pre-built dashboards with graphs, tables, and heatmaps |
-| **Alerting** | Alertmanager + Webhooks | Notifications via Slack, Teams, email, or any webhook when things go wrong |
+| **Metrics** | Prometheus | Time-series data from every worker's `/metrics` endpoint plus the MySQL and Redis exporters |
+| **Visualization** | Grafana | Two provisioned dashboards (mail overview, security) |
+| **Alerting** | Alertmanager + webhooks | Alert rules for queue depth, bounce rate, resource limits, and backup freshness |
+
+!!! warning "Not every scrape target is deployed"
+    `monitoring/prometheus/prometheus.yml` defines scrape jobs for a `postfix-exporter` (:9154) and a `dovecot-exporter` (:9166), but **no such containers exist in any compose file** — those two jobs show as `DOWN` in Prometheus, and every dashboard panel or alert built on `postfix_*` / `dovecot_*` / `node_*` series has no data until those exporters are added. What *is* live: every FastAPI worker's own `/metrics`, `rspamd:11334`, `mysql-exporter`, and `redis-exporter`. Postfix and Dovecot health is covered by the monitoring service's direct SMTP/IMAP probes instead.
 
 ## In This Section
 
@@ -85,7 +83,7 @@ graph LR
 
     ---
 
-    Pre-built dashboards, custom panels, and visualization setup.
+    The provisioned dashboards, custom panels, and visualization setup.
 
     [:octicons-arrow-right-24: Grafana](grafana.md)
 
@@ -93,7 +91,7 @@ graph LR
 
     ---
 
-    Alert rules, severity levels, and notification channel configuration.
+    Alert rules, severity levels, and notification routing.
 
     [:octicons-arrow-right-24: Alerting](alerting.md)
 
@@ -101,7 +99,7 @@ graph LR
 
     ---
 
-    The health monitor service on `:8080` — what it checks and how to use it.
+    The monitoring service on `:8085` — what it checks and how to use it.
 
     [:octicons-arrow-right-24: Health Checks](health-checks.md)
 
@@ -109,7 +107,7 @@ graph LR
 
     ---
 
-    Business-level metrics per organization — delivery rates, usage, and billing data.
+    Business-level metrics — delivery stats, storage usage, and SLA numbers.
 
     [:octicons-arrow-right-24: Enterprise Metrics](enterprise-metrics.md)
 
@@ -120,24 +118,24 @@ graph LR
 | Page | What It Covers |
 |------|---------------|
 | [Service Monitoring](service-monitoring.md) | Per-service health and status checks for Postfix, Dovecot, Rspamd, and workers |
-| [System Monitoring](system-monitoring.md) | OS-level CPU, RAM, disk, and network stats via node exporter |
-| [Auto-Healing](auto-healing.md) | Automatic restart of failed services with configurable thresholds |
-| [Webhook Notifications](webhook-notifications.md) | Push alerts to Slack, Teams, PagerDuty, or any HTTP endpoint |
+| [System Monitoring](system-monitoring.md) | CPU, RAM, and disk stats collected by the monitoring service |
+| [Auto-Healing](auto-healing.md) | Automatic restart of failed critical services via a scoped Docker socket proxy |
+| [Webhook Notifications](webhook-notifications.md) | Push health events to any HTTP endpoint |
 | [Performance](performance.md) | Response times, throughput, queue depths, and delivery latency |
-| [SLA Monitoring](sla-monitoring.md) | Uptime tracking and delivery SLA compliance reporting |
+| [SLA Monitoring](sla-monitoring.md) | Uptime tracking and delivery SLA numbers |
 | [Troubleshooting](troubleshooting.md) | Fixing issues with the monitoring stack itself |
 
 ## Quick Start
 
 Already have Mailyte running? Verify the monitoring stack is healthy:
 
-=== "Health Monitor"
+=== "Monitoring service"
 
     ```bash
-    curl http://localhost:8080/health
+    curl http://localhost:8085/health
     ```
 
-    Returns a JSON summary of every service's status.
+    Returns the monitoring service's own liveness. `curl http://localhost:8085/heartbeat` probes every mail service and returns the full status map.
 
 === "Prometheus"
 
@@ -145,7 +143,7 @@ Already have Mailyte running? Verify the monitoring stack is healthy:
     curl http://localhost:9090/-/healthy
     ```
 
-    Open `http://your-server:9090` for the Prometheus UI.
+    Open `http://localhost:9090` for the Prometheus UI.
 
 === "Grafana"
 
@@ -153,7 +151,7 @@ Already have Mailyte running? Verify the monitoring stack is healthy:
     curl http://localhost:3000/api/health
     ```
 
-    Open `http://your-server:3000` and log in with the default credentials from your `.env` file.
+    Open `http://localhost:3000` and log in with `GRAFANA_ADMIN_USER` / `GRAFANA_ADMIN_PASSWORD` from your `.env` file.
 
 !!! warning "If any of these fail"
     Head to [Troubleshooting](troubleshooting.md) for step-by-step diagnosis of common monitoring issues.
@@ -161,10 +159,12 @@ Already have Mailyte running? Verify the monitoring stack is healthy:
 !!! tip "Key ports to remember"
     | Service | Port | URL |
     |---------|------|-----|
-    | Health Monitor | 8080 | `http://localhost:8080/health` |
+    | Monitoring service | 8085 | `http://localhost:8085/heartbeat` |
     | Prometheus | 9090 | `http://localhost:9090` |
     | Grafana | 3000 | `http://localhost:3000` |
     | Alertmanager | 9093 | `http://localhost:9093` |
+
+    In production these are all republished on `127.0.0.1` only (`docker-compose.prod.yml`, since 2026-08-22) — reach them over SSH port-forwarding, not from the public internet.
 
 ## Related Sections
 

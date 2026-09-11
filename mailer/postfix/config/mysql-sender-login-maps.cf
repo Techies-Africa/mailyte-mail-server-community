@@ -2,4 +2,10 @@ user = ${DB_USER}
 password = ${DB_PASSWORD}
 hosts = ${DB_HOST}:${DB_PORT}
 dbname = ${DB_NAME}
+# Third branch (SMTP-credentials workstream): a domain-scoped SMTP
+# credential is a valid login for ANY address at its domain, not just one
+# mailbox -- Mailgun's model, not a per-mailbox login. `%s` is the envelope
+# sender address; Postfix substitutes it as a literal before MySQL parses
+# the query, so SUBSTRING_INDEX operates on the real address, not a bind
+# parameter.
 query = SELECT email FROM email_accounts WHERE email='%s' AND status = 'active' UNION SELECT destination FROM aliases WHERE source='%s' AND active = 1 UNION SELECT sc.username FROM smtp_credentials sc JOIN domains d ON sc.domain_id = d.id WHERE d.domain = SUBSTRING_INDEX('%s', '@', -1) AND sc.active = 1

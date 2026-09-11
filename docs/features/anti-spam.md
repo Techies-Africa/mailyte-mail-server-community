@@ -1,112 +1,91 @@
 # Anti-Spam Protection
 
-**Keeps junk out of your users' inboxes using machine learning, reputation checks, and virus scanning.**
+**Keeps junk out of your users' inboxes using layered filtering, reputation checks, and adaptive learning.**
 
-Mailyte uses Rspamd as its spam filtering engine. Every inbound message passes through a gauntlet of checks -- Bayesian classification, DKIM/SPF/DMARC verification, greylisting, and ClamAV virus scanning -- before it reaches a mailbox. Messages get a score, and you decide what happens at each threshold.
+Mailyte uses Rspamd as its filtering engine, fronted by Postfix postscreen. Inbound mail is scored by Bayesian classification, SPF/DKIM/DMARC verification, fuzzy hashing, a neural network, and phishing feeds; the score decides whether a message is delivered, greylisted, tagged, or rejected. Rspamd also DKIM-signs all outbound mail.
 
 ## How it works
 
 ```mermaid
 flowchart LR
-    A[Inbound Email] --> B{Rspamd Milter}
+    A[Inbound Email] --> P[Postscreen\npregreet + weighted DNSBL]
+    P --> B{Rspamd Milter :11332}
     B --> C[SPF Check]
     B --> D[DKIM Verify]
     B --> E[DMARC Check]
     B --> F[Bayesian Filter]
     B --> G[Fuzzy Hashing]
-    B --> H[ClamAV Scan]
-    C & D & E & F & G & H --> I{Spam Score}
-    I -->|Score < 4.0| J[Deliver normally]
-    I -->|4.0 - 6.0| K[Greylist]
-    I -->|6.0 - 15.0| L[Add spam header]
-    I -->|Score > 15.0| M[Reject]
+    B --> N[Neural Network]
+    B --> PH[Phishing Feeds]
+    C & D & E & F & G & N & PH --> I{Spam Score}
+    I -->|Score < 4| J[Deliver normally]
+    I -->|>= 4| K[Greylist]
+    I -->|>= 6| L[Add spam header -> Junk]
+    I -->|>= 10| M2[Rewrite subject: SPAM]
+    I -->|>= 15| M[Reject]
 ```
 
-Think of the spam score like a suspicion meter. A perfectly clean email from a reputable sender scores near 0. A sketchy email with a forged sender, no DKIM, and "FREE VIAGRA" in the subject might score 25+. You set the thresholds that decide what to do at each level.
+Before Rspamd ever sees a message, **postscreen** filters connections: bots that talk before the SMTP banner are rejected, and five DNSBLs are consulted with *weighted* scores (`zen.spamhaus.org*3`, `b.barracudacentral.org*2`, `bl.spamcop.net*2`, `dnsbl.sorbs.net*1`, `psbl.surriel.com*1`) against a threshold of 3 — so a single mid-confidence listing costs a sender points, not the message. In the SMTP session itself, only `zen.spamhaus.org` is used as an outright-reject RBL; the previous stack of eight hair-trigger lists was deliberately removed after it was measured rejecting legitimate transactional senders.
+
+### Action thresholds
+
+Thresholds live in `mailer/rspamd/config/local.d/actions.conf` (not environment variables):
+
+| Score | Action | Effect |
+|-------|--------|--------|
+| >= 4 | `greylist` | Temporary rejection; legitimate servers retry |
+| >= 6 | `add_header` | `X-Spam: Yes` header added; Dovecot Sieve files it to Junk |
+| >= 10 | `rewrite_subject` | Subject prefixed with `[SPAM]` |
+| >= 15 | `reject` | Message rejected outright |
+
+Per-organization overrides are supported through Rspamd's settings module: org policies are stored in MySQL via the API, synced into Redis by `scripts/sync_rspamd_settings.py`, and read by Rspamd per-recipient at scan time (`local.d/settings.conf`).
 
 ### What each layer does
 
-**Bayesian filtering** -- Rspamd learns from the emails you mark as spam or ham. Over time, it gets smarter about what your users consider junk. This is the adaptive brain of the spam filter.
+**Bayesian filtering** (`classifier-bayes.conf`) — Redis-backed, per-user and per-language, requiring 200 learned messages (`min_learns = 200`) before it contributes to scoring. Train it via the Rspamd web UI or `rspamc learn_spam` / `learn_ham`.
 
-**SPF/DKIM/DMARC** -- These are authentication protocols that verify the sender is who they claim to be. If someone tries to forge your domain, these checks catch it.
+**SPF/DKIM/DMARC verification** — inbound authentication checks. DMARC failures follow the sending domain's published policy (`quarantine` → add header, `reject` → reject). Aggregate DMARC reporting is disabled.
 
-**Greylisting** -- When an email looks suspicious but not clearly spam, greylisting temporarily rejects it with a "try again later" response. Legitimate mail servers retry; most spam bots don't. After the greylist timeout (default: 5 minutes), the retry is accepted.
+**Greylisting** (`greylisting.conf`) — enabled, kicks in at score >= 1.0 for unknown senders. Initial delay 300 seconds, entries remembered 24 hours, whitelisted senders 7 days. Skipped entirely for authenticated users, local senders, and messages with valid DKIM/SPF/DMARC (`whitelist_symbols`).
 
-**ClamAV** -- Scans attachments for viruses and malware. If something malicious is found, the message is rejected before it ever reaches a mailbox.
+**Fuzzy hashing** (`fuzzy_check.conf`) — a *local*, Redis-backed fuzzy store private to this installation. It learns from your own traffic and catches near-duplicate spam campaigns; hashes expire after 30 days.
 
-**Fuzzy hashing** -- Detects bulk spam campaigns by comparing message content against known spam fingerprints, even when the spammer makes small modifications to each copy.
+**Neural network** (`neural.conf`) — enabled; trains itself on messages the other layers score confidently (spam >= 8, ham <= -2) and adds its own symbol once trained. Model lives in Redis.
 
-## Configuration
+**Phishing detection** (`phishing.conf`) — checks URLs against the OpenPhish and PhishTank feeds and flags display-text/target mismatches.
 
-### Rspamd settings
+**DKIM signing** (`dkim_signing.conf`) — outbound only. Rspamd signs mail from authenticated users and local networks with per-domain keys at `/var/lib/rspamd/dkim/{domain}.{selector}.key`, generated by the platform API when a domain is created (or by `scripts/generate_dkim.py`) and shared via a Docker volume. Domains without a key are skipped, not rejected.
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `RSPAMD_ENABLED` | `true` | Enable Rspamd filtering |
-| `RSPAMD_HOST` | `rspamd` | Rspamd service hostname |
-| `RSPAMD_PORT` | `11333` | Rspamd HTTP port |
-
-### Spam thresholds
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `SPAM_THRESHOLD_GREYLIST` | `4.0` | Score above which to greylist |
-| `SPAM_THRESHOLD_ADD_HEADER` | `6.0` | Score above which to add `X-Spam: Yes` header |
-| `SPAM_THRESHOLD_REJECT` | `15.0` | Score above which to reject outright |
-
-### Security features
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `ENABLE_GREYLISTING` | `true` | Enable greylisting for suspicious messages |
-| `GREYLIST_TIMEOUT` | `300` | Seconds before a greylisted sender can retry |
-| `GREYLIST_EXPIRE` | `86400` | Seconds to remember a greylisted triplet |
-| `ENABLE_DKIM_SIGNING` | `true` | Sign outbound mail with DKIM |
-| `ENABLE_SPF_CHECK` | `true` | Verify inbound SPF records |
-| `ENABLE_DMARC_CHECK` | `true` | Enforce DMARC policies |
-| `ENABLE_ANTIVIRUS` | `true` | Enable ClamAV virus scanning |
-| `ANTIVIRUS_ENGINE` | `clamav` | Antivirus engine to use |
-
-### Adjusting thresholds
-
-The defaults are tuned for a good balance between catching spam and avoiding false positives. But every environment is different:
-
-- **Getting too much spam?** Lower `SPAM_THRESHOLD_ADD_HEADER` (e.g., to `4.0`) so more messages get flagged.
-- **Losing legitimate mail?** Raise `SPAM_THRESHOLD_REJECT` (e.g., to `20.0`) to be more lenient about rejections.
-- **Greylisting annoying your users?** You can disable it with `ENABLE_GREYLISTING=false`, but know that you'll see more spam slip through.
-
-## Rspamd web UI
-
-Rspamd ships with a web interface for inspecting scan results, training the Bayesian filter, and viewing statistics. It's available at:
-
-```
-http://your-mail-server:11334
-```
-
-!!! tip "Training the Bayesian filter"
-    The filter gets dramatically better once it has seen a few hundred examples of spam and ham. Use the Rspamd web UI or the `rspamc` CLI to feed it training data from your existing mailboxes.
+!!! warning "ClamAV antivirus is NOT deployed by default"
+    `local.d/antivirus.conf` ships with `enabled = false` and no `clamav` container exists in docker-compose. To enable virus scanning: add a `clamav/clamav` service to the compose file, set `enabled = true`, and point `servers` at `clamav:3310`. Until then, no antivirus scanning happens — earlier versions of this page claiming ClamAV was active were wrong.
 
 ## How Postfix integrates with Rspamd
 
-Postfix sends every inbound message to Rspamd via the milter protocol. The Rspamd milter evaluates the message and returns one of:
+Postfix passes every message to Rspamd over the milter protocol (`smtpd_milters = inet:rspamd:11332`, and `non_smtpd_milters` for locally-generated mail). The proxy worker self-scans, so no separate scan hop is needed. `milter_default_action = accept` — if Rspamd is down, mail flows unscored rather than bouncing.
 
-- **Accept** -- deliver normally
-- **Soft reject** -- greylist (temporary rejection)
-- **Add header** -- deliver but mark as spam
-- **Reject** -- bounce the message back
+Authenticated submission ports (587/465) and the internal submission listener set `milter_macro_daemon_name=ORIGINATING`, which is what tells Rspamd to DKIM-sign rather than spam-score.
 
-This is configured in `main.cf` via the Rspamd milter socket. You generally don't need to touch this -- the Docker setup handles it automatically.
+## Ports
+
+| Port | Worker | Purpose |
+|------|--------|---------|
+| `11332` | rspamd_proxy | Milter interface used by Postfix |
+| `11333` | normal | Scan API |
+| `11334` | controller | Web UI and HTTP API (`http://your-mail-server:11334`; loopback-only in production) |
+
+!!! tip "Training the Bayesian filter"
+    The filter gets dramatically better once it has seen a few hundred examples of spam and ham. Use the Rspamd web UI (port 11334) or the `rspamc` CLI to feed it training data from your existing mailboxes.
 
 ## Things to know
 
-- **Rspamd needs time to learn.** Out of the box, the Bayesian filter is essentially empty. It starts being useful after you train it with a few hundred messages. Until then, it relies on the other checks (SPF, DKIM, DMARC, fuzzy hashing).
+- **There are no `SPAM_THRESHOLD_*` / `ENABLE_GREYLISTING` environment variables.** Global thresholds are edited in `local.d/actions.conf`; greylisting, fuzzy, neural, phishing, and antivirus each have their own file under `mailer/rspamd/config/local.d/`. Per-organization policy goes through the API → MySQL → Redis sync path.
 
-- **ClamAV updates its signatures automatically.** The `freshclam` daemon runs in the background and downloads new virus definitions. Make sure the container has internet access for this to work.
+- **Rspamd needs time to learn.** Bayes contributes nothing until it has 200 learned messages, and the neural network needs its own training volume. Early on, SPF/DKIM/DMARC, DNSBLs, and the phishing feeds carry the load.
 
-- **Greylisting causes delivery delays.** First-time senders to your server will experience a delay of about 5 minutes (the `GREYLIST_TIMEOUT`). After the first successful delivery, the sender is whitelisted and subsequent emails arrive instantly.
+- **Greylisting causes first-contact delays.** New senders wait ~5 minutes on their first message. Authenticated, local, and well-authenticated (DKIM/SPF/DMARC-passing) senders skip it.
 
-- **False positives happen.** No spam filter is perfect. Set up a way for users to report false positives (e.g., a "Not Spam" button in your webmail) and feed those back to the Bayesian filter as ham.
+- **Postscreen's deep after-220 tests are deliberately off.** They defer-and-retry by client IP, and large senders (Gmail) retry from different IPs each time — with them enabled, Gmail mail could not arrive at all. The pre-greeting tests (pregreet + weighted DNSBL) stay on.
 
-- **DKIM signing is for outbound mail.** Mailyte signs all outgoing messages with DKIM so that receiving servers trust your emails. This is separate from DKIM *verification* on inbound mail, which checks that incoming messages haven't been tampered with.
+- **Milter headers** — Rspamd injects `Authentication-Results` and `X-Spam-Status` headers and strips any upstream spam-flag headers to prevent spoofing. A custom `X-Email-Category` header is added by the email-classifier Lua plugin.
 
-- **Rspamd is multi-tenant aware.** Spam scores and Bayesian data are tracked per-domain, so one organization's training data doesn't affect another's.
+- **False positives happen.** Feed them back as ham (`rspamc learn_ham`) — the per-user Bayes and the neural net both improve from corrections.

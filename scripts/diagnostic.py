@@ -128,7 +128,6 @@ class MailServerDiagnostic:
                 "encryption",
                 "dashboard",
                 "delivery_optimizer",
-                "cloud_sync",
             ],
         }
 
@@ -407,7 +406,6 @@ class MailServerDiagnostic:
                 {
                     "task": "Cloud storage integration",
                     "description": "Configure AWS S3 or Azure Blob storage",
-                    "services": ["worker/cloud_sync"],
                 },
                 {
                     "task": "Email tracking",

@@ -24,12 +24,11 @@ dig -x YOUR_SERVER_IP +short
 
 ## TLS / SSL
 
-- [ ] Valid TLS certificate installed (not self-signed)
+- [ ] `cert_manager` issued real certificates (not the self-signed dev pair, not Traefik's default cert): `ls -l storage/ssl_certs/`
 - [ ] Certificate covers `mail.yourdomain.com`
-- [ ] Certificate auto-renewal configured (certbot cron job)
-- [ ] Postfix configured to use TLS
-- [ ] Dovecot configured to use TLS
-- [ ] API served over HTTPS (via reverse proxy)
+- [ ] `ACME_STAGING=false` (the production override forces it) and `CERT_SERVER_IPS` is set
+- [ ] Postfix and Dovecot serve the issued certificate
+- [ ] API served over HTTPS via Traefik (`https://api.yourdomain.com`)
 - [ ] TLS 1.2+ only (TLS 1.0 and 1.1 disabled)
 
 ```bash
@@ -46,18 +45,21 @@ echo | openssl s_client -connect mail.yourdomain.com:993 2>/dev/null \
 
 ## Firewall
 
-- [ ] Port 25 open (SMTP)
-- [ ] Port 587 open (Submission)
-- [ ] Port 993 open (IMAPS)
-- [ ] Port 443 open (HTTPS, if using reverse proxy)
-- [ ] Port 80 open (Let's Encrypt renewal)
-- [ ] Monitoring ports (3000, 8080, 9090) **NOT** exposed to the internet
-- [ ] Database port (3306) **NOT** exposed to the internet
-- [ ] Redis port (6379) **NOT** exposed to the internet
+- [ ] Ports 25, 587, 465 open (SMTP)
+- [ ] Ports 143, 993 (and 110/995/4190 if used) open (IMAP/POP3/Sieve)
+- [ ] Ports 80 and 443 open (Traefik: ACME + HTTPS)
+- [ ] Stack started with `docker-compose.prod.yml` — that is what binds every internal service (Grafana 3000, Prometheus 9090, Rspamd 11334, workers 8081-8104, Kafka 9092, Qdrant 6333, ...) to `127.0.0.1`
+- [ ] Database port (3306) not published at all (the base file never publishes it)
+- [ ] Redis port (6379) not published at all
 
 ```bash
 sudo ufw status verbose
+
+# The real check: what is actually listening on non-loopback addresses?
+ss -tlnp | grep -v '127.0.0.1\|\[::1\]'
 ```
+
+> **Warning:** Docker publishes ports past ufw with its own iptables rules. The loopback bind addresses in `docker-compose.prod.yml` are the protection; a ufw deny on a Docker-published port does nothing.
 
 ## Security
 
@@ -83,22 +85,26 @@ chmod 600 .env
 - [ ] All containers running and healthy
 
 ```bash
-docker compose ps
-# Every service should show "Up (healthy)"
+docker compose -f docker-compose.yml -f docker-compose.prod.yml ps -a
+# Every long-running service should show "Up (healthy)";
+# secrets-check and migrate should show "Exited (0)"
 ```
 
+- [ ] `secrets-check` and `migrate` exited 0 (they are one-shot jobs)
 - [ ] Postfix accepting connections on port 25
 - [ ] Dovecot accepting connections on port 993
-- [ ] Rspamd responding on port 11334
-- [ ] MySQL accepting connections
-- [ ] Redis responding to PING
-- [ ] API responding on port 5000
-- [ ] Workers processing jobs
-- [ ] Health monitor running on port 8080
+- [ ] Rspamd responding on `127.0.0.1:11334` (loopback-bound in production)
+- [ ] MySQL healthy, Redis responding to PING
+- [ ] Both `api` replicas healthy
+- [ ] Traefik routing `api.yourdomain.com`, `docs.`, `grafana.`, the autoconfig/autodiscover hosts, webmail, and console
 
 ```bash
-# Quick check
-curl -s http://localhost:8080/health | python3 -m json.tool
+# Quick check (on the server)
+curl -s http://127.0.0.1:11334/ > /dev/null && echo rspamd ok
+docker compose -f docker-compose.yml -f docker-compose.prod.yml ps
+
+# From anywhere
+curl -s https://api.yourdomain.com/health | python3 -m json.tool
 ```
 
 ## Email Delivery
@@ -120,29 +126,28 @@ curl -s http://localhost:8080/health | python3 -m json.tool
 
 ## Backups
 
-- [ ] MySQL backup configured and tested
-- [ ] Mail storage backup configured
-- [ ] Configuration files backed up
-- [ ] Backup schedule set (daily minimum)
-- [ ] Backup restoration tested (at least once)
-- [ ] Backups stored off-server (S3, Azure, etc.)
+- [ ] systemd backup timers installed and active: `systemctl list-timers 'mailyte-backup-*'`
+- [ ] `secrets/dr.env` configured (S3 destination + age encryption recipient)
+- [ ] Secrets escrowed off-server: `./scripts/escrow-secrets.sh` (covers `encryption_kek`, mail_crypt keys, `.env`)
+- [ ] A full backup completed in the last 24h and uploaded offsite
+- [ ] Backup restoration tested (at least once): `./scripts/restore.sh --latest --dry-run`
 
 ```bash
-# Test a backup right now
-./scripts/backup.sh
+# Take a full backup right now
+./scripts/backup.sh --full
 
-# Test a restore to a temporary location
-./scripts/restore.sh --dry-run
+# List what exists, then rehearse a restore
+./scripts/restore.sh --list
+./scripts/restore.sh --latest --dry-run
 ```
 
 ## Monitoring
 
 - [ ] Prometheus scraping all targets
-- [ ] Grafana accessible and dashboards loading
+- [ ] Grafana accessible (`https://grafana.yourdomain.com`) and dashboards loading
 - [ ] Alert rules configured
 - [ ] Alert notifications tested (Slack, email, webhook)
-- [ ] Health monitor running and checking all services
-- [ ] Auto-healing enabled
+- [ ] `monitoring` service healthy (it restarts failed containers via the docker-proxy)
 
 ```bash
 # Check Prometheus targets
@@ -170,8 +175,8 @@ curl -X POST http://localhost:9093/api/v2/alerts \
 
 ```bash
 # Quick performance check
-curl -w "API response: %{time_total}s\n" -o /dev/null -s http://localhost:5000/health
-docker compose exec -T postfix postqueue -p | tail -1
+curl -w "API response: %{time_total}s\n" -o /dev/null -s https://api.yourdomain.com/health
+docker compose -f docker-compose.yml -f docker-compose.prod.yml exec -T postfix postqueue -p | tail -1
 df -h / | tail -1
 free -h | head -2
 ```
@@ -188,11 +193,11 @@ free -h | head -2
 Once everything passes:
 
 ```bash
-# Take a snapshot/backup before declaring production
-./scripts/backup.sh --label "pre-production"
+# Take a full backup before declaring production
+./scripts/backup.sh --full
 
 # Run the full health check one more time
-curl -s http://localhost:8080/health | python3 -m json.tool
+curl -s https://api.yourdomain.com/health | python3 -m json.tool
 ```
 
 > **Tip:** Bookmark this page. Run through it again after every major update or infrastructure change.

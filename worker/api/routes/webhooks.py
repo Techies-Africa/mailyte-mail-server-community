@@ -6,21 +6,40 @@ Manages per-organization webhook endpoints directly in MySQL.
 All operations are org-scoped via the API key's organization_id.
 """
 
+import html as html_module
 import json
 import logging
+
+
+def sanitize_text(value):
+    if not value or not isinstance(value, str):
+        return value
+    import re as _re
+
+    value = _re.sub(r"<[^>]+>", "", value)
+    return html_module.escape(value, quote=True)
+
+
 import secrets
 import sys
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, Query, Request
+from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
-from utils.auth import create_api_response, require_api_key
+from pydantic import BaseModel, Field
+from schemas.common import ErrorResponse
+from schemas.webhooks import (
+    WebhookDeadLetterListResponse,
+    WebhookDeliveryListResponse,
+    WebhookEndpointListResponse,
+)
+from utils.auth import AuthContext, create_api_response, require_api_key, require_scope
 from utils.database import get_db_connection
 
 project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
-from shared.webhook_dispatcher import Events, dispatch_event
+from shared.webhook_dispatcher import Events, dispatch_event, requeue_envelope
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -41,7 +60,16 @@ def _get_org_id(request: Request):
 # ---------------------------------------------------------------------------
 
 
-@router.get("/endpoints")
+@router.get(
+    "/endpoints",
+    response_model=WebhookEndpointListResponse,
+    responses={
+        500: {
+            "model": ErrorResponse,
+            "description": "Database connection failed, or query error while retrieving webhook endpoints",
+        }
+    },
+)
 @require_api_key("read")
 async def list_endpoints(request: Request, page: int = Query(1), per_page: int = Query(50)):
     """List all webhook endpoints for the authenticated organization."""
@@ -145,6 +173,12 @@ async def create_endpoint(request: Request):
 
     # Generate a signing secret if not provided
     secret = data.get("secret") or secrets.token_hex(32)
+    try:
+        from shared.ulid_utils import generate_ulid
+
+        endpoint_ulid = generate_ulid()
+    except ImportError:
+        endpoint_ulid = secrets.token_hex(13)
 
     conn = get_db_connection()
     if not conn:
@@ -157,20 +191,30 @@ async def create_endpoint(request: Request):
         cursor.execute(
             """
             INSERT INTO webhook_urls
-                (organization_id, url, description, active, event_types, secret, created_at, updated_at)
-            VALUES (%s, %s, %s, %s, %s, %s, NOW(), NOW())
+                (id, name, organization_id, url, description, active, event_types, service_types, encryption_key, webhook_secret, created_at, updated_at)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
             """,
             (
+                endpoint_ulid,
+                data.get("name", "webhook"),
                 org_id,
                 url,
                 sanitize_text(data.get("description", "")),
                 1 if data.get("active", True) else 0,
-                json.dumps(event_types) if event_types is not None else None,
+                json.dumps(event_types) if event_types is not None else "[]",
+                json.dumps(data.get("service_types", ["all"])),
+                data.get("encryption_key", ""),
                 secret,
             ),
         )
         conn.commit()
-        endpoint_id = cursor.lastrowid
+        # The ULID this function generated above, NOT cursor.lastrowid:
+        # webhook_urls.id is CHAR(26) with no AUTO_INCREMENT (converted by
+        # 009_ulid_safe.sql), so lastrowid is 0 on every insert. Both the 201
+        # body and the webhook.test event below were carrying that 0, which
+        # means no caller could GET /endpoints/{id} the row it had just
+        # created.
+        endpoint_id = endpoint_ulid
         cursor.close()
 
         dispatch_event(
@@ -434,7 +478,16 @@ async def test_endpoint(endpoint_id: str, request: Request):
 # ---------------------------------------------------------------------------
 
 
-@router.get("/deliveries")
+@router.get(
+    "/deliveries",
+    response_model=WebhookDeliveryListResponse,
+    responses={
+        500: {
+            "model": ErrorResponse,
+            "description": "Database connection failed, or query error while retrieving the delivery log",
+        }
+    },
+)
 @require_api_key("read")
 async def list_deliveries(
     request: Request, page: int = Query(1), per_page: int = Query(50), status: str = Query(None)
@@ -515,10 +568,34 @@ async def list_deliveries(
 # ---------------------------------------------------------------------------
 
 
-@router.get("/dead-letters")
+@router.get(
+    "/dead-letters",
+    response_model=WebhookDeadLetterListResponse,
+    responses={
+        500: {
+            "model": ErrorResponse,
+            "description": "Database connection failed, or query error while retrieving the dead letter queue",
+        }
+    },
+)
 @require_api_key("read")
 async def list_dead_letters(request: Request, page: int = Query(1), per_page: int = Query(50)):
-    """List permanently failed webhook events (dead letter queue)."""
+    """List permanently failed webhook events (dead letter queue).
+
+    The SELECT below previously named `webhook_url`, `error_message` and
+    `retry_count` -- none of which exist on `webhook_dead_letters`. Every
+    call 500'd on "Unknown column". Real columns per
+    alembic/versions/0001_baseline.py (the authoritative schema; the
+    ORM models in database/models/ have drifted and were not trusted here):
+    endpoint_url / last_error / attempt_count, plus payload, status,
+    last_attempted_at and resolved_at.
+
+    The response uses the real column names rather than aliasing back to the
+    old ones: this endpoint has never once returned a 200, so there is no
+    shipped consumer to keep compatible, and inventing an alias layer would
+    only reintroduce the same "which name is real?" confusion that caused
+    the bug. schemas/webhooks.py was corrected to match.
+    """
     org_id = _get_org_id(request)
     per_page = min(per_page, 200)
     offset = (page - 1) * per_page
@@ -545,7 +622,8 @@ async def list_dead_letters(request: Request, page: int = Query(1), per_page: in
 
         cursor.execute(
             f"""
-            SELECT id, event_type, webhook_url, error_message, retry_count, created_at
+            SELECT id, organization_id, event_type, endpoint_url, last_error,
+                   attempt_count, status, created_at, last_attempted_at, resolved_at
             FROM webhook_dead_letters
             {where}
             ORDER BY created_at DESC
@@ -556,9 +634,13 @@ async def list_dead_letters(request: Request, page: int = Query(1), per_page: in
         rows = cursor.fetchall()
         cursor.close()
 
+        # `payload` is deliberately absent from the list SELECT -- it is a
+        # whole event envelope per row, and 200 of them would dominate the
+        # response. GET /dead-letters/{id} returns it for the detail view.
         for row in rows:
-            if row.get("created_at"):
-                row["created_at"] = row["created_at"].isoformat()
+            for column in ("created_at", "last_attempted_at", "resolved_at"):
+                if row.get(column):
+                    row[column] = row[column].isoformat()
 
         return create_api_response(
             "success",
@@ -579,6 +661,357 @@ async def list_dead_letters(request: Request, page: int = Query(1), per_page: in
         return JSONResponse(
             content=create_api_response("error", "Failed to retrieve dead letter queue"),
             status_code=500,
+        )
+    finally:
+        conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Dead-letter detail + replay (Console PRD SS12 gap #8b, phase-05)
+# ---------------------------------------------------------------------------
+#
+# Everything above this line is tenant-facing and uses the @require_api_key
+# decorator with its default scope='organization'. The three endpoints below
+# are console/operator surface instead, so they use the Depends(require_scope
+# (...)) form with an explicit platform scope and role floor -- read for the
+# detail view (support), write for the two replay actions (operator).
+# ADR-002 SS4: replaying a dead letter re-fires a real event at a customer's
+# endpoint, which is an action, not a lookup.
+#
+# `status` transitions used below come from the enum 0001_baseline actually
+# declares on webhook_dead_letters:
+#     enum('pending','retrying','resolved','abandoned')
+# A replayed row moves to 'retrying', NOT 'resolved'. There is no 'replayed'
+# member, and 'resolved' would be a lie at the moment of replay: the
+# dispatcher has only *accepted* the envelope onto its queue at that point
+# (the real delivery happens asynchronously over the ~8h retry schedule, and
+# may itself fail and re-dead-letter). 'retrying' is the closest member and
+# is exactly what it means. Nothing in this codebase flips 'retrying' ->
+# 'resolved' afterwards; that would need the dispatcher to correlate a
+# successful delivery back to the originating dead-letter row, which it
+# cannot currently do -- called out in the response so an operator is not
+# left believing a 'retrying' row will self-heal its own status.
+
+_DEAD_LETTER_TERMINAL_STATUSES = ("resolved", "abandoned")
+
+# 409, not "replay anyway": a row already resolved or abandoned has been
+# triaged by somebody. Re-firing it silently would duplicate a customer-
+# visible event on the strength of a stale console tab.
+_REPLAY_BULK_MAX_IDS = 100
+
+_REPLAY_STATUS_NOTE = (
+    "Replayed rows move to status='retrying'. webhook_dead_letters has no "
+    "'replayed' status member (enum: pending|retrying|resolved|abandoned), and "
+    "nothing promotes 'retrying' to 'resolved' on a later successful delivery -- "
+    "the dispatcher does not correlate deliveries back to dead-letter rows. Mark "
+    "the row resolved manually once you have confirmed receipt."
+)
+
+
+class DeadLetterReplayRequest(BaseModel):
+    reason: str = Field(
+        ...,
+        min_length=10,
+        description="Why this event is being replayed. Recorded by the audit middleware "
+        "(phase-02 cross-cutting: corrective actions must carry a reason). Ten characters "
+        "minimum -- 'fix' is not an explanation anyone can act on six months later.",
+    )
+
+
+class DeadLetterBulkReplayRequest(BaseModel):
+    dead_letter_ids: list[str] = Field(
+        ...,
+        min_length=1,
+        description=f"Dead letter ids to replay. At most {_REPLAY_BULK_MAX_IDS} per call.",
+    )
+    reason: str = Field(..., min_length=10, description="Why these events are being replayed.")
+
+
+def _dead_letter_envelope(row: dict):
+    """Decode webhook_dead_letters.payload back into the envelope the
+    dispatcher originally built. mysql-connector hands a `json` column back
+    as str, bytes or an already-decoded dict depending on version and
+    connection flags, so all three are handled here rather than assuming."""
+    payload = row.get("payload")
+    if isinstance(payload, (bytes, bytearray)):
+        payload = payload.decode("utf-8", errors="replace")
+    if isinstance(payload, str):
+        payload = json.loads(payload)
+    if not isinstance(payload, dict):
+        raise ValueError("dead letter payload is not a JSON object")
+    if payload.get("_truncated"):
+        # Written by shared/webhook_dispatcher._dlq_payload_json when the
+        # envelope was too large to store intact -- the row records that the
+        # event was lost, but there is nothing to resend.
+        raise ValueError("dead letter payload was truncated at write time and cannot be replayed")
+    return payload
+
+
+def _replay_one(cursor, row: dict) -> None:
+    """Requeue one already-fetched dead letter. Raises ValueError with a
+    caller-safe message on anything that makes this row unreplayable, so the
+    single and bulk endpoints share exactly one set of rules."""
+    if row["status"] in _DEAD_LETTER_TERMINAL_STATUSES:
+        raise ValueError(f"dead letter is already {row['status']}")
+
+    envelope = _dead_letter_envelope(row)
+
+    # The same queue + worker pool that dispatch_event() feeds, not a
+    # parallel delivery path -- see requeue_envelope's docstring. Returns
+    # False when no webhook endpoint is configured at all, which must be
+    # reported rather than counted as a successful replay.
+    if not requeue_envelope(envelope):
+        raise ValueError(
+            "webhook delivery is not configured on this instance (WEBHOOK_URL is unset) -- "
+            "there is no endpoint to replay to"
+        )
+
+    cursor.execute(
+        "UPDATE webhook_dead_letters "
+        "SET status = 'retrying', attempt_count = attempt_count + 1, last_attempted_at = NOW() "
+        "WHERE id = %s",
+        (row["id"],),
+    )
+
+
+@router.get(
+    "/dead-letters/{dead_letter_id}",
+    summary="Get one dead-lettered webhook event",
+    description="Full detail for a single dead letter including the stored event payload and "
+    "the last delivery error -- the console's dead-letter detail view (PRD SS5.4). The payload "
+    "is the exact envelope the dispatcher tried to deliver, which is what makes it worth "
+    "reading before deciding whether to replay it.",
+    responses={
+        404: {"model": ErrorResponse, "description": "No such dead letter"},
+        500: {"model": ErrorResponse, "description": "Database connection or query error"},
+    },
+)
+async def get_dead_letter(
+    dead_letter_id: str,
+    ctx: AuthContext = Depends(require_scope("platform", "read", role="support")),
+):
+    conn = get_db_connection()
+    if not conn:
+        return JSONResponse(
+            content=create_api_response("error", "Database connection failed"), status_code=500
+        )
+    try:
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(
+            """
+            SELECT id, organization_id, event_type, endpoint_url, payload, last_error,
+                   attempt_count, status, created_at, last_attempted_at, resolved_at
+            FROM webhook_dead_letters WHERE id = %s
+            """,
+            (dead_letter_id,),
+        )
+        row = cursor.fetchone()
+        cursor.close()
+
+        if not row:
+            return JSONResponse(
+                content=create_api_response("error", "Dead letter not found"), status_code=404
+            )
+
+        for column in ("created_at", "last_attempted_at", "resolved_at"):
+            if row.get(column):
+                row[column] = row[column].isoformat()
+
+        # Decoded to a real object rather than passed through as a JSON
+        # string -- the console renders it as a tree. A payload we cannot
+        # decode is reported as such instead of failing the whole read: the
+        # operator still needs to see last_error and attempt_count, which is
+        # usually why they opened this row.
+        try:
+            row["payload"] = _dead_letter_envelope(row)
+            row["replayable"] = row["status"] not in _DEAD_LETTER_TERMINAL_STATUSES
+        except Exception as exc:
+            row["payload"] = None
+            row["replayable"] = False
+            row["payload_error"] = str(exc)
+
+        return create_api_response("success", "Dead letter retrieved", row)
+
+    except Exception as e:
+        logger.error(f"Get dead letter error: {e}")
+        return JSONResponse(
+            content=create_api_response("error", "Failed to retrieve dead letter"), status_code=500
+        )
+    finally:
+        conn.close()
+
+
+@router.post(
+    "/dead-letters/{dead_letter_id}/replay",
+    summary="Replay one dead-lettered webhook event",
+    description="Re-queues a permanently failed event for delivery through the normal "
+    "dispatcher path -- same signing, same retry schedule, same delivery logging as the "
+    "original attempt (PRD SS12 gap #8b). The row moves to status='retrying'.",
+    responses={
+        404: {"model": ErrorResponse, "description": "No such dead letter"},
+        409: {
+            "model": ErrorResponse,
+            "description": "Already resolved/abandoned, or the payload cannot be replayed",
+        },
+        500: {"model": ErrorResponse, "description": "Database connection or query error"},
+    },
+)
+async def replay_dead_letter(
+    dead_letter_id: str,
+    body: DeadLetterReplayRequest,
+    ctx: AuthContext = Depends(require_scope("platform", "write", role="operator")),
+):
+    conn = get_db_connection()
+    if not conn:
+        return JSONResponse(
+            content=create_api_response("error", "Database connection failed"), status_code=500
+        )
+    try:
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(
+            "SELECT id, organization_id, event_type, endpoint_url, payload, status "
+            "FROM webhook_dead_letters WHERE id = %s",
+            (dead_letter_id,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            cursor.close()
+            return JSONResponse(
+                content=create_api_response("error", "Dead letter not found"), status_code=404
+            )
+
+        try:
+            _replay_one(cursor, row)
+        except ValueError as exc:
+            cursor.close()
+            return JSONResponse(
+                content=create_api_response("error", f"Cannot replay dead letter: {exc}"),
+                status_code=409,
+            )
+
+        conn.commit()
+        cursor.close()
+
+        logger.warning(
+            f"Webhook dead letter replayed: id={dead_letter_id} event={row['event_type']} "
+            f"by={ctx['operator_id']} reason={body.reason!r}"
+        )
+        return create_api_response(
+            "success",
+            "Dead letter re-queued for delivery",
+            {
+                "id": row["id"],
+                "event_type": row["event_type"],
+                "endpoint_url": row["endpoint_url"],
+                "status": "retrying",
+                "note": _REPLAY_STATUS_NOTE,
+            },
+        )
+
+    except Exception as e:
+        logger.error(f"Replay dead letter error: {e}")
+        return JSONResponse(
+            content=create_api_response("error", "Failed to replay dead letter"), status_code=500
+        )
+    finally:
+        conn.close()
+
+
+@router.post(
+    "/dead-letters/replay-bulk",
+    summary="Replay several dead-lettered webhook events",
+    description=f"Replays up to {_REPLAY_BULK_MAX_IDS} dead letters in one call and reports the "
+    "outcome of each. Individual failures are returned in `failed` with their reason -- they are "
+    "never swallowed, and a partial failure is still a 200 with an honest per-id breakdown "
+    "rather than an all-or-nothing error that hides which ids actually went out.",
+    responses={
+        422: {"model": ErrorResponse, "description": f"More than {_REPLAY_BULK_MAX_IDS} ids"},
+        500: {"model": ErrorResponse, "description": "Database connection or query error"},
+    },
+)
+async def replay_dead_letters_bulk(
+    body: DeadLetterBulkReplayRequest,
+    ctx: AuthContext = Depends(require_scope("platform", "write", role="operator")),
+):
+    if len(body.dead_letter_ids) > _REPLAY_BULK_MAX_IDS:
+        return JSONResponse(
+            content=create_api_response(
+                "error",
+                f"At most {_REPLAY_BULK_MAX_IDS} dead_letter_ids per call "
+                f"({len(body.dead_letter_ids)} supplied)",
+            ),
+            status_code=422,
+        )
+
+    # De-duplicated while preserving the caller's order: the same id twice
+    # in one request must not fire the event twice.
+    requested = list(dict.fromkeys(body.dead_letter_ids))
+
+    conn = get_db_connection()
+    if not conn:
+        return JSONResponse(
+            content=create_api_response("error", "Database connection failed"), status_code=500
+        )
+    try:
+        cursor = conn.cursor(dictionary=True)
+
+        # One SELECT for the whole batch rather than N round trips. The
+        # placeholders are generated from len(requested), which is capped
+        # above; every value is still bound.
+        placeholders = ", ".join(["%s"] * len(requested))
+        cursor.execute(
+            f"SELECT id, organization_id, event_type, endpoint_url, payload, status "
+            f"FROM webhook_dead_letters WHERE id IN ({placeholders})",
+            requested,
+        )
+        # Keys are stringified because the caller supplies ids as strings
+        # (the column is BIGINT) -- comparing str to int would miss every row.
+        found = {str(row["id"]): row for row in (cursor.fetchall() or [])}
+
+        replayed: list = []
+        failed: list = []
+        for dead_letter_id in requested:
+            row = found.get(str(dead_letter_id))
+            if not row:
+                failed.append({"id": dead_letter_id, "error": "not found"})
+                continue
+            try:
+                _replay_one(cursor, row)
+            except Exception as exc:
+                failed.append({"id": dead_letter_id, "error": str(exc)})
+                continue
+            replayed.append(
+                {
+                    "id": row["id"],
+                    "event_type": row["event_type"],
+                    "endpoint_url": row["endpoint_url"],
+                    "status": "retrying",
+                }
+            )
+
+        conn.commit()
+        cursor.close()
+
+        logger.warning(
+            f"Webhook dead letters bulk replay: requested={len(requested)} "
+            f"replayed={len(replayed)} failed={len(failed)} "
+            f"by={ctx['operator_id']} reason={body.reason!r}"
+        )
+        return create_api_response(
+            "success",
+            f"{len(replayed)} of {len(requested)} dead letters re-queued",
+            {
+                "replayed": replayed,
+                "failed": failed,
+                "requested": len(requested),
+                "note": _REPLAY_STATUS_NOTE,
+            },
+        )
+
+    except Exception as e:
+        logger.error(f"Bulk replay dead letters error: {e}")
+        return JSONResponse(
+            content=create_api_response("error", "Failed to replay dead letters"), status_code=500
         )
     finally:
         conn.close()

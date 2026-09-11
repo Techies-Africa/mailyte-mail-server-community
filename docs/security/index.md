@@ -7,6 +7,8 @@ description: Security overview for Mailyte — threat model, defense layers, and
 
 An email server is a high-value target. It handles credentials, private communications, and is directly exposed to the internet. This section documents how Mailyte is secured and how to keep it that way.
 
+Every control documented in this section is one that actually executes in the deployed code or configuration. Where a capability exists as code but is not wired into the mail path, that status is stated explicitly — a documented control that does not run is worse than no documentation at all.
+
 ---
 
 ## In this section
@@ -17,7 +19,7 @@ An email server is a high-value target. It handles credentials, private communic
 
     ---
 
-    API keys, admin auth, SMTP SASL, token management, and key rotation.
+    API keys, operator sessions, SMTP SASL, SMTP API-key credentials, and the Dovecot auth cache.
 
     [:octicons-arrow-right-24: Authentication](authentication.md)
 
@@ -25,7 +27,7 @@ An email server is a high-value target. It handles credentials, private communic
 
     ---
 
-    Multi-tenant isolation, org-scoped permissions, and access control.
+    Multi-tenant isolation, platform vs organization scope, roles, and sender restrictions.
 
     [:octicons-arrow-right-24: Authorization](authorization.md)
 
@@ -33,7 +35,7 @@ An email server is a high-value target. It handles credentials, private communic
 
     ---
 
-    TLS configuration, at-rest encryption, DKIM signing, and certificate management.
+    TLS configuration, mail_crypt at-rest encryption, envelope-encrypted private keys, DKIM signing.
 
     [:octicons-arrow-right-24: Encryption](encryption.md)
 
@@ -41,7 +43,7 @@ An email server is a high-value target. It handles credentials, private communic
 
     ---
 
-    Firewalls, port exposure, Docker network isolation, and ingress rules.
+    Port exposure, the 2026-08-22 loopback lockdown, Docker network isolation, and ingress rules.
 
     [:octicons-arrow-right-24: Network security](network-security.md)
 
@@ -49,7 +51,7 @@ An email server is a high-value target. It handles credentials, private communic
 
     ---
 
-    GDPR, data retention policies, right to erasure, and audit logging.
+    GDPR endpoints, data retention, right to erasure, legal holds, and audit logging.
 
     [:octicons-arrow-right-24: Compliance](compliance.md)
 
@@ -65,7 +67,7 @@ An email server is a high-value target. It handles credentials, private communic
 
     ---
 
-    Detecting attacks, analyzing logs, alerting on anomalies.
+    Detecting attacks, the failed-auth pipeline, and log analysis.
 
     [:octicons-arrow-right-24: Security monitoring](security-monitoring.md)
 
@@ -73,7 +75,7 @@ An email server is a high-value target. It handles credentials, private communic
 
     ---
 
-    Fail2ban configuration, brute-force protection, IP banning.
+    The Dovecot auth-policy server, brute-force protection, IP blocking.
 
     [:octicons-arrow-right-24: Intrusion detection](intrusion-detection.md)
 
@@ -104,8 +106,8 @@ graph TB
     end
 
     subgraph "Defense Layers"
-        FW[Firewall / iptables]
-        F2B[Fail2ban]
+        FW[Firewall + loopback-only bindings]
+        AP[Dovecot auth-policy server]
         RSPAMD_D[Rspamd Filtering]
         TLS_D[TLS Encryption]
         AUTH[Authentication]
@@ -118,7 +120,7 @@ graph TB
     end
 
     SPAM --> RSPAMD_D
-    BRUTE --> F2B
+    BRUTE --> AP
     EXPLOIT --> FW
     RELAY --> AUTH
     PHISH --> RSPAMD_D
@@ -133,53 +135,48 @@ graph TB
 
 ## Defense Layers
 
-The security model is organized into six layers. Each layer handles a specific class of threat, so a failure in one layer doesn't compromise the whole system.
-
 | Layer | Protects against | Key technology |
 |-------|-----------------|----------------|
-| **1. Network** | Unauthorized access, port scanning | Firewall, Docker network isolation |
+| **1. Network** | Unauthorized access, port scanning | Loopback-only bindings (since 2026-08-22), Docker network isolation, Traefik ingress |
 | **2. Transport** | Eavesdropping, MITM attacks | TLS 1.2+, STARTTLS, implicit TLS |
-| **3. Authentication** | Unauthorized API/SMTP access | API keys, SASL, admin passwords |
-| **4. Authorization** | Cross-tenant data access | Org-scoped keys, row-level isolation |
-| **5. Spam & Abuse** | Spam floods, outbound abuse, brute force | Rspamd, rate limiting, fail2ban |
-| **6. Monitoring** | Undetected attacks, slow compromise | Log analysis, Prometheus metrics, alerts |
+| **3. Authentication** | Unauthorized API/SMTP access | API keys, operator sessions, SASL, SMTP API-key credentials |
+| **4. Authorization** | Cross-tenant data access | Org-scoped credentials, platform/organization scope split, role gates |
+| **5. Spam & Abuse** | Spam floods, outbound abuse, brute force | Rspamd, Postfix rate limits + policy services, Dovecot auth-policy server |
+| **6. Monitoring** | Undetected attacks, slow compromise | failed_auth_attempts pipeline, audit_logs, Prometheus, alerting |
 
 ### Layer 1: Network
 
-The firewall only exposes the ports that need to be public. Internal services (MySQL, Redis, Qdrant, Prometheus) are not accessible from outside. Docker network isolation keeps containers in their own subnet.
-
-!!! warning "Default Docker behaviour"
-    Docker bypasses `ufw` / `iptables` rules by default. Make sure you configure Docker's `iptables` settings or use `DOCKER_IPTABLES=false` with an external firewall. See [Network Security](network-security.md) for the full setup.
+Only mail ports (25/465/587, 143/993, 110/995) and web ingress (80/443 via Traefik) are published to the internet. Since 2026-08-22, `docker-compose.prod.yml` republishes **every** internal service — including previously world-reachable, unauthenticated Prometheus (9090) and Qdrant (6333) — on `127.0.0.1` only.
 
 See: [Network Security](network-security.md)
 
 ### Layer 2: Transport Encryption
 
-All external connections use TLS 1.2+. SMTP connections support STARTTLS and implicit TLS. IMAP and POP3 use implicit TLS by default. The API runs behind HTTPS.
+External connections use TLS 1.2+. SMTP supports STARTTLS (25/587) and implicit TLS (465), and Postfix refuses AUTH on unencrypted connections (`smtpd_tls_auth_only = yes`). Dovecot sets `ssl = required` with `ssl_min_protocol = TLSv1.2`. HTTP APIs are fronted by Traefik with TLS.
 
 See: [Encryption](encryption.md)
 
 ### Layer 3: Authentication
 
-API requests require an API key. SMTP submission requires SASL authentication (handled by Dovecot). Admin operations require an additional admin password. API keys can be scoped to organizations and restricted by IP.
+API requests require an `X-API-Key` credential (or an operator/mailbox session). SMTP submission requires SASL authentication against Dovecot (bcrypt password hashes). Domain-scoped SMTP API-key credentials with instant revocation went live 2026-08-27. Invalid API-key attempts are rate-limited per IP.
 
 See: [Authentication](authentication.md)
 
 ### Layer 4: Authorization
 
-Each organization's data is completely isolated. API keys scoped to an organization can only see that organization's domains, mailboxes, and data. There's no cross-tenant data leakage by design.
+Credentials carry a scope — `organization` (tenant) or `platform` (staff) — and platform routes are unreachable for tenant credentials regardless of their permission flags (ADR-002). Organization scope is forced onto tenant queries server-side.
 
 See: [Authorization](authorization.md)
 
 ### Layer 5: Spam and Abuse Prevention
 
-Rspamd filters inbound email using Bayesian analysis, DNSBL checks, SPF/DKIM/DMARC validation, and content analysis. Rate limiting prevents outbound abuse. Fail2ban blocks repeated failed login attempts.
+Rspamd filters inbound email (Bayesian, DNSBL, SPF/DKIM/DMARC, greylisting, phishing checks). Postfix enforces per-client connection/rate limits (anvil) plus two live policy services: per-org submission rate limits and per-org IP allowlists. The Dovecot auth-policy server applies progressive delays and blocks brute-force sources.
 
 See: [Intrusion Detection](intrusion-detection.md)
 
 ### Layer 6: Monitoring and Detection
 
-Failed logins, unusual traffic patterns, and configuration changes are logged and can trigger alerts. Prometheus metrics track security-relevant events.
+Failed logins land in `failed_auth_attempts` (with block/unblock APIs), admin and auth events in `audit_logs`, and mail flow in `mail_logs`/`delivery_events` (since 2026-08-22). Prometheus and the monitoring service track service health and resource pressure.
 
 See: [Security Monitoring](security-monitoring.md)
 
@@ -187,19 +184,23 @@ See: [Security Monitoring](security-monitoring.md)
 
 ## Security capabilities
 
-| Capability | Details |
-|------------|---------|
-| **TLS** | TLS 1.2+ on all external connections, auto-renewal via cert manager |
-| **DKIM** | Automatic key generation and DNS record management |
-| **SPF/DMARC** | Validation on inbound, policy enforcement on outbound |
-| **API key scoping** | Per-org keys, IP allowlists, read/write permissions |
-| **SASL auth** | Dovecot-backed SMTP authentication, no open relay |
-| **Fail2ban** | Automatic IP banning after failed login attempts |
-| **Rate limiting** | Sliding window limits at org, domain, and mailbox level |
-| **Antivirus** | ClamAV scanning on all inbound attachments |
-| **Tenant isolation** | Row-level DB isolation, scoped API access, separate quotas |
-| **Audit logging** | All admin actions logged with timestamps and actor |
-| **Auto-healing** | Health monitor restarts failed services automatically |
+| Capability | Status |
+|------------|--------|
+| **TLS** | Live — TLS 1.2+ on all external connections, auto-renewal via cert_manager |
+| **DKIM** | Live — per-domain keys, Rspamd signing; private keys envelope-encrypted at rest |
+| **SPF/DMARC/ARC** | Live — validated on inbound by Rspamd |
+| **API credential scoping** | Live — org-scoped keys, platform/organization scope split, role gates |
+| **SMTP API-key credentials** | Live since 2026-08-27 — domain-scoped, bcrypt-hashed, doveadm-backed instant revocation |
+| **SASL auth, no open relay** | Live — Dovecot-backed, TLS-only; sender-login-mismatch enforced on 587/465 |
+| **Brute-force protection** | Live — Dovecot auth-policy server (progressive delay, Redis-backed blocking) + API-key attempt limiter. *Fail2ban is not deployed* — the configs in `mailer/intrusion_detection/` are unused unless you install them on the host yourself |
+| **Rate limiting** | Live — Postfix anvil limits + per-org policy services + API rate limiter service |
+| **Tenant isolation** | Live — org-scoped queries, scope-gated routes |
+| **Audit logging** | Live — `audit_logs` table (auth events, API key lifecycle, compliance actions), queryable at `/api/v1/compliance/audit-log` |
+| **Auto-healing** | Live — monitoring service restarts failed critical services via a scoped Docker socket proxy |
+| **Antivirus (ClamAV)** | **Not deployed** — the Rspamd integration ships disabled (`mailer/rspamd/config/local.d/antivirus.conf`: `enabled = false`) and no ClamAV container exists; enable it yourself if you need attachment scanning |
+| **DLP** | **Partial** — policy/violation management APIs and the `dlp` milter service run, but the milter is *not registered in Postfix's `smtpd_milters`*, so no mail is scanned |
+| **Geo-blocking** | **Partial** — policy APIs and the `geo_blocking` service run, but no Postfix/Dovecot hook consults it, so no connection is geo-filtered |
+| **Mailbox TOTP 2FA** | **Partial** — the `totp` service implements RFC 6238, but nothing in the IMAP/SMTP/webmail auth path enforces it |
 
 ---
 
@@ -211,6 +212,7 @@ See: [Security Monitoring](security-monitoring.md)
 | I want to... | Go to |
 |---|---|
 | Set up API keys for my app | [Authentication](authentication.md) |
+| Give an app SMTP-only send access | [Authentication](authentication.md#smtp-api-key-credentials) |
 | Configure TLS certificates | [Encryption](encryption.md) |
 | Lock down exposed ports | [Network Security](network-security.md) |
 | Block brute-force attacks | [Intrusion Detection](intrusion-detection.md) |
@@ -220,29 +222,13 @@ See: [Security Monitoring](security-monitoring.md)
 
 ---
 
-## Quick Links
-
-| Topic | What it covers |
-|-------|---------------|
-| [Authentication](authentication.md) | API keys, admin auth, SMTP SASL, tokens |
-| [Authorization](authorization.md) | Multi-tenant isolation, permissions |
-| [Encryption](encryption.md) | TLS, at-rest encryption, DKIM, certificates |
-| [Network Security](network-security.md) | Firewalls, port exposure, Docker isolation |
-| [Compliance](compliance.md) | GDPR, data retention, right to erasure |
-| [Vulnerability Management](vulnerability-management.md) | Dependency scanning, patching |
-| [Security Monitoring](security-monitoring.md) | Detecting attacks, log analysis |
-| [Intrusion Detection](intrusion-detection.md) | Fail2ban configuration |
-| [Security Checklist](security-checklist.md) | Pre-deployment security verification |
-
----
-
 ## Reporting Security Issues
 
 If you discover a security vulnerability, please report it responsibly. Do not open a public issue.
 
 Email: `security@mailyte.com`
 
-We'll acknowledge receipt within 24 hours and provide a timeline for a fix within 72 hours.
+See `SECURITY.md` in the repository root for the full policy, including the current accepted-risk register.
 
 ---
 

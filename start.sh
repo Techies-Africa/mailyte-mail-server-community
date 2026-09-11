@@ -58,13 +58,14 @@ check_docker() {
     fi
 }
 
-# Which compose command to use
+# Which compose command to use.
+#
 # --profile console on every wrapper: the console is declared behind a profile
-# until its image is published, but PRD §9 requires it to behave like any other
-# service here -- start with the stack, appear in ps/logs/health, stop with
-# `down`. Passing the profile centrally is what makes that true without every
-# call site remembering. Naming a profile no service uses is a no-op, so this
-# needs no change once the gate is removed.
+# until its image is published, but PRD §9 requires it to behave like any
+# other service here -- start with the stack, appear in ps/logs/health, stop
+# with `down`. Passing the profile centrally is what makes that true without
+# every call site remembering. Naming a profile no service uses is a no-op,
+# so this needs no change once the gate is removed.
 CONSOLE_PROFILE="--profile console"
 
 compose_cmd() {
@@ -90,13 +91,14 @@ compose_cloud_prod_cmd() {
 # ---------------------------------------------------------------------------
 # Service tiers — essential vs optional
 # ---------------------------------------------------------------------------
-# The console is essential, not optional (PRD §9 shipping model): it is how a
-# self-hoster administers the server, and first boot lands on its
-# operator-bootstrap screen. That IS the CE onboarding. Starts last because it
-# depends_on api being healthy.
+# The console is essential, not optional (PRD §9 shipping model): it is how
+# the server is administered, and first boot lands on its operator-bootstrap
+# screen. It starts last because it depends_on api being healthy.
 ESSENTIAL_SERVICES="redis mysql rspamd postfix dovecot api console"
-WORKER_SERVICES="webhooks tracking rate_limiter"
-OPTIONAL_SERVICES="cert_manager autoconfig templates"
+WORKER_SERVICES="webhooks tracking rate_limiter queue_manager storage_usage analytics monitoring"
+OPTIONAL_SERVICES="rag qdrant cert_manager acme_webroot dashboard archiver encryption activesync templates delivery_optimizer"
+DOCS_SERVICE="docs"
+CONSOLE_SERVICE="console"
 
 # ---------------------------------------------------------------------------
 # Banner
@@ -106,7 +108,7 @@ show_banner() {
     echo ""
     echo -e "${CYAN}${BOLD}"
     echo "  ╔══════════════════════════════════════════════════╗"
-    echo "  ║     Mailyte Email Server — Community Edition      ║"
+    echo "  ║          Mailyte Email Server Console            ║"
     echo "  ╚══════════════════════════════════════════════════╝"
     echo -e "${NC}"
 }
@@ -117,11 +119,11 @@ show_banner() {
 show_main_menu() {
     echo -e "  ${BOLD}Quick Start${NC}"
     echo -e "    ${GREEN}1${NC}  First-time setup wizard"
-    echo -e "    ${GREEN}2${NC}  Start essential services       ${DIM}(redis, mysql, postfix, dovecot, rspamd, api)${NC}"
+    echo -e "    ${GREEN}2${NC}  Start essential services       ${DIM}(redis, mysql, postfix, dovecot, rspamd, api, console)${NC}"
     echo -e "    ${GREEN}3${NC}  Start all services             ${DIM}(essential + workers + optional)${NC}"
     echo -e "    ${GREEN}4${NC}  Start in development mode      ${DIM}(with hot-reload)${NC}"
     echo -e "    ${GREEN}5${NC}  Start in production mode"
-    echo -e "    ${DIM}     Enterprise Edition adds cloud DB, monitoring, AI search, and more${NC}"
+    echo -e "    ${GREEN}6${NC}  Start with cloud DB/Redis     ${DIM}(remote MySQL + Redis, no local containers)${NC}"
     echo ""
     echo -e "  ${BOLD}Service Management${NC}"
     echo -e "    ${GREEN}7${NC}  Service status"
@@ -146,10 +148,17 @@ show_main_menu() {
     echo -e "    ${GREEN}20${NC} Send test email"
     echo -e "    ${GREEN}21${NC} Generate DKIM keys"
     echo ""
+    echo -e "  ${BOLD}Documentation${NC}"
+    echo -e "    ${GREEN}22${NC} Start docs server              ${DIM}(handbook at localhost:8000)${NC}"
+    echo -e "    ${GREEN}23${NC} Rebuild docs                   ${DIM}(rebuild after editing)${NC}"
+    echo ""
+    echo -e "  ${BOLD}Testing${NC}"
+    echo -e "    ${GREEN}24${NC} Run integration tests          ${DIM}(139 tests, ~70s parallel)${NC}"
+    echo ""
     echo -e "  ${BOLD}Maintenance${NC}"
-    echo -e "    ${GREEN}22${NC} Rebuild a service"
-    echo -e "    ${GREEN}23${NC} Clean up (prune images/volumes)"
-    echo -e "    ${GREEN}24${NC} Open shell in container"
+    echo -e "    ${GREEN}25${NC} Rebuild a service"
+    echo -e "    ${GREEN}26${NC} Clean up (prune images/volumes)"
+    echo -e "    ${GREEN}27${NC} Open shell in container"
     echo ""
     echo -e "    ${GREEN}0${NC}  Exit"
     echo ""
@@ -178,9 +187,6 @@ ensure_setup() {
         "$SCRIPT_DIR/logs/worker/api"
         "$SCRIPT_DIR/logs/worker/tracking"
         "$SCRIPT_DIR/logs/worker/webhooks"
-        # Was missing entirely, so Docker created it as root and rate_limiter
-        # could not write into it.
-        "$SCRIPT_DIR/logs/worker/rate_limiter"
     )
     for d in "${dirs[@]}"; do
         mkdir -p "$d" 2>/dev/null
@@ -199,56 +205,10 @@ ensure_setup() {
         print_info "For production, replace with real certs or enable cert_manager"
     fi
 
-    # Create .env from example if missing.
-    #
-    # The placeholders are REPLACED with generated values rather than copied
-    # through. secrets-check (C3) refuses to start the stack on a placeholder
-    # or a known-weak default, so a straight `cp` would hand every new
-    # self-hoster a stack that cannot boot and a message about a file they
-    # have not read yet. Generating here means the secure path is also the
-    # default path -- the operator never has to choose it.
+    # Create .env from example if missing
     if [ ! -f "$SCRIPT_DIR/.env" ] && [ -f "$SCRIPT_DIR/.env.example" ]; then
         cp "$SCRIPT_DIR/.env.example" "$SCRIPT_DIR/.env"
-        chmod 600 "$SCRIPT_DIR/.env"
-
-        # The five names in startup_checks.ALL_SECRETS. Keep in step with it.
-        for var in DB_ROOT_PASSWORD DB_PASSWORD WEBHOOK_SECRET ADMIN_PASSWORD ADMIN_TOKEN_SECRET; do
-            # base64 then strip non-alphanumerics: these values travel through
-            # compose interpolation, MySQL command lines and connection URLs,
-            # where +, / and = are variously special. 32 bytes in, ~40 chars
-            # out, comfortably past startup_checks.MIN_LENGTH of 16.
-            value="$(openssl rand -base64 32 | tr -dc 'A-Za-z0-9' | head -c 40)"
-            if grep -q "^${var}=" "$SCRIPT_DIR/.env" 2>/dev/null; then
-                # -i '' is BSD/macOS, -i is GNU. Neither is portable, so use a
-                # temp file and move it.
-                sed "s|^${var}=.*|${var}=${value}|" "$SCRIPT_DIR/.env" > "$SCRIPT_DIR/.env.tmp" \
-                    && mv "$SCRIPT_DIR/.env.tmp" "$SCRIPT_DIR/.env"
-            else
-                printf '%s=%s\n' "$var" "$value" >> "$SCRIPT_DIR/.env"
-            fi
-        done
-        chmod 600 "$SCRIPT_DIR/.env"
-        print_success ".env created with generated secrets (not the example placeholders)"
-        print_info "Review it for host-specific settings: HOSTNAME, DOMAIN, ports"
-    fi
-
-    # Key Encryption Key for envelope-encrypted DKIM private keys (C2).
-    #
-    # This must exist before `docker compose up`. The api service bind-mounts
-    # the file, and Docker silently creates a DIRECTORY at any bind-mount
-    # source that does not exist -- which then fails to open as a file, on
-    # every DKIM operation, with an error that does not mention Docker.
-    if [ ! -f "$SCRIPT_DIR/secrets/encryption_kek" ]; then
-        if [ -x "$SCRIPTS_DIR/generate_dkim_kek.sh" ]; then
-            bash "$SCRIPTS_DIR/generate_dkim_kek.sh" >/dev/null 2>&1
-        else
-            mkdir -p "$SCRIPT_DIR/secrets"
-            openssl rand -base64 32 > "$SCRIPT_DIR/secrets/encryption_kek"
-        fi
-        chmod 700 "$SCRIPT_DIR/secrets" 2>/dev/null
-        chmod 600 "$SCRIPT_DIR/secrets/encryption_kek" 2>/dev/null
-        print_success "DKIM key-encryption key generated at secrets/encryption_kek"
-        print_warn "BACK THIS UP. Losing it makes every stored DKIM private key unrecoverable."
+        print_warn ".env created from .env.example — edit it with your settings"
     fi
 }
 
@@ -257,22 +217,6 @@ do_first_time_setup() {
     ensure_setup
     bash "$SCRIPTS_DIR/quick-start.sh"
     press_enter
-}
-
-# The console ships as a published image, so unlike every other service here
-# it can fail for a reason unrelated to this host: the image is not in the
-# registry yet. That must not take the mail server down with it -- a running
-# server with no console is recoverable; a start.sh that aborts at stage 5
-# looks like the whole stack is broken.
-start_console() {
-    if compose_cmd up -d console 2>/dev/null; then
-        print_success "Console started — http://127.0.0.1:${CONSOLE_PORT:-3100}"
-        print_info  "First run: create the owner account with the bootstrap token"
-        print_info  "  ./start.sh console-token"
-    else
-        print_warn "Console did not start (image ghcr.io/techies-africa/mailyte-console not published yet?)"
-        print_info "The mail server is unaffected."
-    fi
 }
 
 do_start_essential() {
@@ -329,6 +273,25 @@ do_start_essential() {
     echo ""
     compose_cmd ps
     press_enter
+}
+
+# The console ships as a published image, so unlike every other service here
+# it can fail for a reason that has nothing to do with this host: the image
+# is not in the registry yet. That must not take the mail server down with
+# it — a running server with no console is recoverable, a start.sh that
+# aborts at stage 5 looks like the whole stack is broken.
+#
+# compose_cmd already carries --profile console (see above).
+start_console() {
+    if compose_cmd up -d console 2>/dev/null; then
+        print_success "Console started — http://localhost:${CONSOLE_PORT:-3100}"
+        print_info  "First run: create the owner account with the bootstrap token"
+        print_info  "  ./start.sh console-token"
+    else
+        print_warn "Console did not start (image ghcr.io/techies-africa/mailyte-console not published yet?)"
+        print_info "The mail server is unaffected. Run the console from source with:"
+        print_info "  ./start.sh  →  option 4 (Development mode)"
+    fi
 }
 
 do_start_all() {
@@ -611,6 +574,12 @@ do_run_tests() {
       -e TEST_TRACKING_BASE=http://tracking:8086 \
       -e TEST_WEBHOOKS_BASE=http://webhooks:8081 \
       -e TEST_RATE_LIMITER_BASE=http://rate_limiter:8082 \
+      -e TEST_MONITORING_BASE=http://monitoring:8085 \
+      -e TEST_ANALYTICS_BASE=http://analytics:8087 \
+      -e TEST_DASHBOARD_BASE=http://dashboard:8088 \
+      -e TEST_QUEUE_BASE=http://queue_manager:8090 \
+      -e TEST_STORAGE_BASE=http://storage_usage:8092 \
+      -e TEST_DOCS_BASE=http://docs:80 \
       -e TEST_DB_HOST=mysql \
       -e TEST_DB_PORT=3306 \
       -e TEST_DB_NAME="${DB_NAME:-mailserver}" \
@@ -734,7 +703,7 @@ while true; do
         3)  do_start_all ;;
         4)  do_start_dev ;;
         5)  do_start_prod ;;
-        6)  print_error "Cloud mode is available in Mailyte Enterprise Edition"; press_enter ;;
+        6)  do_start_cloud ;;
         7)  do_status ;;
         8)  do_stop ;;
         9)  do_restart ;;
@@ -750,9 +719,12 @@ while true; do
         19) do_mail_queue ;;
         20) do_mail_test ;;
         21) do_generate_dkim ;;
-        22) do_rebuild ;;
-        23) do_clean ;;
-        24) do_shell ;;
+        22) do_start_docs ;;
+        23) do_rebuild_docs ;;
+        24) do_run_tests ;;
+        25) do_rebuild ;;
+        26) do_clean ;;
+        27) do_shell ;;
         0|q|exit)
             echo ""
             print_info "Goodbye!"

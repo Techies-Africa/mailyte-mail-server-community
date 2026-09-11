@@ -1,7 +1,7 @@
 
 # Development Getting Started Guide
 
-This guide helps developers set up a local development environment for the Mailyte Mail Server and explains how to add new features, test changes, and contribute to the project.
+This guide helps developers set up a local development environment for the Enterprise Mail Server and explains how to add new features, test changes, and contribute to the project.
 
 ## 🚀 **Quick Development Setup**
 
@@ -589,4 +589,4 @@ def safe_database_query(email):
 
 ---
 
-This guide provides everything you need to start developing with the Mailyte Mail Server. Follow these patterns and practices to maintain code quality and system reliability.
+This guide provides everything you need to start developing with the Enterprise Mail Server. Follow these patterns and practices to maintain code quality and system reliability.

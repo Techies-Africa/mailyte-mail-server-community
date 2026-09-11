@@ -1,6 +1,6 @@
 # API Documentation
 
-The Mailyte Mail Server provides a comprehensive REST API for managing all aspects of the email infrastructure. The API is designed to be RESTful, well-documented, and follows OpenAPI 3.0 specifications.
+The Enterprise Mail Server provides a comprehensive REST API for managing all aspects of the email infrastructure. The API is designed to be RESTful, well-documented, and follows OpenAPI 3.0 specifications.
 
 ## API Overview
 

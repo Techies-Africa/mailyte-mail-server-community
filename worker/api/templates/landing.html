@@ -6,22 +6,30 @@
     <title>Mailyte Email Server — Community Edition</title>
     <link rel="icon" href="/static/favicon.ico" type="image/x-icon">
     <link rel="apple-touch-icon" href="/static/apple-touch-icon.png">
-    <meta name="description" content="Self-hosted email infrastructure with SMTP, IMAP, POP3, email tracking, webhooks, and a full REST API. Free and open source.">
+    <meta name="description" content="Self-hosted email infrastructure with SMTP, IMAP, POP3, email tracking, webhooks, and a full REST API. Full-featured enterprise email infrastructure.">
     <style>
         *{margin:0;padding:0;box-sizing:border-box}
         body{font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#09090B;color:#F9F9F9;min-height:100vh;-webkit-font-smoothing:antialiased}
         a{color:inherit;text-decoration:none}
 
         /* Topbar */
-        .topbar{border-bottom:1px solid rgba(235,174,19,.12);padding:0 32px;height:56px;display:flex;align-items:center;justify-content:space-between;max-width:1200px;margin:0 auto}
+        .topbar{border-bottom:1px solid rgba(235,174,19,.12);padding:12px 32px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;row-gap:8px;max-width:1200px;margin:0 auto}
         .topbar .logo{display:flex;align-items:center;gap:10px;font-size:20px;font-weight:700}
         .topbar .logo img{height:32px;width:auto}
         .topbar .logo span{background:linear-gradient(135deg,#EBAE13,#FF9900);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
-        .topbar nav{display:flex;align-items:center;gap:8px}
+        .topbar nav{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:center}
         .topbar nav a{color:#A1A1A9;font-size:13px;padding:6px 12px;border-radius:6px;transition:all .2s}
         .topbar nav a:hover{color:#EBAE13;background:rgba(235,174,19,.06)}
         .topbar nav a.cta{background:#EBAE13;color:#09090B;font-weight:600;padding:7px 16px;border-radius:50px}
         .topbar nav a.cta:hover{background:#DBA500}
+        @media(max-width:640px){
+            .topbar{justify-content:center;padding:12px 20px}
+            .topbar nav a{font-size:12px;padding:5px 9px}
+            .hero{padding:48px 20px 32px}
+            h1{font-size:32px}
+            .subtitle{font-size:15px}
+            .content{padding:0 20px}
+        }
 
         /* Hero */
         .hero{max-width:1200px;margin:0 auto;padding:72px 32px 48px;text-align:center}
@@ -91,15 +99,15 @@
         </a>
         <nav>
             <a href="/features">Features</a>
-            <a href="http://localhost:8000" target="_blank">Handbook</a>
+            <a href="https://docs.courier.mailyte.com" target="_blank">Handbook</a>
             <a href="/api-docs">Swagger</a>
             <a href="/api-reference">API Docs</a>
-            <a href="https://github.com/Techies-Africa/mailyte-mail-server-community" class="cta">GitHub</a>
+            <a href="https://github.com/Techies-Africa/mailyte-email-server" class="cta">GitHub</a>
         </nav>
     </div>
 
     <div class="hero">
-        <div class="badge">COMMUNITY EDITION &mdash; FREE &amp; OPEN SOURCE</div>
+        <div class="badge">ENTERPRISE EDITION</div>
         <h1>Mailyte Email Server</h1>
         <p class="subtitle">
             Self-hosted email infrastructure built on Postfix, Dovecot, and Rspamd.
@@ -247,9 +255,9 @@
     </div>
 
     <footer>
-        <p>Mailyte Email Server v1.0.0 &mdash; Community Edition &mdash; AGPL-3.0</p>
+        <p>Mailyte Email Server v1.0.0 &mdash; Community Edition &mdash; Enterprise License</p>
         <div class="links">
-            <a href="https://github.com/Techies-Africa/mailyte-mail-server-community">GitHub</a>
+            <a href="https://github.com/Techies-Africa/mailyte-email-server">GitHub</a>
             <a href="/features">Features</a>
             <a href="https://mailyte.com">mailyte.com</a>
             <a href="https://techies.africa">Techies Africa</a>

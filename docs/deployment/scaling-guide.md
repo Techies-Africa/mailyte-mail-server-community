@@ -1,9 +1,6 @@
 # Scaling Guide
 
-> **Enterprise Edition** — This feature is available in [Mailyte Enterprise](https://mailyte.com). The Community Edition does not include this functionality.
-
-
-When to scale, what to scale, and how — so your email server grows with your needs.
+When to scale, what to scale, and how — within the single-host Docker Compose model this stack is built around.
 
 ## Signs You Need to Scale
 
@@ -11,110 +8,49 @@ Before scaling anything, confirm you actually have a bottleneck:
 
 | Symptom | Likely Bottleneck | First Action |
 |---------|------------------|--------------|
-| API responses slow | API or database | Check query times, add API replicas |
-| Mail queue growing | Postfix or workers | Add workers, check delivery errors |
+| API responses slow | API or database | Check query times, add api replicas |
+| Mail queue growing | Delivery being throttled or refused | Read `logs/mailer/postfix/mail.log` — deferrals name their reason |
 | High CPU | Rspamd or MySQL | Profile and optimize first |
 | High memory | MySQL buffer pool or Rspamd | Tune settings, then add RAM |
-| Disk filling up | Mail storage or logs | Clean up first, expand disk |
-| IMAP slow for users | Dovecot or disk I/O | Faster storage, optimize mailboxes |
+| Disk filling up | Mail storage or backups | Clean up first, expand disk |
+| IMAP slow for users | Dovecot or disk I/O | Faster storage |
 
 > **Note:** Always optimize before you scale. Throwing hardware at a bad query or misconfiguration is expensive and doesn't fix the root cause.
 
-## Scaling Workers
+## What Can and Cannot Scale Horizontally
 
-Workers are the easiest thing to scale. They're stateless and share a Redis queue.
+This distinction is architectural, not aspirational:
 
-### Docker Compose
+| Tier | Services | Scaling |
+|------|----------|---------|
+| **Stateless HTTP** | `api`, `webhooks`, `tracking` | Horizontal — already 2 replicas each in `docker-compose.prod.yml`, load-balanced by Traefik / shared-nothing behind the internal network |
+| **Singleton stateful** | `postfix`, `dovecot`, `mysql`, `redis`, `rspamd`, everything else | Vertical only — exactly one of each exists, and running two against the same spool/Maildir/data directory is actively unsafe |
+
+## Scaling the Stateless Services
+
+`api`, `webhooks`, and `tracking` are the services prepared for replication: the production override resets their fixed `container_name` and host ports precisely so multiple replicas can run.
 
 ```bash
-# Scale to 3 workers
-docker compose up -d --scale worker=3
-
-# Check they're all running
-docker compose ps | grep worker
+# Temporarily run a third api replica
+docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+  up -d --scale api=3 --no-deps api
 ```
 
-### Docker Compose File (Permanent)
+To make it permanent, raise `deploy.replicas` for the service in `docker-compose.prod.yml`:
 
 ```yaml
-services:
-  worker:
-    image: mailyte/api:latest
-    command: python3 -m mailyte.worker
-    deploy:
-      replicas: 3
-      resources:
-        limits:
-          cpus: "1.0"
-          memory: 512M
-```
-
-**When to add workers:**
-
-- Email queue depth consistently > 100
-- Job processing time increasing
-- Worker CPU at > 80%
-
-**How many workers?**
-
-| Email Volume | Workers |
-|-------------|---------|
-| < 10k/day | 1 |
-| 10k-50k/day | 2-3 |
-| 50k-200k/day | 3-5 |
-| 200k+/day | 5-10 |
-
-## Scaling the API
-
-The FastAPI server is stateless. Scale it behind a load balancer.
-
-### Docker Compose
-
-```yaml
-services:
   api:
-    image: mailyte/api:latest
     deploy:
-      replicas: 3
+      replicas: 3        # was 2
       resources:
         limits:
-          cpus: "1.0"
           memory: 512M
-    # Remove the fixed port mapping
-    # ports:
-    #   - "5000:5000"
-    expose:
-      - "5000"
-
-  # Add an nginx load balancer
-  nginx:
-    image: nginx:alpine
-    ports:
-      - "5000:80"
-    volumes:
-      - ./config/nginx/api-lb.conf:/etc/nginx/conf.d/default.conf:ro
-    depends_on:
-      - api
 ```
 
-```nginx
-# config/nginx/api-lb.conf
-upstream api_backend {
-    least_conn;
-    server api:5000;
-}
+Traefik discovers all replicas of `api` automatically and load-balances `api.<DOMAIN>` across them. `deployment/deploy.sh` rolls exactly these three services on every deploy (scale up alongside the old container, confirm health, then retire the old one).
 
-server {
-    listen 80;
-
-    location / {
-        proxy_pass http://api_backend;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    }
-}
-```
+!!! warning "Do not replicate the other services"
+    Adding `--scale postfix=2` (or dovecot, or mysql) makes two containers fight over the same ports, spool, and data. The base file's fixed `container_name` on most services will refuse it — that is a guard, not an oversight.
 
 ## Database Scaling
 
@@ -123,179 +59,91 @@ MySQL is usually the hardest bottleneck to fix because it's stateful.
 ### Step 1: Optimize First
 
 ```sql
--- Check for missing indexes
-SELECT * FROM sys.schema_unused_indexes;
-
 -- Find slow queries
 SELECT * FROM sys.statements_with_full_table_scans
 ORDER BY exec_count DESC LIMIT 10;
 
--- Tune buffer pool (should be ~70% of available RAM for dedicated DB)
+-- Tune buffer pool (~70% of available RAM for a dedicated DB host)
 SET GLOBAL innodb_buffer_pool_size = 4294967296;  -- 4GB
 ```
 
-### Step 2: Read Replicas
+Raise the production memory limit for `mysql` in `docker-compose.prod.yml` (2 GB by default) to match.
 
-For read-heavy workloads, add MySQL read replicas:
+Connection pooling is tunable in `.env` (`DB_POOL_SIZE`, `DB_MAX_OVERFLOW`, `DB_POOL_TIMEOUT`, `DB_POOL_RECYCLE`).
 
-```yaml
-# docker-compose.yml addition
-mysql-replica:
-  image: mysql:8.0
-  environment:
-    - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
-  volumes:
-    - mysql-replica-data:/var/lib/mysql
-  command: >
-    --server-id=2
-    --read-only=1
-    --relay-log=relay-log
-```
+### Step 2: Move to a Managed Database
 
-Configure the API to use read replicas:
-
-```python
-# In the API configuration
-DATABASE_READ_URL=mysql+aiomysql://mailyte:pass@mysql-replica:3306/mailyte
-DATABASE_WRITE_URL=mysql+aiomysql://mailyte:pass@mysql:3306/mailyte
-```
-
-### Step 3: Dedicated Database Server
-
-When your database outgrows the mail server:
-
-1. Set up MySQL on a dedicated server (or use managed MySQL like RDS)
-2. Update `DATABASE_URL` in `.env`
-3. Ensure network connectivity between servers
-4. Set up replication for high availability
-
-## Redis Scaling
-
-### Redis Memory Optimization
+This is the supported "big" move, and it has a dedicated override file. `docker-compose.cloud.yml` replaces the local `mysql` and `redis` containers with no-op stubs and points every service at remote hosts:
 
 ```bash
-# Check memory usage
-docker compose exec redis redis-cli -a $REDIS_PASSWORD info memory
-
-# Set a memory limit
-docker compose exec redis redis-cli -a $REDIS_PASSWORD config set maxmemory 1gb
-docker compose exec redis redis-cli -a $REDIS_PASSWORD config set maxmemory-policy allkeys-lru
+# .env
+DB_HOST=your-instance.xxxx.rds.amazonaws.com
+DB_PORT=3306
+REDIS_HOST=your-cluster.xxxx.cache.amazonaws.com
+REDIS_PORT=6379
 ```
 
-### Redis Cluster (for large deployments)
-
-If a single Redis instance isn't enough:
-
-```yaml
-services:
-  redis-node-1:
-    image: redis:7-alpine
-    command: redis-server --cluster-enabled yes --cluster-config-file nodes.conf
-    volumes:
-      - redis-node-1-data:/data
-
-  redis-node-2:
-    image: redis:7-alpine
-    command: redis-server --cluster-enabled yes --cluster-config-file nodes.conf
-    volumes:
-      - redis-node-2-data:/data
-
-  redis-node-3:
-    image: redis:7-alpine
-    command: redis-server --cluster-enabled yes --cluster-config-file nodes.conf
-    volumes:
-      - redis-node-3-data:/data
+```bash
+./start.sh cloud
+# or, combined with the production override:
+docker compose -f docker-compose.yml -f docker-compose.cloud.yml -f docker-compose.prod.yml up -d
 ```
 
-> **Note:** Most Mailyte deployments don't need Redis clustering. A single Redis instance handles hundreds of thousands of operations per second.
+A managed MySQL brings read replicas, automated failover, and point-in-time recovery without this stack having to implement them.
 
-## Multiple Postfix Instances
+!!! note "MySQL image pin"
+    The local `mysql` service is pinned to `8.0.35` because newer 8.0.x images require the x86-64-v2 CPU microarchitecture level, which some VPS-provider virtual CPUs lack. If you move hosts and MySQL crash-loops with "Fatal glibc error: CPU does not support x86-64-v2", that pin (and its comment in `docker-compose.yml`) is the story.
 
-For very high email volume, run multiple Postfix instances behind a load balancer.
+## Redis
 
-```mermaid
-graph LR
-    LB[Load Balancer :25] --> PF1[Postfix 1]
-    LB --> PF2[Postfix 2]
-    LB --> PF3[Postfix 3]
-    PF1 --> DB[(Shared MySQL)]
-    PF2 --> DB
-    PF3 --> DB
+A single Redis instance handles hundreds of thousands of operations per second — clustering is far beyond this stack's needs. If Redis becomes a problem, it is almost always memory:
+
+```bash
+docker compose exec redis redis-cli info memory | head -5
 ```
 
-### Setup
+The container already runs with `--maxmemory 256mb --maxmemory-policy allkeys-lru`; raise the maxmemory in the `redis` service `command:` (and the prod memory limit) if evictions hurt hit rates. Or move to a managed Redis via `docker-compose.cloud.yml` as above.
 
-```yaml
-services:
-  postfix-1:
-    image: mailyte/postfix:latest
-    hostname: mx1.yourdomain.com
-    environment:
-      - INSTANCE_ID=1
-    volumes:
-      - postfix-1-queue:/var/spool/postfix
-      - mail-data:/var/mail    # Shared via NFS or similar
+## Mail Throughput
 
-  postfix-2:
-    image: mailyte/postfix:latest
-    hostname: mx2.yourdomain.com
-    environment:
-      - INSTANCE_ID=2
-    volumes:
-      - postfix-2-queue:/var/spool/postfix
-      - mail-data:/var/mail
+Outbound throughput is rarely limited by Postfix's capacity — it is limited by how fast receiving ISPs will accept your mail. That is what the `delivery_optimizer` service manages: per-ISP throttling, IP warming schedules, and bounce processing. If the queue grows with deferrals from specific providers, the fix is reputation and pacing, not a second Postfix.
 
-  postfix-lb:
-    image: haproxy:latest
-    ports:
-      - "25:25"
-      - "587:587"
-    volumes:
-      - ./config/haproxy/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
-```
-
-Add multiple MX records:
-
-```
-yourdomain.com  MX  10 mx1.yourdomain.com
-yourdomain.com  MX  20 mx2.yourdomain.com
-```
+For genuinely independent capacity (or a separate sending reputation), deploy a **second complete stack on a second host** with its own IP and hostname, and split domains or tenants between them. Multiple MX records pointing at the two hosts give inbound redundancy. There is no supported shared-Maildir multi-Postfix topology.
 
 ## Scaling Roadmap
 
 ```mermaid
 graph TD
-    A[Single Server<br/>Docker Compose] -->|Growing pains| B[Optimize<br/>Tune configs, indexes]
-    B -->|Still not enough| C[Scale Workers<br/>Add 2-3 more workers]
-    C -->|API bottleneck| D[Scale API<br/>Multiple replicas + LB]
-    D -->|DB bottleneck| E[DB Read Replicas<br/>Split reads/writes]
-    E -->|Mail throughput| F[Multiple Postfix<br/>Load-balanced SMTP]
-    F -->|Need HA| G[Kubernetes<br/>Full orchestration]
+    A[Single server<br/>Docker Compose] -->|Growing pains| B[Optimize<br/>indexes, buffer pool, pools]
+    B -->|API bottleneck| C[More api/webhooks/tracking replicas]
+    C -->|DB bottleneck| D[Managed MySQL + Redis<br/>docker-compose.cloud.yml]
+    D -->|Sending reputation / capacity| E[Second full stack on a second host<br/>split tenants or domains]
 ```
 
-| Stage | Email Volume | Users | Server Specs |
-|-------|-------------|-------|-------------|
-| Single server | < 50k/day | < 5k | 4 CPU, 8 GB RAM |
-| Scaled workers + API | 50k-200k/day | 5k-20k | 8 CPU, 16 GB RAM |
-| DB replicas + multiple MX | 200k-1M/day | 20k-100k | Multiple servers |
-| Kubernetes | 1M+/day | 100k+ | Cluster |
+| Stage | Email Volume | Server Specs |
+|-------|-------------|--------------|
+| Single server, defaults | < 50k/day | 4 CPU, 8 GB RAM |
+| Tuned + extra replicas | 50k-200k/day | 8 CPU, 16 GB RAM |
+| Cloud DB/Redis | 200k-1M/day | App host + managed data services |
+| Multiple stacks | 1M+/day | Per-host as above |
 
 ## Capacity Planning
 
-Track these metrics to predict when you'll need to scale:
+Track these to predict when you'll need to scale:
 
 ```promql
-# Growth rate: emails per day trend
-increase(postfix_delivery_total[24h])
+# Are all services up?
+sum(up == 0)
 
-# User growth rate
-increase(dovecot_auth_success_total[7d]) / 7
+# MySQL connection pressure
+mysql_global_status_threads_connected / mysql_global_variables_max_connections
 
-# Storage growth rate (GB per month)
-deriv(sum(dovecot_storage_bytes)[30d:1d]) * 86400 * 30 / 1073741824
+# Redis memory pressure
+redis_memory_used_bytes / redis_memory_max_bytes
 
-# CPU headroom
-100 - (avg(irate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)
+# Host CPU/disk come from `docker stats` and `df` (no node-exporter is deployed)
 ```
 
-> **Tip:** Set up a Grafana dashboard with these metrics and review it monthly. Scale proactively when you see sustained growth approaching your current capacity.
+Mail volume itself lives in the `mail_logs` table (populated by the `log_ingestor`) and the analytics service — the console and Grafana's `mail_overview` dashboard chart it.
+
+> **Tip:** Review capacity monthly. Scale proactively when sustained growth approaches your current ceiling — and see [Guides > Scaling to Millions](../guides/scaling-to-millions.md) for the long-horizon view.

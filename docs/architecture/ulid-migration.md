@@ -30,9 +30,11 @@ For 500K+ domains with millions of mailboxes across potentially distributed infr
 
 ## Email Server Migration (mailyte-email-server)
 
-### Status: In Progress
+### Status: Complete
 
-**Migration file:** `database/migrations/sql/009_ulid_primary_keys.sql`
+The email server side of this plan is **done and in production**: every core table uses `CHAR(26)` ULID primary keys, all SQLAlchemy models default their `id` to `shared/ulid_utils.generate_ulid`, and the converted schema is baked into the Alembic baseline (`alembic/versions/0001_baseline.py`) that the `migrate` container applies on every deploy. The original SQL migration file below is retained only as the historical source the baseline was generated from — nothing executes it anymore.
+
+**Historical migration file:** `database/migrations/sql/009_ulid_primary_keys.sql`
 **Utility:** `shared/ulid_utils.py`
 
 ### Tables Being Migrated
@@ -88,6 +90,9 @@ class Domain(Base):
 ---
 
 ## Laravel API Migration (mailyte-api)
+
+!!! note "This half is a plan for the mailyte-api repository"
+    Everything below targets the Laravel codebase, not this one. Check mailyte-api's own migrations for its current state before acting on it.
 
 ### Step 1: Install ULID Package (5 min)
 

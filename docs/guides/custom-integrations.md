@@ -5,81 +5,157 @@ description: Connect Mailyte to your CRM, ticketing system, or any application u
 
 # Custom Integrations
 
-Mailyte fires webhooks and exposes a REST API. That's all you need to integrate it with pretty much anything — CRMs, ticketing systems, Slack, custom dashboards, whatever.
+Mailyte fires webhooks and exposes a REST API. This guide covers how event delivery actually works, how to verify signatures, and common automation patterns against the API.
 
-## Webhooks: Real-Time Event Streaming
+!!! info "API base URL"
+    Examples use `https://api.yourdomain.com` (Traefik publishes the API at `api.<your-domain>` in production; a dev checkout exposes it at `http://localhost:8083`). All requests authenticate with the `X-API-Key` header.
 
-Webhooks push events to your application as they happen. Every email sent, received, bounced, opened, or clicked triggers a webhook.
+## How Event Delivery Works (as of 2026-08-30)
 
-### Setting Up a Webhook Endpoint
+There are two delivery paths, and they receive different events:
 
-Register your endpoint via the API:
+| Path | Events | Configured by |
+|------|--------|---------------|
+| **Global dispatcher** — one platform-wide URL | Mail-flow and platform events: `email.inbound`, `email.outbound`, `email.delivered`, `email.bounced`, `email.deferred`, `tracking.open`, `tracking.click`, `delivery.bounce.hard`, domain/mailbox lifecycle events, and more | `WEBHOOK_URL` + `WEBHOOK_SECRET` environment variables on the server |
+| **Registered endpoints** — per-organization URLs in the `webhook_urls` table | Events emitted by the tracking, rate-limiter, and storage-usage services (e.g. `email.opened`, `email.clicked`, rate-limit and storage alerts) | `POST /api/v1/webhooks/endpoints` |
 
-```bash
-curl -X POST http://mail.yourdomain.com:8083/api/v1/add/webhook \
-  -H "X-API-Key: YOUR_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "CRM Integration",
-    "url": "https://your-app.com/webhooks/mailyte",
-    "event_types": ["email.smtp.inbound", "email.smtp.outbound", "email.imap.read"],
-    "service_types": ["smtp", "imap"],
-    "webhook_secret": "your-webhook-secret",
-    "active": true
-  }'
-```
+!!! warning "Registered endpoints do not receive mail-flow events"
+    As of 2026-08-30 the unified dispatcher delivers only to the single global `WEBHOOK_URL`. Endpoints registered via the API receive events from the tracking / rate-limiter / storage services (matched by `service_types` and `event_types`), plus test deliveries — not the SMTP inbound/outbound stream. If your integration needs the full mail-flow stream, set `WEBHOOK_URL` on the deployment and fan out in your own receiver.
 
-### Webhook Payload
+## The Global Dispatcher
 
-Every webhook follows this structure:
+### Envelope
+
+Every event delivered to `WEBHOOK_URL` carries a consistent envelope:
 
 ```json
 {
-  "event": "email.smtp.inbound",
-  "timestamp": "2025-03-25T14:30:00Z",
-  "payload": {
-    "direction": "inbound",
-    "protocol": "smtp",
-    "metadata": {
-      "message_id": "<abc123@example.com>",
-      "subject": "Support request #4521",
-      "from": "customer@gmail.com",
-      "to": "support@mycompany.com"
-    },
-    "delivery_info": {
-      "recipient": "support@mycompany.com",
-      "sender": "customer@gmail.com",
-      "delivery_status": "received"
-    },
-    "security": {
-      "spf_result": "pass",
-      "dkim_result": "pass"
-    }
+  "id": "0d4f6c1e-6a0e-4f3f-9d3c-0b8b1a2c3d4e",
+  "event": "email.delivered",
+  "timestamp": "2026-08-30T14:30:00+00:00",
+  "source": "log_ingestor",
+  "org_id": "acme-corp",
+  "domain": "example.com",
+  "tags": [],
+  "user_variables": {},
+  "data": {
+    "message_id": "<abc123@example.com>",
+    "recipient": "user@example.com"
+  },
+  "metadata": {},
+  "signature": {
+    "timestamp": 1756564200,
+    "token": "3f9a...",
+    "signature": "9c1b..."
   }
 }
 ```
 
-### Verifying Webhook Signatures
+Request headers include `X-Webhook-Id`, `X-Webhook-Event`, `X-Webhook-Source`, `X-Webhook-Timestamp`, and `X-Webhook-Signature: sha256=<hex>`.
 
-Every request includes an `X-Webhook-Signature` header. Always verify it:
+### Verifying Global-Dispatcher Signatures
+
+Two complementary checks — the header signs the **raw request body**, and the inline block prevents replays:
 
 ```python
-import hmac
 import hashlib
-import json
+import hmac
+import time
 
 
-def verify_webhook(payload: dict, signature: str, secret: str) -> bool:
+def verify_header_signature(raw_body: bytes, header_value: str, secret: str) -> bool:
+    """X-Webhook-Signature is HMAC-SHA256 over the exact request bytes."""
+    expected = hmac.new(secret.encode(), raw_body, hashlib.sha256).hexdigest()
+    return hmac.compare_digest(header_value, f"sha256={expected}")
+
+
+def verify_inline_signature(payload: dict, secret: str, max_age: int = 900) -> bool:
+    """payload['signature'] is HMAC-SHA256 over str(timestamp) + token."""
+    sig = payload.get("signature", {})
+    if abs(time.time() - sig.get("timestamp", 0)) > max_age:
+        return False  # replay protection: reject events older than 15 minutes
     expected = hmac.new(
-        secret.encode("utf-8"), json.dumps(payload, sort_keys=True).encode("utf-8"), hashlib.sha256
+        secret.encode(),
+        (str(sig["timestamp"]) + sig["token"]).encode(),
+        hashlib.sha256,
     ).hexdigest()
-    return signature == f"sha256={expected}"
+    return hmac.compare_digest(sig.get("signature", ""), expected)
 ```
 
 !!! warning "Always verify signatures"
     Without verification, anyone who discovers your webhook URL can send fake events.
 
+### Retries and 406
+
+Failed deliveries retry on a Mailgun-style schedule — 7 retries over roughly 8 hours (10m, 10m, 15m, 30m, 1h, 2h, 4h). Responding with HTTP **406** permanently stops delivery of that event (no retry, no dead-letter). Events that exhaust their retries land in the dead-letter queue (below).
+
+## Registered Endpoints
+
+### Setting Up a Webhook Endpoint
+
+```bash
+curl -X POST https://api.yourdomain.com/api/v1/webhooks/endpoints \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "CRM Integration",
+    "url": "https://your-app.com/webhooks/mailyte",
+    "description": "Tracking events into the CRM",
+    "event_types": ["email.opened", "email.clicked"],
+    "service_types": ["tracking"],
+    "active": true
+  }'
+```
+
+- `event_types: null` means "all events" the producing services emit.
+- `service_types` selects which services deliver to this endpoint — `"tracking"`, `"rate_limiter"`, `"storage_usage"`, or `["all"]`.
+- If you omit `secret`, the server generates one and returns it in the response — store it; it signs every delivery to this endpoint.
+
+Manage endpoints with `GET /api/v1/webhooks/endpoints`, `GET/PUT/DELETE /api/v1/webhooks/endpoints/{id}`, and fire a test delivery with `POST /api/v1/webhooks/endpoints/{id}/test`.
+
+### Verifying Registered-Endpoint Signatures
+
+These services sign the payload serialized with sorted keys (not the raw bytes), in the same `X-Webhook-Signature: sha256=<hex>` header:
+
+```python
+import hashlib
+import hmac
+import json
+
+
+def verify_endpoint_webhook(payload: dict, header_value: str, secret: str) -> bool:
+    payload_json = json.dumps(payload, sort_keys=True)
+    expected = hmac.new(secret.encode(), payload_json.encode(), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(header_value, f"sha256={expected}")
+```
+
+## Delivery Logs and Dead Letters
+
+```bash
+# Delivery attempts (status, HTTP code, timing)
+curl https://api.yourdomain.com/api/v1/webhooks/deliveries \
+  -H "X-API-Key: YOUR_API_KEY"
+
+# Events that exhausted their retries
+curl https://api.yourdomain.com/api/v1/webhooks/dead-letters \
+  -H "X-API-Key: YOUR_API_KEY"
+
+# Inspect one, then replay it
+curl https://api.yourdomain.com/api/v1/webhooks/dead-letters/DEAD_LETTER_ID \
+  -H "X-API-Key: YOUR_API_KEY"
+curl -X POST https://api.yourdomain.com/api/v1/webhooks/dead-letters/DEAD_LETTER_ID/replay \
+  -H "X-API-Key: YOUR_API_KEY"
+
+# Or replay several at once
+curl -X POST https://api.yourdomain.com/api/v1/webhooks/dead-letters/replay-bulk \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"dead_letter_ids": ["1041", "1042"]}'
+```
+
 ## Integration Examples
+
+The examples below consume the global-dispatcher envelope (`event` + `data`).
 
 ### CRM Integration (HubSpot / Salesforce)
 
@@ -97,23 +173,24 @@ WEBHOOK_SECRET = "your-secret"
 
 @app.route("/webhooks/mailyte", methods=["POST"])
 def handle_mailyte_webhook():
+    if not verify_header_signature(
+        request.get_data(), request.headers.get("X-Webhook-Signature", ""), WEBHOOK_SECRET
+    ):
+        return jsonify({"status": "invalid signature"}), 401
+
     payload = request.get_json()
-    event = payload.get("event")
-
-    if event == "email.smtp.inbound":
-        sender = payload["payload"]["metadata"]["from"]
-        subject = payload["payload"]["metadata"]["subject"]
-
-        # Create or update contact in HubSpot
-        requests.post(
-            "https://api.hubapi.com/crm/v3/objects/contacts",
-            headers={
-                "Authorization": f"Bearer {HUBSPOT_TOKEN}",
-                "Content-Type": "application/json",
-            },
-            json={"properties": {"email": sender, "last_email_subject": subject}},
-        )
-
+    if payload.get("event") == "email.inbound":
+        data = payload.get("data", {})
+        sender = data.get("from") or data.get("sender")
+        if sender:
+            requests.post(
+                "https://api.hubapi.com/crm/v3/objects/contacts",
+                headers={
+                    "Authorization": f"Bearer {HUBSPOT_TOKEN}",
+                    "Content-Type": "application/json",
+                },
+                json={"properties": {"email": sender}},
+            )
     return jsonify({"status": "ok"})
 ```
 
@@ -125,46 +202,29 @@ Auto-create tickets from incoming support emails:
 @app.route("/webhooks/mailyte", methods=["POST"])
 def handle_support_email():
     payload = request.get_json()
-
-    if payload.get("event") != "email.smtp.inbound":
+    if payload.get("event") != "email.inbound":
         return jsonify({"status": "skipped"})
 
-    meta = payload["payload"]["metadata"]
-    to_address = meta["to"]
-
-    # Only process emails to support@
-    if not to_address.startswith("support@"):
+    data = payload.get("data", {})
+    recipient = data.get("recipient", "")
+    if not recipient.startswith("support@"):
         return jsonify({"status": "skipped"})
 
-    # Create Jira ticket
     requests.post(
         "https://your-org.atlassian.net/rest/api/3/issue",
         auth=("email@company.com", "JIRA_API_TOKEN"),
         json={
             "fields": {
                 "project": {"key": "SUP"},
-                "summary": meta["subject"],
-                "description": {
-                    "type": "doc",
-                    "version": 1,
-                    "content": [
-                        {
-                            "type": "paragraph",
-                            "content": [{"type": "text", "text": f"Email from {meta['from']}"}],
-                        }
-                    ],
-                },
+                "summary": data.get("subject", "(no subject)"),
                 "issuetype": {"name": "Task"},
             }
         },
     )
-
     return jsonify({"status": "created"})
 ```
 
 ### Slack Notifications
-
-Post to a Slack channel when specific events happen:
 
 ```python
 import requests
@@ -176,159 +236,112 @@ SLACK_WEBHOOK = "https://hooks.slack.com/services/T.../B.../xxx"
 def slack_notify():
     payload = request.get_json()
     event = payload.get("event")
-    meta = payload.get("payload", {}).get("metadata", {})
+    data = payload.get("data", {})
 
     messages = {
-        "email.smtp.inbound": f"New email from {meta.get('from', 'unknown')}: {meta.get('subject', '(no subject)')}",
-        "email.smtp.outbound": f"Email sent to {meta.get('to', 'unknown')}: {meta.get('subject', '(no subject)')}",
+        "email.bounced": f"Bounce for {data.get('recipient', 'unknown')}",
+        "delivery.bounce.hard": f"Hard bounce: {data.get('recipient', 'unknown')}",
+        "email.delivered": f"Delivered to {data.get('recipient', 'unknown')}",
     }
-
     msg = messages.get(event)
     if msg:
         requests.post(SLACK_WEBHOOK, json={"text": msg})
-
     return jsonify({"status": "ok"})
 ```
 
 ## API Automation Examples
 
-### Bulk Provisioning
-
-Create domains and mailboxes for new customers automatically:
+### Provisioning a Customer End to End
 
 ```python
 import requests
 
-API = "http://mail.yourdomain.com:8083/api/v1"
-HEADERS = {"X-API-Key": "YOUR_API_KEY", "Content-Type": "application/json"}
+API = "https://api.yourdomain.com/api/v1"
+HEADERS = {"X-API-Key": "YOUR_ADMIN_API_KEY", "Content-Type": "application/json"}
 
 
 def provision_customer(org_id: str, org_name: str, domain: str, admin_email: str):
     """Set up everything a new customer needs."""
 
-    # 1. Create organization
+    # 1. Create organization (admin platform key required)
     requests.post(
-        f"{API}/add/organization",
+        f"{API}/organizations/",
         headers=HEADERS,
         json={"id": org_id, "name": org_name, "admin_email": admin_email},
     )
 
-    # 2. Add domain
+    # 2. Add domain — DKIM is generated automatically and the
+    #    response carries every DNS record the customer must publish
+    domain_resp = requests.post(
+        f"{API}/domains/",
+        headers=HEADERS,
+        json={"domain": domain, "organization_id": org_id},
+    ).json()["data"]
+    domain_id = domain_resp["domain_id"]
+
+    # 3. Create the admin mailbox
     requests.post(
-        f"{API}/add/domain",
+        f"{API}/mailboxes/email-accounts",
         headers=HEADERS,
         json={
-            "domain": domain,
-            "organization_id": org_id,
-            "mailboxes": 50,
-            "aliases": 200,
-        },
-    )
-
-    # 3. Generate DKIM
-    requests.post(
-        f"{API}/add/dkim",
-        headers=HEADERS,
-        json={"domains": domain, "dkim_selector": "default", "key_size": "2048"},
-    )
-
-    # 4. Create admin mailbox
-    local_part = admin_email.split("@")[0]
-    requests.post(
-        f"{API}/add/mailbox",
-        headers=HEADERS,
-        json={
-            "local_part": local_part,
-            "domain": domain,
+            "email": admin_email,
             "password": generate_temp_password(),
             "name": "Admin",
-            "force_pw_update": 1,
+            "domain_id": domain_id,
         },
     )
 
-    # 5. Set up catch-all alias
-    requests.post(
-        f"{API}/add/alias",
+    # 4. Mint an SMTP credential so their application can send
+    smtp_cred = requests.post(
+        f"{API}/smtp-credentials/",
         headers=HEADERS,
-        json={"address": f"@{domain}", "goto": admin_email, "active": 1},
-    )
-
-    # 6. Get DKIM public key for DNS instructions
-    dkim = requests.get(f"{API}/get/dkim/{domain}", headers=HEADERS).json()
+        json={"domain_id": domain_id, "name": f"{org_id} app sending"},
+    ).json()["data"]
+    # smtp_cred["secret"] is shown exactly once — hand it over securely
 
     return {
         "org_id": org_id,
-        "domain": domain,
-        "dkim_record": dkim,
-        "instructions": f"Add these DNS records for {domain}...",
+        "domain_id": domain_id,
+        "dns_records": domain_resp["dns_records"],
+        "dkim_record": domain_resp.get("dkim_record"),
+        "smtp_username": smtp_cred["username"],
     }
 ```
 
 ### Usage Reporting
 
-Pull stats for billing or dashboards:
-
 ```python
 def get_org_usage(org_id: str) -> dict:
-    """Get usage stats for an organization."""
-
-    stats = requests.get(
-        f"{API}/get/status/stats", headers=HEADERS, params={"organization_id": org_id}
-    ).json()
-
-    domains = requests.get(
-        f"{API}/get/domain/all", headers=HEADERS, params={"organization_id": org_id}
-    ).json()
-
-    total_storage = sum(d.get("total_storage_used", 0) for d in domains)
-    total_mailboxes = sum(d.get("total_email_accounts", 0) for d in domains)
-
-    return {
-        "organization_id": org_id,
-        "total_domains": len(domains),
-        "total_mailboxes": total_mailboxes,
-        "total_storage_bytes": total_storage,
-        "total_storage_gb": round(total_storage / (1024**3), 2),
-    }
+    """Quota limits and current usage for an organization."""
+    quotas = requests.get(f"{API}/organizations/{org_id}/quotas", headers=HEADERS).json()["data"]
+    return quotas
 ```
 
-### Scheduled Maintenance
+Per-domain sending stats come from the analytics endpoints — `GET /api/v1/analytics/email-volume/{domain}`, `GET /api/v1/analytics/deliverability/{domain}` — and delivery history is searchable via `GET /api/v1/message-trace/trace`.
 
-Automate common maintenance tasks:
+### Domain Health Automation
 
 ```python
-def cleanup_old_tracking_data(days: int = 90):
-    """Remove tracking data older than N days."""
-    requests.post(
-        f"{API}/admin/cleanup",
+def check_domain_health(domain_id: str) -> dict:
+    """Live MX/SPF/DKIM/DMARC verification for a domain."""
+    return requests.get(f"{API}/domains/{domain_id}/verify-dns", headers=HEADERS).json()
+
+
+def rotate_dkim(domain_id: str) -> dict:
+    """Step one of a safe DKIM rotation — publish the returned record,
+    then call the activate endpoint once it resolves."""
+    return requests.post(
+        f"{API}/domains/{domain_id}/dkim/rotate",
         headers=HEADERS,
-        json={"target": "tracking_data", "older_than_days": days},
-    )
-
-
-def rotate_dkim_keys(domain: str, new_selector: str):
-    """Generate new DKIM keys with a new selector."""
-    requests.post(
-        f"{API}/add/dkim",
-        headers=HEADERS,
-        json={"domains": domain, "dkim_selector": new_selector, "key_size": "2048"},
-    )
-
-
-def check_domain_health(domain: str) -> dict:
-    """Verify DNS and authentication for a domain."""
-    return requests.get(f"{API}/get/domain/health/{domain}", headers=HEADERS).json()
+        json={"reason": "scheduled rotation"},
+    ).json()
 ```
 
 ## Webhook Reliability Tips
 
-1. **Respond quickly** — return 200 within 5 seconds, process async
-2. **Idempotency** — webhooks may fire twice, use `message_id` to deduplicate
+1. **Respond quickly** — return 2xx within the timeout, process async
+2. **Idempotency** — deliveries can repeat; deduplicate on the envelope `id`
 3. **Queue internally** — push webhooks into your own queue (Redis, RabbitMQ) for processing
-4. **Monitor failures** — check the webhook delivery logs via the API
-5. **Set up retries** — Mailyte retries failed deliveries with exponential backoff
-
-```bash
-# Check webhook delivery status
-curl http://mail.yourdomain.com:8081/webhook/status
-```
+4. **Monitor failures** — `GET /api/v1/webhooks/deliveries` and `.../dead-letters`
+5. **Replay, don't lose** — dead-lettered events can be replayed via the API once your endpoint is healthy again
+6. **406 means stop** — only return HTTP 406 when you genuinely never want that event again

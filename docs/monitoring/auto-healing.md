@@ -7,121 +7,58 @@ When a service fails, Mailyte detects it and restarts it automatically — usual
 Auto-healing happens at two levels:
 
 1. **Docker restart policies** — Docker itself restarts crashed containers
-2. **Health monitor** — Detects services that are running but broken, and triggers restarts
+2. **Monitoring service** — detects services that are *running but broken* (port open, protocol dead) and triggers restarts
 
 ```mermaid
 graph TD
     A[Service Fails] --> B{How did it fail?}
     B -->|Container crashed| C[Docker Restart Policy]
-    B -->|Running but unresponsive| D[Health Monitor]
+    B -->|Running but unresponsive| D[Monitoring service probe]
     C --> E[Container restarts automatically]
-    D --> F{Consecutive failures > threshold?}
-    F -->|No| G[Wait and recheck]
-    F -->|Yes| H[Trigger container restart]
-    H --> I[Send notification]
+    D --> F{Critical service AND status down?}
+    F -->|No| G[Report degraded, wait for next sweep]
+    F -->|Yes| H[Restart via docker-proxy]
+    H --> I[Webhook notification]
     E --> J[Service recovers]
     H --> J
-    G --> D
 ```
 
 ## Docker Restart Policies
 
-Every Mailyte service has a restart policy in Docker Compose:
-
-```yaml
-services:
-  postfix:
-    restart: unless-stopped
-    # Restarts automatically if the process exits
-    # Does NOT restart if you manually stop it
-
-  dovecot:
-    restart: unless-stopped
-
-  rspamd:
-    restart: unless-stopped
-
-  mysql:
-    restart: unless-stopped
-
-  redis:
-    restart: unless-stopped
-
-  api:
-    restart: unless-stopped
-
-  worker:
-    restart: unless-stopped
-
-  health-monitor:
-    restart: always
-    # The health monitor itself always restarts — it's the watchdog
-```
+Every Mailyte service has a restart policy: `unless-stopped` in the base `docker-compose.yml`, upgraded to `always` in `docker-compose.prod.yml`.
 
 **Restart policy options:**
 
 | Policy | Behavior |
 |--------|----------|
-| `no` | Never restart (default) |
-| `always` | Always restart, even if manually stopped |
+| `no` | Never restart (Docker's default) |
+| `always` | Always restart, even after a host reboot with the container previously stopped |
 | `unless-stopped` | Restart unless you explicitly stop it |
 | `on-failure[:max]` | Only restart on non-zero exit, with optional retry limit |
 
-> **Note:** `unless-stopped` is the sweet spot for most services. It handles crashes gracefully but respects your `docker compose stop` commands during maintenance.
+> **Note:** `unless-stopped` handles crashes gracefully but respects `docker compose stop` during maintenance — which is why the dev compose uses it. Production uses `always` so everything comes back after a host reboot.
 
 ## Docker Health Checks
 
-Docker has built-in health check support. These run inside the container and mark it as `healthy` or `unhealthy`.
+Nearly every container defines a `healthcheck:` in `docker-compose.yml`. Real examples from the compose file:
 
 ```yaml
-services:
-  postfix:
-    healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "25"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 30s
+rspamd:
+  healthcheck:
+    test: ["CMD-SHELL", "timeout 2 bash -c 'echo > /dev/tcp/localhost/11334' 2>/dev/null || exit 1"]
 
-  dovecot:
-    healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "143"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 30s
+monitoring:
+  healthcheck:
+    test: ["CMD-SHELL", "python3 -c 'import socket; s=socket.socket(); s.settimeout(2); s.connect((\"localhost\", 8085)); s.close()'"]
+    interval: 30s
+    timeout: 10s
+    retries: 3
+    start_period: 15s
 
-  rspamd:
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:11334/ping"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 15s
-
-  mysql:
-    healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 60s
-
-  redis:
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 15s
-      timeout: 3s
-      retries: 3
-      start_period: 10s
-
-  api:
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
-      interval: 15s
-      timeout: 5s
-      retries: 3
-      start_period: 30s
+prometheus:
+  healthcheck:
+    test: ["CMD-SHELL", "wget -qO- http://localhost:9090/-/healthy || exit 1"]
+    interval: 15s
 ```
 
 **Fields explained:**
@@ -132,97 +69,71 @@ services:
 | `interval` | Time between checks |
 | `timeout` | Max time to wait for the check to complete |
 | `retries` | How many failures before marking unhealthy |
-| `start_period` | Grace period after container starts (checks during this time don't count as failures) |
+| `start_period` | Grace period after container starts |
 
-## Health Monitor Auto-Healing
+Docker's verdict also matters for routing: Traefik excludes containers marked `unhealthy`, so a broken healthcheck can take a healthy service out of rotation.
 
-The health monitor goes beyond Docker's built-in checks. It tests actual functionality, not just "is the port open."
+## Monitoring-Service Auto-Healing
 
-For example, Docker's health check confirms MySQL's port is open. The health monitor runs `SELECT 1` to confirm MySQL is actually processing queries.
+The monitoring service goes beyond Docker's built-in checks. It tests actual functionality — an SMTP banner from Postfix, an IMAP greeting from Dovecot, an authenticated-free `/ping` from Rspamd, a `/health` from the API.
 
-**How the health monitor restarts services:**
+**What gets healed:** only the four services marked `critical` in `service_monitor.py` — `postfix`, `dovecot`, `rspamd`, and `api`. Non-critical workers are reported as degraded but never auto-restarted. (`cert_manager` is deliberately non-critical: false-positive restarts of it once exhausted Let's Encrypt rate limits for several subdomains.)
 
-```python
-# Simplified logic inside the health monitor
-async def check_and_heal(service):
-    result = await run_health_check(service)
+**When:** during the comprehensive monitoring sweep, every 5 minutes. A critical service whose probe reports `down` or `error` is restarted; a webhook `recovery_action` notification is sent with the result.
 
-    if result.healthy:
-        service.consecutive_failures = 0
-        return
+**Restart guardrails** (constants in `service_monitor.py`):
 
-    service.consecutive_failures += 1
+| Setting | Value |
+|---------|-------|
+| Max restart attempts per service | 3 |
+| Cooldown between attempts | 300 seconds |
 
-    if service.consecutive_failures >= UNHEALTHY_THRESHOLD:
-        logger.warning(f"{service.name} failed {service.consecutive_failures} times, restarting")
-        await restart_container(service.name)
-        await send_notification(service.name, "restarted")
-        service.consecutive_failures = 0
-```
+### The Docker socket is proxied, not mounted
 
-**Restart behavior:**
-
-| Scenario | Action | Notification |
-|----------|--------|-------------|
-| 1 failed check | Log and wait | None |
-| 2 failed checks | Log and wait | None |
-| 3 failed checks (default threshold) | Restart container | Webhook + Slack |
-| Restart succeeds | Resume normal checks | Recovery notification |
-| Restart fails | Retry after backoff | Escalated notification |
-
-## Restart Backoff
-
-To prevent restart loops, the health monitor uses exponential backoff:
-
-```
-1st restart: Immediate
-2nd restart: Wait 30 seconds
-3rd restart: Wait 60 seconds
-4th restart: Wait 120 seconds
-5th restart: Wait 300 seconds (5 min)
-After 5 restarts: Stop trying, send critical alert
-```
-
-> **Warning:** If a service reaches 5 failed restarts, the health monitor stops auto-healing and sends a critical alert. At that point, a human needs to investigate.
-
-## Configuration
-
-Environment variables for the health monitor:
+The monitoring container does **not** get `/var/run/docker.sock`. It reaches Docker through the `docker-proxy` service (`tecnativa/docker-socket-proxy`) via `DOCKER_HOST=tcp://docker-proxy:2375`. The proxy allows exactly what auto-healing needs and nothing more:
 
 ```yaml
-health-monitor:
+docker-proxy:
+  image: tecnativa/docker-socket-proxy:latest
   environment:
-    - ENABLE_AUTO_HEALING=true
-    - UNHEALTHY_THRESHOLD=3
-    - MAX_RESTART_ATTEMPTS=5
-    - RESTART_BACKOFF_BASE=30
-    - RESTART_COOLDOWN=300
-    - DOCKER_SOCKET=/var/run/docker.sock
+    - CONTAINERS=1
+    - POST=1
+    - ALLOW_RESTARTS=1
+    # Everything else defaults to 0: EXEC, IMAGES, BUILD, NETWORKS,
+    # VOLUMES, SECRETS, SWARM, ...
   volumes:
     - /var/run/docker.sock:/var/run/docker.sock:ro
 ```
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `ENABLE_AUTO_HEALING` | `true` | Master switch for auto-healing |
-| `UNHEALTHY_THRESHOLD` | `3` | Consecutive failures before restart |
-| `MAX_RESTART_ATTEMPTS` | `5` | Stop trying after this many restarts |
-| `RESTART_BACKOFF_BASE` | `30` | Base seconds for backoff calculation |
-| `RESTART_COOLDOWN` | `300` | Seconds after a restart before checking again |
+A compromised monitoring container can therefore restart containers, but cannot exec into them, read secrets, build images, or touch volumes.
 
-> **Note:** The health monitor needs access to the Docker socket (`/var/run/docker.sock`) to restart containers. This is a privileged operation — make sure only trusted services have this access.
+## Manual Healing
+
+Both operations require the monitoring admin token (see [Health Checks](health-checks.md#other-endpoints)):
+
+```bash
+# Restart one service
+curl -X POST http://localhost:8085/restart/postfix \
+  -H "X-Admin-Token: $TOKEN"
+
+# Sweep and heal everything unhealthy
+curl -X POST http://localhost:8085/auto-heal \
+  -H "X-Admin-Token: $TOKEN"
+```
+
+Through the API gateway the same operations are `POST /api/v1/monitoring/services/{name}/restart` and `POST /api/v1/monitoring/auto-heal` — those additionally require a platform-scope API credential with the `operator` role, and still forward your `X-Admin-Token` downstream.
 
 ## Viewing Restart History
 
 ```bash
 # Docker's built-in restart count
-docker inspect --format='{{.RestartCount}}' mailyte-postfix
+docker inspect --format='{{.RestartCount}}' postfix
 
 # Last restart time
-docker inspect --format='{{.State.StartedAt}}' mailyte-postfix
+docker inspect --format='{{.State.StartedAt}}' postfix
 
-# Health monitor's restart log
-docker compose logs health-monitor | grep "restart"
+# Monitoring service's healing log
+docker compose logs monitoring | grep -i "auto-heal\|restart"
 
 # All container events (starts, stops, restarts)
 docker events --filter type=container --since 24h
@@ -230,15 +141,12 @@ docker events --filter type=container --since 24h
 
 ## Disabling Auto-Healing
 
-During maintenance or debugging, you might want to disable auto-healing:
+There is no `ENABLE_AUTO_HEALING` switch. To stop the monitoring service from restarting things during maintenance, stop the monitoring service itself (Docker restart policies still apply):
 
 ```bash
-# Disable via environment variable
-docker compose exec health-monitor \
-  curl -X POST http://localhost:8080/admin/auto-healing/disable
-
-# Or restart with the flag off
-ENABLE_AUTO_HEALING=false docker compose up -d health-monitor
+docker compose stop monitoring
+# ... maintenance ...
+docker compose start monitoring
 ```
 
-Remember to re-enable it when you're done.
+Alternatively, stopping `docker-proxy` removes the monitoring service's ability to restart anything while leaving its health reporting intact (restart attempts will simply fail and be reported).

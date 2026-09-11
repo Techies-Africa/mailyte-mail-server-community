@@ -7,10 +7,12 @@ Advanced spam filtering and content analysis engine with machine learning capabi
 This module provides comprehensive email security through:
 
 - **Machine Learning**: Bayesian classification and neural networks
-- **Antivirus Protection**: ClamAV integration for malware detection
+- **Antivirus Hooks**: ClamAV integration exists but ships **disabled** -- no ClamAV container is deployed (see `config/local.d/antivirus.conf`)
 - **Real-time Analysis**: Multi-layer content inspection
 - **Greylisting**: Intelligent sender verification
-- **Performance**: High-throughput processing with minimal latency
+- **Smart-folder Classification**: `config/local.d/lua/email_classifier.lua` adds an `X-Email-Category` header (primary/notifications/social/promotions/updates) that Dovecot's global Sieve routes on
+- **Transport Rules**: `config/local.d/lua/transport_rules.lua` enforces tenant transport rules from Redis, gated behind `TRANSPORT_RULES_ENABLED` (default false)
+- **DKIM Signing**: per-domain keys under `/var/lib/rspamd/dkim/`, selectors from the image-baked `dkim_selectors.map` -- generate keys with `scripts/generate_dkim.py` **inside this container** (the only one with both the key mount and the real map)
 
 ## Key Features
 
@@ -50,10 +52,12 @@ Email → Rspamd → Multiple Modules → Score Calculation → Action Decision
 ## Spam Scoring System
 
 ### Score Thresholds
+From `config/local.d/actions.conf` (per-org overrides apply via the settings module):
 ```
-Score < 5.0:    Accept (clean email)
-Score 5.0-15.0: Soft reject (suspicious)
-Score > 15.0:   Reject (spam/malware)
+Score >= 4:   greylist         (temporary rejection for unknown senders)
+Score >= 6:   add_header       (X-Spam: Yes; Sieve routes to Junk)
+Score >= 10:  rewrite_subject  ([SPAM] prefix)
+Score >= 15:  reject
 ```
 
 ### Contributing Factors
@@ -63,7 +67,9 @@ Score > 15.0:   Reject (spam/malware)
 - **Network Analysis**: IP reputation and geolocation
 - **Attachment Security**: File type and content scanning
 
-## Antivirus Integration
+## Antivirus Integration (not deployed by default)
+
+ClamAV is **not** in any compose file, and `antivirus.conf` ships with `enabled = false` to prevent connection errors. To enable it: add a `clamav` service to `docker-compose.yml`, flip `enabled = true`, and confirm `servers = "clamav:3310"`.
 
 ### ClamAV Configuration
 ```conf
@@ -212,10 +218,10 @@ rspamc < test_message.eml
 
 ## Dependencies
 
-- **ClamAV**: Antivirus scanning engine
-- **MySQL**: Statistics and configuration storage
-- **Redis**: Caching and temporary data storage
-- **Postfix**: SMTP server integration via milter protocol
+- **Redis**: Bayesian tokens, neural weights, greylisting, transport rules
+- **MySQL**: used by `scripts/generate_dkim.py` when run in this container
+- **Postfix**: SMTP server integration via milter protocol (proxy worker on 11332)
+- **ClamAV**: optional, not deployed by default
 
 ## Integration Points
 

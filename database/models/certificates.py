@@ -23,7 +23,7 @@ from sqlalchemy.sql import func
 from shared.ulid_utils import generate_ulid
 
 from . import Base
-from .enums import CertificateStatus
+from .enums import CertificateStatus, enum_values
 
 
 # SSL Certificate Management
@@ -38,7 +38,7 @@ class SSLCertificate(Base):
     private_key_path = Column(String(500), nullable=False)
     chain_path = Column(String(500), nullable=True)
     status = Column(
-        SQLEnum(CertificateStatus), nullable=False, default=CertificateStatus.ACTIVE, index=True
+        SQLEnum(CertificateStatus, values_callable=enum_values), nullable=False, default=CertificateStatus.ACTIVE, index=True
     )
     issuer = Column(String(255), nullable=True)
     valid_from = Column(DateTime, nullable=True)
@@ -68,9 +68,8 @@ class DKIMKey(Base):
     domain_id = Column(String(26), ForeignKey("domains.id"), nullable=False)
     selector = Column(String(100), nullable=False, default="default")
     # Plaintext, kept only for pre-phase-07 rows until they're rotated
-    # (scripts/generate_dkim.py --rotate-all) -- every row written from
-    # phase-07 onward leaves this NULL and uses the three columns below
-    # instead (C2, migration 0007_encrypt_private_keys).
+    # (scripts/rotate_dkim_keys.py) -- every row written from phase-07
+    # onward leaves this NULL and uses the three columns below instead.
     private_key = Column(Text, nullable=True)
     private_key_ciphertext = Column(LargeBinary, nullable=True)
     private_key_nonce = Column(LargeBinary(length=12), nullable=True)

@@ -72,18 +72,20 @@ Here's what you get out of the box:
 
 | Capability | What it does | Powered by |
 |-----------|-------------|------------|
-| **Send & receive email** | SMTP inbound/outbound with virtual domains | Postfix |
-| **Email client access** | IMAP and POP3 for Thunderbird, Outlook, mobile apps | Dovecot |
-| **Spam filtering** | Machine-learning detection, antivirus, greylisting | Rspamd + ClamAV |
-| **REST API** | Manage everything programmatically — orgs, domains, mailboxes | FastAPI (Python) |
-| **Email tracking** | Open pixels, click-through link rewrites, engagement analytics | Tracking worker |
+| **Send & receive email** | SMTP inbound/outbound with database-driven virtual domains | Postfix |
+| **Email client access** | IMAP, POP3, JMAP, ManageSieve — plus client auto-configuration (autoconfig/autodiscover/MTA-STS) | Dovecot, jmap worker, autoconfig worker |
+| **Spam filtering & DKIM** | Machine-learning spam detection inbound, per-domain DKIM signing outbound | Rspamd (ClamAV optional, not deployed by default) |
+| **REST API** | Manage everything programmatically — orgs, domains, mailboxes, SMTP credentials | FastAPI gateway (34 route modules) |
+| **SMTP credentials** | Per-mailbox API keys for sending, revocable with immediate effect | SMTP credentials module + Dovecot doveadm |
+| **Email tracking** | Open pixels, click-through link rewrites, engagement analytics | Tracking worker + Postfix content filter |
+| **Email logs** | Per-message delivery records and delivery-event feed | log_ingestor (tails Postfix's log) |
 | **AI-powered search** | Semantic email search using vector embeddings | Qdrant + RAG worker |
-| **Real-time webhooks** | Notify your app when emails are sent, delivered, bounced, opened | Webhook worker |
-| **Auto SSL certificates** | Free HTTPS/TLS via Let's Encrypt with auto-renewal | Cert manager |
-| **Monitoring** | Prometheus metrics, Grafana dashboards, health checks | Monitoring stack |
+| **Real-time webhooks** | Signed, retried callbacks for mail, tracking, storage, and security events | Shared webhook dispatcher + webhooks worker |
+| **Auto SSL certificates** | Let's Encrypt with auto-renewal, per-domain SNI, and Traefik integration | cert_manager |
+| **Monitoring** | Prometheus metrics, Grafana dashboards, health checks, auto-restart | Monitoring stack + monitoring worker |
 | **Multi-tenant** | Full data isolation per organization with quota management | Built into every layer |
-| **Cloud backup** | Automated backups to AWS S3 or Azure Blob Storage | Cloud sync worker |
-| **Rate limiting** | Per-sender, per-domain, and per-org abuse prevention | Rate limiter + Redis |
+| **Mail archiving** | Every message archived, age-encrypted, to S3-compatible storage | Archiver worker |
+| **Rate limiting** | Per-sender, per-org, and per-key abuse prevention, enforced inside Postfix | Rate limiter + Redis |
 
 ---
 
@@ -94,13 +96,14 @@ The server is organized in three layers, all running as Docker containers:
 ```mermaid
 graph TB
     subgraph "<b>API Layer</b>"
-        API["REST API<br/><small>:5000 &bull; FastAPI</small>"]
+        API["FastAPI Gateway<br/><small>:8080 &bull; api.&lt;domain&gt; via Traefik</small>"]
     end
 
     subgraph "<b>Mail Infrastructure</b>"
         POSTFIX["Postfix<br/><small>:25 :587 :465</small>"]
-        DOVECOT["Dovecot<br/><small>:143 :993</small>"]
-        RSPAMD["Rspamd<br/><small>:11332</small>"]
+        DOVECOT["Dovecot<br/><small>:143 :993 :110 :995</small>"]
+        RSPAMD["Rspamd<br/><small>milter :11332</small>"]
+        INGEST["log_ingestor"]
     end
 
     subgraph "<b>Background Workers</b>"
@@ -110,33 +113,36 @@ graph TB
         ANALYTICS["Analytics"]
         RAG["AI Search"]
         QUEUE["Queue Mgr"]
-        STORAGE["Storage"]
-        BACKUP["Backup"]
+        STORAGE["Storage Usage"]
+        ARCHIVER["Archiver"]
     end
 
     subgraph "<b>Data Stores</b>"
         MYSQL[("MySQL")]
         REDIS[("Redis")]
         QDRANT[("Qdrant")]
-        FS["Filesystem"]
+        S3[("S3 storage")]
     end
 
-    API --> POSTFIX & DOVECOT
-    POSTFIX --> RSPAMD
-    POSTFIX --> TRACKING & WEBHOOKS & RATELIMIT
+    API -->|"SMTP :10587"| POSTFIX
+    API --> DOVECOT
+    POSTFIX -->|"milter: scan + DKIM sign"| RSPAMD
+    POSTFIX -->|"LMTP"| DOVECOT
+    POSTFIX --> TRACKING & RATELIMIT
+    INGEST --> MYSQL
 
     TRACKING --> MYSQL
-    WEBHOOKS --> REDIS
+    WEBHOOKS --> MYSQL
     RATELIMIT --> REDIS
     ANALYTICS --> MYSQL
     RAG --> QDRANT
-    QUEUE --> MYSQL
-    STORAGE --> FS
-    BACKUP --> FS
+    QUEUE --> POSTFIX
+    STORAGE --> DOVECOT
+    ARCHIVER --> S3
 ```
 
 !!! tip "The 30-second version"
-    **Postfix** sends and receives email. **Dovecot** lets email clients read it. **Rspamd** blocks spam. The **API** manages everything. **Workers** handle tracking, webhooks, analytics, and more. **MySQL** stores the data, **Redis** caches it, and **Qdrant** powers AI search.
+    **Postfix** sends and receives email. **Dovecot** lets email clients read it. **Rspamd** blocks spam coming in and DKIM-signs mail going out. The **FastAPI gateway** manages everything and serves the webmail. **Workers** handle tracking, webhooks, analytics, archiving, and more; **log_ingestor** turns Postfix's log into queryable email logs. **MySQL** stores the data, **Redis** caches it, **Qdrant** powers AI search, and **S3** holds the encrypted archive.
 
 ---
 
@@ -165,7 +171,7 @@ graph TB
 
 === "I need to call the API"
 
-    The [API Reference](api/index.md) has every endpoint documented. Check the [Code Examples](api/examples/curl.md) for ready-to-use snippets in curl, Python, JavaScript, and PHP.
+    The [API Reference](api/index.md) has every endpoint documented. Check the [Quickstart](api/examples/quickstart.md) for ready-to-use snippets in curl, Python, JavaScript, and PHP.
 
 === "I need to add a feature"
 

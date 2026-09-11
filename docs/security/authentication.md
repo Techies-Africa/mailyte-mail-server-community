@@ -1,88 +1,71 @@
 ---
 title: Authentication
-description: How authentication works in Mailyte — API keys, admin passwords, SMTP SASL auth, and token management.
+description: How authentication works in Mailyte — API keys, operator sessions, SMTP SASL, SMTP API-key credentials, and the Dovecot auth cache.
 ---
 
 # Authentication
 
-Mailyte has three authentication mechanisms for different access patterns.
+Mailyte has several authentication mechanisms for different access patterns: HTTP API credentials, browser sessions, mailbox SASL passwords, and SMTP API-key credentials.
 
 ## API Key Authentication
 
-All API requests require an `X-API-Key` header.
+API requests carry an `X-API-Key` header, validated by `worker/api/utils/auth.py`.
 
 ### How API Keys Work
 
-1. An admin generates a key using the admin password
-2. The API hashes the key with SHA-256 and stores the hash in the `api_keys` table
-3. On each request, the API hashes the provided key and looks up the hash
-4. If found and active, the request proceeds
+1. A key is generated server-side (`secrets.token_urlsafe(32)`) — for example during bootstrap, which returns it exactly once
+2. Only its SHA-256 digest is stored; each request is looked up by the digest of the presented key: `SELECT ... FROM api_keys WHERE key_hash = %s AND active = 1`. `key_id` holds a non-secret display identifier (first 8 characters + row ULID)
+3. If found, active, and not past `expires_at` (expired keys get `401 API key expired`, without a brute-force strike), permissions and organization scope are attached to the request
 
-```bash
-# Generate a key
-curl -X POST http://mail.yourdomain.com:8083/api/v1/admin/api-keys \
-  -H "X-Admin-Password: YOUR_ADMIN_PASSWORD" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "description": "Production API Key",
-    "read_only": false
-  }'
-```
+!!! note "Hash-based verification since 2026-08-30"
+    Before 2026-08-30, `key_id` held the raw key and verification matched on it directly, so a database read yielded usable credentials. Verification now uses `key_hash` only, and migration `0019_api_key_hash_only` redacts the raw values from `key_id`. Until 0019 has run, the auth path keeps a legacy fallback that matches un-migrated rows by `key_id` and backfills their hash; after 0019, raw keys exist nowhere. Keys issued before the change keep working unchanged. If your database may have been exposed **before** 0019 ran, rotate keys — the old rows were readable as credentials.
 
-The response includes the raw API key. **Store it securely — it's only shown once.**
+### Brute-force protection on the API-key check
+
+Invalid-key attempts are rate-limited per source IP: **20 invalid keys per 5 minutes**, with exponential backoff from the 5th failure, returning `429` once blocked. The limiter is checked *before* the key lookup, so a locked-out client gets no free guesses.
 
 ### Key Properties
 
 | Property | Description |
 |----------|-------------|
-| `key_id` | Public identifier (safe to log) |
-| `key_hash` | SHA-256 hash of the key (stored in DB) |
-| `permissions` | JSON array of allowed operations |
-| `organization_id` | Scoped to org (null = global access) |
-| `rate_limit` | Per-key rate limit |
-| `ip_whitelist` | JSON array of allowed IPs |
-| `expires_at` | Optional expiry timestamp |
+| `key_id` | Non-secret display identifier (key prefix + row ULID) |
+| `key_hash` | SHA-256 of the key — the verification value |
+| `permissions` | JSON: `{"read": true, "write": true}`, optionally `read_only`, `admin_access` |
+| `organization_id` | Scoped to an org; platform-scope credentials have none |
+| `active` | Revocation flag — set 0 to kill the key immediately |
 
-### Key Security
+### Scope and roles (ADR-002)
 
-- Keys are hashed before storage — the raw key is never stored
-- Keys can be scoped to a specific organization
-- Keys can be restricted to specific IPs via `ip_whitelist`
-- Keys can have expiry dates
-- Keys can be revoked instantly
+Every route declares a scope, and the two scopes never mix:
 
-```bash
-# Revoke a key
-curl -X DELETE http://mail.yourdomain.com:8083/api/v1/admin/api-keys/KEY_ID \
-  -H "X-Admin-Password: YOUR_ADMIN_PASSWORD"
-```
+- **`organization`** — tenant credentials. Queries are forcibly filtered to the credential's own `organization_id`.
+- **`platform`** — staff. A tenant credential can never reach a platform route regardless of its permission flags. Platform identities (`platform_operators`) carry a role — `support` < `operator` < `admin` < `owner` — and routes gate on the minimum role (e.g. monitoring reads need `support`; service restarts need `operator`).
 
 ### Best Practices
 
 - **Rotate keys regularly** — at least every 90 days
-- **Use scoped keys** — don't give global access unless necessary
-- **Set IP whitelists** — restrict keys to known server IPs
-- **Set expiry dates** — for temporary access
+- **Use org-scoped keys** — don't hand out platform scope
 - **Use separate keys** per application or environment
 - **Never commit keys** to version control
+- **Deactivate unused keys** — `active = 0` takes effect on the next request
 
-## Admin Password Authentication
+## Session Authentication
 
-Admin operations (creating API keys, system-wide settings) require the `X-Admin-Password` header.
+Browser surfaces (dashboard, console, webmail) use session cookies rather than long-lived keys in the client:
 
-```bash
-curl -H "X-Admin-Password: YOUR_ADMIN_PASSWORD" \
-  http://mail.yourdomain.com:8083/api/v1/admin/api-keys
-```
+| Session | Table | Notes |
+|---------|-------|-------|
+| Tenant dashboard | `web_sessions` | Token stored as SHA-256 hash; same downstream context as an API key |
+| Platform operators | `operator_sessions` + `platform_operators` | Individually revocable staff identities with roles — this replaced the old shared `X-Admin-Password` admin surface on the API |
+| Webmail / mailbox | `mailbox_sessions` | Login verified **against Dovecot over IMAP** (not a stored copy of the password), and the session holds the SMTP credential for sending — fixed 2026-08-21 after a stale-password-copy incident. Lifetimes are platform-aware: browsers get 8 h idle / 7 d absolute, native clients that send `X-Client-Platform: ios\|android\|macos\|windows\|linux` get 30 d / 180 d (env-overridable), and each session's idle window is stored on its own row. A mailbox carrying a temporary password gets a session that can only change the password or sign out (`403 password_change_required`). Details: [Mailbox Authentication](../api/mailbox-auth.md) |
 
-The admin password is set via the `ADMIN_PASSWORD` environment variable. It's compared directly (not hashed against a stored value) since it lives only in the environment.
+Passwords for users and mailboxes are bcrypt-hashed (`hash_password` / `verify_password`); legacy SHA-256 hashes are rejected and force a reset. Login checks against a dummy bcrypt hash when the account doesn't exist, so response timing doesn't reveal account existence.
 
-!!! warning "Use a strong admin password"
-    The admin password grants full access to the system. Use at least 32 random characters. Do not reuse it anywhere else.
+Mailbox holders change their own password with `POST /api/v1/mailbox/security/password`: the current password is re-verified against Dovecot (never against the stored hash), the new one must pass the shared 12-character policy, every *other* session of the mailbox is revoked, and Dovecot's auth cache is flushed so IMAP/SMTP honour the change at once. Administrators reset with `POST /api/v1/mailboxes/email-accounts/{id}/reset-password`, optionally as a **temporary** password that forces the holder to choose their own at next sign-in; an admin reset revokes all of the mailbox's sessions.
 
-## SMTP SASL Authentication
+## SMTP SASL Authentication (mailbox passwords)
 
-When users send email through Mailyte (port 587/465), they authenticate via SASL. Dovecot handles the authentication against the MySQL database.
+When users send email through Mailyte (port 587/465), they authenticate via SASL. Postfix hands the check to Dovecot (`smtpd_sasl_type = dovecot`), which queries MySQL.
 
 ### How It Works
 
@@ -96,74 +79,62 @@ sequenceDiagram
     Client->>Postfix: EHLO + STARTTLS
     Postfix->>Client: 250 AUTH PLAIN LOGIN
     Client->>Postfix: AUTH PLAIN (base64 credentials)
-    Postfix->>Dovecot: Verify credentials (SASL)
-    Dovecot->>MySQL: SELECT password FROM email_accounts WHERE email = ?
-    MySQL->>Dovecot: Hashed password
-    Dovecot->>Dovecot: Verify hash
+    Postfix->>Dovecot: Verify credentials (SASL, inet:dovecot:24100)
+    Dovecot->>MySQL: SELECT email, password FROM email_accounts WHERE email='%u' AND status='active'
+    MySQL->>Dovecot: bcrypt hash
+    Dovecot->>Dovecot: Verify (BLF-CRYPT)
     Dovecot->>Postfix: Auth result
     Postfix->>Client: 235 Authentication successful
 ```
 
 ### Password Storage
 
-Passwords are stored as bcrypt hashes in the `email_accounts` table:
+Mailbox passwords are bcrypt hashes (`$2b$...`); Dovecot's passdb uses `default_pass_scheme = BLF-CRYPT`. Only `status = 'active'` accounts can authenticate.
 
-```sql
--- Passwords look like this in the database
--- $2b$12$LJ3m.../... (bcrypt hash)
-SELECT email, password FROM email_accounts WHERE email = 'user@example.com';
+### TLS is mandatory for auth
+
+- Postfix: `smtpd_tls_auth_only = yes` — AUTH is not even offered before TLS
+- Dovecot: `disable_plaintext_auth = yes`, `ssl = required`
+
+Supported SASL mechanisms: `PLAIN` and `LOGIN` (both only ever inside TLS).
+
+### The Dovecot auth cache delays revocation
+
+Dovecot caches successful authentications for **up to 1 hour** (`auth_cache_ttl = 1 hour`; negative results 1 minute). A deleted, suspended, or password-changed mailbox **keeps authenticating from cache** until the TTL expires or the cache is flushed:
+
+```bash
+docker compose exec dovecot doveadm auth cache flush user@domain.com
 ```
 
-Dovecot's `passdb` driver is configured to use the `BLF-CRYPT` scheme (bcrypt).
+A doveadm HTTP API (port 24180, internal network only, keyed by `DOVEADM_API_KEY`) exists for programmatic flushes. SMTP-credential mutations use it automatically, and since 2026-08-30 so do the API's mailbox mutations: password change, status change (suspend/deactivate), and delete — both the `/email-accounts` CRUD routes and the legacy `/mailboxes/edit` / `/mailboxes/delete` paths — flush the cache for the affected address, so revocation bites on the next login attempt. The flush is best-effort: if doveadm is unreachable the mutation still succeeds and the change degrades to the cache-TTL window (logged by the API).
 
-### SASL Mechanisms
+The legacy domain cascade delete (`POST /api/v1/domains/delete`) also flushes each removed mailbox since 2026-08-30. The 1-hour window **still applies** to changes made any other way: direct SQL edits, migration/restore scripts, or anything else that alters credentials outside the API — flush manually in those cases.
 
-Mailyte supports these SASL mechanisms:
+## SMTP API-Key Credentials
 
-| Mechanism | Security | Notes |
-|-----------|----------|-------|
-| PLAIN | Secure over TLS | Most common, works everywhere |
-| LOGIN | Secure over TLS | Legacy, for older clients |
+Live since 2026-08-27 (`/api/v1/smtp-credentials`). Domain-scoped send credentials, distinct from mailbox passwords:
 
-Both require TLS — Postfix rejects PLAIN/LOGIN authentication over unencrypted connections.
-
-## Token-Based Auth (Internal)
-
-Workers and internal services use JWT tokens for service-to-service communication.
-
-### Token Structure
-
-```json
-{
-  "sub": "service:tracking",
-  "iat": 1711360200,
-  "exp": 1711363800,
-  "iss": "mailyte"
-}
-```
-
-Tokens are signed with `ADMIN_TOKEN_SECRET` (HMAC-SHA256). They expire after 1 hour and are refreshed automatically.
-
-### Where Tokens Are Used
-
-- Worker-to-API communication
-- Webhook signing verification
-- Internal health check coordination
+- **Generated server-side**, returned exactly once; stored only as a **bcrypt hash** plus a short display prefix
+- Username shape: `{domain-slug}-smtp-{random}`
+- **Protocol-scoped**: a dedicated Dovecot passdb applies only to `protocol smtp` — these credentials cannot log in to IMAP/POP3
+- May send as **any address at their domain** (they're wired into `smtpd_sender_login_maps`)
+- `active`, `expires_at`, and `allowed_ips` are enforced inside the Dovecot passdb query itself
+- Every auth-affecting mutation (revoke, rotate, update, delete) **flushes Dovecot's auth cache** for that username via the doveadm API — verified live that without the flush a revoked key keeps working for up to an hour
+- Per-key usage and event history: `/api/v1/smtp-credentials/{id}/events` and `/{id}/usage`
+- `AUTO_SUSPEND_ENABLED` (automatic suspension of abusive keys by `log_ingestor`) exists but is **off by default**
 
 ## Authentication Failures
 
 ### API
 
 - Missing key: `401 Unauthorized`
-- Invalid key: `401 Unauthorized`
-- Expired key: `401 Unauthorized`
-- IP not whitelisted: `403 Forbidden`
-- Rate limited: `429 Too Many Requests`
+- Invalid key: `401 Unauthorized` (and counts toward the per-IP attempt limit)
+- Too many invalid attempts: `429 Too Many Requests`
+- Insufficient permission/scope/role: `403 Forbidden`
 
-### SMTP
+### SMTP / IMAP
 
-- Wrong password: `535 5.7.8 Authentication credentials invalid`
-- Account suspended: `535 5.7.8 Account suspended`
-- TLS required: `530 5.7.0 Must issue a STARTTLS command first`
+- Wrong password: `535 5.7.8` (SMTP) / `NO [AUTHENTICATIONFAILED]` (IMAP)
+- TLS required: AUTH is simply not offered on plaintext connections
 
-Failed SMTP auth attempts are logged and tracked by Fail2ban. After 5 failures from the same IP within 10 minutes, the IP is banned for 1 hour. See [Intrusion Detection](intrusion-detection.md).
+Failed SMTP/IMAP auth attempts are recorded in the `failed_auth_attempts` table and fed to the **Dovecot auth-policy server**, which applies progressive delays (2s → 32s) and blocks repeat-offender IPs — see [Intrusion Detection](intrusion-detection.md). Fail2ban is *not* part of the deployed stack.

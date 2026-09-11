@@ -43,6 +43,35 @@ try:
 except ImportError:
     _dispatcher_available = False
 
+
+# Postfix's spawn(8) daemon (this script's invoker -- see master.cf's
+# policy-ip-access service) hands the external command it execs a
+# hardcoded minimal environment (LANG, MAIL_CONFIG, PATH, LC_CTYPE),
+# regardless of main.cf's import_environment setting -- confirmed live by
+# dumping os.environ as Postfix actually invoked this script. Real values
+# come from entrypoint.sh's runtime.env instead (written from the
+# container's actual environment at startup, before Postfix ever execs
+# this). setdefault, not overwrite: never clobber a real env var if one
+# somehow is present.
+def _load_runtime_env(path="/etc/postfix/runtime.env"):
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key, value = key.strip(), value.strip()
+                # Skip blank values -- see tracking_injector.py's
+                # identical loader for why (present-but-empty vs missing).
+                if value:
+                    os.environ.setdefault(key, value)
+    except OSError:
+        pass
+
+
+_load_runtime_env()
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",

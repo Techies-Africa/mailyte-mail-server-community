@@ -13,13 +13,16 @@ The service provides reliable data persistence with proper error handling
 and connection management for high-availability operations.
 """
 
+import json
 import logging
+import time
 from datetime import datetime, timedelta
 from typing import Any
 
 from mysql.connector import pooling
 
 from config import config
+from shared.ulid_utils import generate_ulid
 
 logger = logging.getLogger(__name__)
 
@@ -145,76 +148,100 @@ class RateLimitDatabaseService:
         entity_type: str,
         identifier: str,
         direction: str,
-        period: str,
-        timestamp: datetime,
         count: int,
+        timestamp: datetime = None,
     ) -> bool:
         """
-        Store usage data in the database using the new organization structure.
+        Append a usage_history row for this increment.
+
+        The real usage_history table (confirmed via DESCRIBE, 2026-08-08) is
+        append-only history, not a mutable counter: no entity_type/
+        identifier/direction/minute_key/usage_count/updated_at columns at
+        all -- it has usage_type (enum 'rate_limit'|'storage_quota', shared
+        with the separate storage-quota subsystem -- NOT a period name),
+        organization_id/domain_id/email_account_id FKs, hour_key/day_key/
+        month_key string period keys, and a JSON usage_data blob. There's
+        also no unique key to upsert against, consistent with "append a
+        row, SUM at read time" rather than "increment one row per bucket".
+        entity_type/identifier/direction are carried inside usage_data
+        instead, matching what get_usage_data/get_current_usage_stats below
+        now read back out.
+
+        This method's previous body inserted into columns that don't exist
+        on this table at all -- it has never once successfully written a
+        row (confirmed: 0 rows in usage_history before this fix, in an
+        environment where this method is called on every cache-backed
+        increment).
+
+        domain_id/email_account_id are left NULL, not resolved and
+        populated: the real columns are plain `int` (confirmed via
+        DESCRIBE), while `domains.id`/`email_accounts.id` are ULID
+        char(26) strings elsewhere in this same database -- the ORM model
+        for this table (database/models/alerts.py) claims String(26) FKs,
+        which doesn't match the live column type either. There is no
+        numeric id to put there without a second, different lookup this
+        fix has no mandate to invent; organization_id (real char(26),
+        correctly populated) plus identifier inside usage_data already
+        carries everything needed to scope a row to one entity.
 
         Args:
             entity_type: 'organization', 'domain', or 'mailbox'
             identifier: Entity identifier (org_id, domain, or email)
             direction: 'inbound' or 'outbound'
-            period: Time period ('hourly', 'daily', 'monthly')
-            timestamp: Usage timestamp
-            count: Usage count
+            count: Usage count to record for this increment
+            timestamp: When this usage occurred (defaults to now)
 
         Returns:
             bool: True if successful
         """
+        if not self.db_pool:
+            return False
+
+        ts = timestamp or datetime.now()
+
         try:
             conn = self.db_pool.get_connection()
             cursor = conn.cursor()
 
-            # Get organization_id and additional identifiers
-            org_id, domain_id, email_account_id = self._resolve_identifiers(
+            org_id, _domain_id, _email_account_id = self._resolve_identifiers(
                 entity_type, identifier, cursor
             )
-
-            # Generate time-based keys
-            time_key = self._generate_time_key(timestamp, period)
-
-            # Insert or update usage record
-            query = """
-                INSERT INTO usage_history 
-                (organization_id, domain_id, email_account_id, entity_type, identifier, 
-                 direction, usage_type, day_key, hour_key, minute_key, usage_count, 
-                 created_at, updated_at)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
-                ON DUPLICATE KEY UPDATE
-                    usage_count = usage_count + VALUES(usage_count),
-                    updated_at = NOW()
-            """
-
-            # Generate different time keys
-            day_key = timestamp.strftime("%Y-%m-%d")
-            hour_key = timestamp.strftime("%Y-%m-%d %H:00:00")
-            minute_key = timestamp.strftime("%Y-%m-%d %H:%M:00")
+            if not org_id:
+                logger.warning(
+                    f"Could not resolve organization for {entity_type}:{identifier}, "
+                    "skipping usage_history write"
+                )
+                cursor.close()
+                conn.close()
+                return False
 
             cursor.execute(
-                query,
+                "INSERT INTO usage_history "
+                "(id, usage_type, organization_id, hour_key, day_key, month_key, "
+                "usage_data, recorded_at) "
+                "VALUES (%s, 'rate_limit', %s, %s, %s, %s, %s, %s)",
                 (
+                    generate_ulid(),
                     org_id,
-                    domain_id,
-                    email_account_id,
-                    entity_type,
-                    identifier,
-                    direction,
-                    period,
-                    day_key,
-                    hour_key,
-                    minute_key,
-                    count,
+                    ts.strftime("%Y-%m-%d-%H"),
+                    ts.strftime("%Y-%m-%d"),
+                    ts.strftime("%Y-%m"),
+                    json.dumps(
+                        {
+                            "entity_type": entity_type,
+                            "identifier": identifier,
+                            "direction": direction,
+                            "count": count,
+                        }
+                    ),
+                    ts,
                 ),
             )
-
+            conn.commit()
             cursor.close()
             conn.close()
 
-            logger.debug(
-                f"Stored usage data: {entity_type}:{identifier}:{direction}:{period} = {count}"
-            )
+            logger.debug(f"Stored usage data: {entity_type}:{identifier}:{direction} = {count}")
             return True
 
         except Exception as e:
@@ -282,36 +309,43 @@ class RateLimitDatabaseService:
         Returns:
             List of usage data records
         """
+        if not self.db_pool:
+            return []
+
+        # period selects which real period-key column to range on; all
+        # three are populated on every row regardless of period (see
+        # store_usage_data), entity_type/identifier/direction live inside
+        # usage_data (no such columns on the real table -- see
+        # store_usage_data's docstring for why).
+        key_column = {"hourly": "hour_key", "daily": "day_key", "monthly": "month_key"}.get(
+            period, "hour_key"
+        )
+        key_format = {
+            "hour_key": "%Y-%m-%d-%H",
+            "day_key": "%Y-%m-%d",
+            "month_key": "%Y-%m",
+        }[key_column]
+
         try:
             conn = self.db_pool.get_connection()
             cursor = conn.cursor(dictionary=True)
 
-            # Build query based on entity type
-            where_conditions = []
-            params = []
-
-            if entity_type == "organization":
-                where_conditions.append("organization_id = %s")
-                params.append(identifier)
-            elif entity_type == "domain":
-                where_conditions.append("entity_type = 'domain' AND identifier = %s")
-                params.append(identifier)
-            elif entity_type == "mailbox":
-                where_conditions.append("entity_type = 'mailbox' AND identifier = %s")
-                params.append(identifier)
-
-            where_conditions.extend(
-                ["direction = %s", "usage_type = %s", "created_at >= %s", "created_at <= %s"]
+            cursor.execute(
+                f"SELECT usage_data, recorded_at FROM usage_history "
+                f"WHERE usage_type = 'rate_limit' "
+                f"AND JSON_UNQUOTE(JSON_EXTRACT(usage_data, '$.entity_type')) = %s "
+                f"AND JSON_UNQUOTE(JSON_EXTRACT(usage_data, '$.identifier')) = %s "
+                f"AND JSON_UNQUOTE(JSON_EXTRACT(usage_data, '$.direction')) = %s "
+                f"AND {key_column} >= %s AND {key_column} <= %s "
+                f"ORDER BY recorded_at ASC",
+                (
+                    entity_type,
+                    identifier,
+                    direction,
+                    start_time.strftime(key_format),
+                    end_time.strftime(key_format),
+                ),
             )
-            params.extend([direction, period, start_time, end_time])
-
-            query = f"""
-                SELECT * FROM usage_history 
-                WHERE {" AND ".join(where_conditions)}
-                ORDER BY created_at ASC
-            """
-
-            cursor.execute(query, params)
             results = cursor.fetchall()
 
             cursor.close()
@@ -337,16 +371,20 @@ class RateLimitDatabaseService:
         Returns:
             Dictionary with current usage counts
         """
+        if not self.db_pool:
+            return {
+                "second_count": 0,
+                "minute_count": 0,
+                "hourly_count": 0,
+                "daily_count": 0,
+                "monthly_count": 0,
+            }
+
         try:
             conn = self.db_pool.get_connection()
             cursor = conn.cursor(dictionary=True)
 
             now = datetime.now()
-            current_hour = now.replace(minute=0, second=0, microsecond=0)
-            current_day = now.replace(hour=0, minute=0, second=0, microsecond=0)
-            current_month = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-            current_minute = now.replace(second=0, microsecond=0)
-            current_second = now.replace(microsecond=0)
 
             stats = {
                 "second_count": 0,
@@ -356,58 +394,32 @@ class RateLimitDatabaseService:
                 "monthly_count": 0,
             }
 
-            # Build base query conditions
-            where_conditions = []
-            params = []
-
-            if entity_type == "organization":
-                where_conditions.append("organization_id = %s")
-                params.append(identifier)
-            elif entity_type == "domain":
-                where_conditions.append("entity_type = 'domain' AND identifier = %s")
-                params.append(identifier)
-            elif entity_type == "mailbox":
-                where_conditions.append("entity_type = 'mailbox' AND identifier = %s")
-                params.append(identifier)
-
-            where_conditions.append("direction = %s")
-            params.append(direction)
-
-            # Get hourly count
-            hourly_params = params + [current_hour]
-            hourly_query = f"""
-                SELECT COALESCE(SUM(usage_count), 0) as count
-                FROM usage_history 
-                WHERE {" AND ".join(where_conditions)} 
-                AND usage_type = 'hourly' AND hour_key >= %s
-            """
-            cursor.execute(hourly_query, hourly_params)
-            result = cursor.fetchone()
-            stats["hourly_count"] = result["count"] if result else 0
-
-            # Get daily count
-            daily_params = params + [current_day]
-            daily_query = f"""
-                SELECT COALESCE(SUM(usage_count), 0) as count
-                FROM usage_history 
-                WHERE {" AND ".join(where_conditions)} 
-                AND usage_type = 'daily' AND day_key >= %s
-            """
-            cursor.execute(daily_query, daily_params)
-            result = cursor.fetchone()
-            stats["daily_count"] = result["count"] if result else 0
-
-            # Get monthly count
-            monthly_params = params + [current_month]
-            monthly_query = f"""
-                SELECT COALESCE(SUM(usage_count), 0) as count
-                FROM usage_history 
-                WHERE {" AND ".join(where_conditions)} 
-                AND usage_type = 'monthly' AND created_at >= %s
-            """
-            cursor.execute(monthly_query, monthly_params)
-            result = cursor.fetchone()
-            stats["monthly_count"] = result["count"] if result else 0
+            # second/minute granularity isn't representable in usage_history
+            # at all -- there's no such key column, only hour/day/month --
+            # Redis is the only real second/minute counter (see
+            # delivery_optimizer's send_burst-style keys for the established
+            # pattern elsewhere in this codebase). This DB fallback can only
+            # ever answer hourly/daily/monthly, left at 0 above.
+            #
+            # entity_type/identifier/direction live inside usage_data (JSON),
+            # not as real columns -- see store_usage_data's docstring.
+            for count_key, key_column, key_value in (
+                ("hourly_count", "hour_key", now.strftime("%Y-%m-%d-%H")),
+                ("daily_count", "day_key", now.strftime("%Y-%m-%d")),
+                ("monthly_count", "month_key", now.strftime("%Y-%m")),
+            ):
+                cursor.execute(
+                    f"SELECT COALESCE(SUM(CAST(JSON_EXTRACT(usage_data, '$.count') AS UNSIGNED)), 0) as total "
+                    f"FROM usage_history "
+                    f"WHERE usage_type = 'rate_limit' "
+                    f"AND JSON_UNQUOTE(JSON_EXTRACT(usage_data, '$.entity_type')) = %s "
+                    f"AND JSON_UNQUOTE(JSON_EXTRACT(usage_data, '$.identifier')) = %s "
+                    f"AND JSON_UNQUOTE(JSON_EXTRACT(usage_data, '$.direction')) = %s "
+                    f"AND {key_column} = %s",
+                    (entity_type, identifier, direction, key_value),
+                )
+                result = cursor.fetchone()
+                stats[count_key] = int(result["total"]) if result and result["total"] else 0
 
             cursor.close()
             conn.close()
@@ -424,31 +436,18 @@ class RateLimitDatabaseService:
                 "monthly_count": 0,
             }
 
-    def _generate_time_key(self, timestamp: datetime, period: str) -> str:
-        """
-        Generate a time key based on the specified period.
-
-        Args:
-            timestamp: The datetime object.
-            period: 'hourly', 'daily', or 'monthly'.
-
-        Returns:
-            str: A formatted time key.
-        """
-        if period == "hourly":
-            return timestamp.strftime("%Y-%m-%d %H:00:00")
-        elif period == "daily":
-            return timestamp.strftime("%Y-%m-%d")
-        elif period == "monthly":
-            return timestamp.strftime("%Y-%m-01")  # Consistent for the whole month
-        else:
-            raise ValueError("Invalid period. Must be 'hourly', 'daily', or 'monthly'.")
-
     def increment_usage_data(
         self, entity_type: str, identifier: str, direction: str, amount: int = 1
     ) -> dict[str, int]:
         """
         Increment usage counters in database (fallback when Redis unavailable).
+
+        Previously targeted `rate_limit_usage`, a table that doesn't exist
+        anywhere in this database -- every call threw and was swallowed by
+        the except below. Reuses store_usage_data (append) +
+        get_current_usage_stats (SUM at read time) against the real
+        usage_history table instead of duplicating a second, separate
+        broken write path.
 
         Args:
             entity_type: 'organization', 'domain', or 'mailbox'
@@ -460,45 +459,8 @@ class RateLimitDatabaseService:
             Dict containing updated usage counts
         """
         try:
-            now = datetime.now()
-            hour_key = now.strftime("%Y-%m-%d-%H")
-            day_key = now.strftime("%Y-%m-%d")
-            month_key = now.strftime("%Y-%m")
-
-            # Use INSERT ... ON DUPLICATE KEY UPDATE for atomic increment
-            query = """
-                INSERT INTO rate_limit_usage 
-                (type, identifier, direction, hour_key, day_key, month_key, 
-                 hourly_count, daily_count, monthly_count, first_request, last_request)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON DUPLICATE KEY UPDATE
-                hourly_count = hourly_count + VALUES(hourly_count),
-                daily_count = daily_count + VALUES(daily_count),
-                monthly_count = monthly_count + VALUES(monthly_count),
-                last_request = VALUES(last_request),
-                last_updated = CURRENT_TIMESTAMP
-            """
-
-            params = (
-                entity_type,
-                identifier,
-                direction,
-                hour_key,
-                day_key,
-                month_key,
-                amount,
-                amount,
-                amount,
-                now,
-                now,
-            )
-
-            self._execute_query(query, params)
-
-            # Get updated counts
-            return self.get_usage_data(
-                entity_type, identifier, direction, "hourly", now - timedelta(hours=1), now
-            )
+            self.store_usage_data(entity_type, identifier, direction, amount)
+            return self.get_current_usage_stats(entity_type, identifier, direction)
 
         except Exception as e:
             logger.error(f"Error incrementing usage data: {e}")
@@ -517,23 +479,36 @@ class RateLimitDatabaseService:
             days: Number of days of history to retrieve
 
         Returns:
-            List of usage records with timestamps
+            List of usage records with timestamps. `daily_count` per record
+            is that one record's own increment amount, not a pre-summed
+            daily total -- callers (get_usage_trends) already sum these
+            themselves grouped by day_key, which is what this now supports.
         """
         try:
             cutoff_date = datetime.now() - timedelta(days=days)
 
-            query = """
-                SELECT hour_key, day_key, month_key, hourly_count, daily_count, 
-                       monthly_count, first_request, last_request, last_updated
-                FROM rate_limit_usage
-                WHERE type = %s AND identifier = %s AND direction = %s
-                  AND STR_TO_DATE(day_key, '%Y-%m-%d') >= %s
-                ORDER BY day_key DESC, hour_key DESC
-                LIMIT 1000
-            """
-
+            # rate_limit_usage doesn't exist (confirmed via DESCRIBE) --
+            # every call threw before reaching a single row. usage_history
+            # is one row per increment (see store_usage_data), not one row
+            # per day with a pre-aggregated count, so day_key >= cutoff on
+            # the real string-keyed column replaces the old STR_TO_DATE
+            # comparison against a datetime column that also doesn't exist.
             results = self._execute_query(
-                query,
+                "SELECT hour_key, day_key, month_key, recorded_at, "
+                # CAST ... AS UNSIGNED, not a bare JSON_EXTRACT -- otherwise
+                # this comes back as a string, and get_usage_trends'
+                # `daily_totals[day] += record["daily_count"]` silently
+                # concatenates instead of summing (confirmed live: '5' + '3'
+                # is not 8 in Python).
+                "CAST(JSON_EXTRACT(usage_data, '$.count') AS UNSIGNED) as daily_count "
+                "FROM usage_history "
+                "WHERE usage_type = 'rate_limit' "
+                "AND JSON_UNQUOTE(JSON_EXTRACT(usage_data, '$.entity_type')) = %s "
+                "AND JSON_UNQUOTE(JSON_EXTRACT(usage_data, '$.identifier')) = %s "
+                "AND JSON_UNQUOTE(JSON_EXTRACT(usage_data, '$.direction')) = %s "
+                "AND day_key >= %s "
+                "ORDER BY day_key DESC, hour_key DESC "
+                "LIMIT 1000",
                 (entity_type, identifier, direction, cutoff_date.strftime("%Y-%m-%d")),
                 fetch_all=True,
             )
@@ -562,10 +537,14 @@ class RateLimitDatabaseService:
             cutoff_date = datetime.now() - timedelta(days=retention_days)
             cutoff_str = cutoff_date.strftime("%Y-%m-%d")
 
-            # Delete old usage records
+            # rate_limit_usage doesn't exist -- this ran on every scheduled
+            # cleanup cycle (app.py's _run_cleanup_service) and always threw,
+            # caught here and logged as "0 cleaned up" rather than a visible
+            # failure. Scoped to usage_type='rate_limit' specifically so this
+            # never touches the separate storage_quota rows sharing the table.
             query = """
-                DELETE FROM rate_limit_usage 
-                WHERE STR_TO_DATE(day_key, '%Y-%m-%d') < %s
+                DELETE FROM usage_history
+                WHERE usage_type = 'rate_limit' AND day_key < %s
             """
 
             deleted_count = self._execute_query(query, (cutoff_str,))
@@ -597,33 +576,43 @@ class RateLimitDatabaseService:
 
         Returns:
             List of entities with their usage counts
+
+        No caller anywhere in this codebase currently reaches this method,
+        but fixed alongside its siblings for consistency: rate_limit_usage
+        doesn't exist, and usage_history has no per-entity running total to
+        sort by -- aggregates raw increments grouped by identifier instead.
         """
         try:
-            # Map window to column and time filter
-            column_map = {
-                "hourly": "hourly_count",
-                "daily": "daily_count",
-                "monthly": "monthly_count",
-            }
-
-            if window not in column_map:
+            key_column = {"hourly": "hour_key", "daily": "day_key", "monthly": "month_key"}.get(
+                window
+            )
+            if not key_column:
                 logger.error(f"Invalid window: {window}")
                 return []
 
-            count_column = column_map[window]
+            key_format = {
+                "hour_key": "%Y-%m-%d-%H",
+                "day_key": "%Y-%m-%d",
+                "month_key": "%Y-%m",
+            }[key_column]
+            current_key = datetime.now().strftime(key_format)
 
-            # Query top entities by usage
-            query = f"""
-                SELECT identifier, {count_column} as usage_count, 
-                       last_request, last_updated
-                FROM rate_limit_usage
-                WHERE type = %s AND direction = %s 
-                  AND {count_column} > 0
-                ORDER BY {count_column} DESC
-                LIMIT %s
-            """
-
-            results = self._execute_query(query, (entity_type, direction, limit), fetch_all=True)
+            results = self._execute_query(
+                f"SELECT JSON_UNQUOTE(JSON_EXTRACT(usage_data, '$.identifier')) as identifier, "
+                f"SUM(CAST(JSON_EXTRACT(usage_data, '$.count') AS UNSIGNED)) as usage_count, "
+                f"MAX(recorded_at) as last_request "
+                f"FROM usage_history "
+                f"WHERE usage_type = 'rate_limit' "
+                f"AND JSON_UNQUOTE(JSON_EXTRACT(usage_data, '$.entity_type')) = %s "
+                f"AND JSON_UNQUOTE(JSON_EXTRACT(usage_data, '$.direction')) = %s "
+                f"AND {key_column} = %s "
+                f"GROUP BY identifier "
+                f"HAVING usage_count > 0 "
+                f"ORDER BY usage_count DESC "
+                f"LIMIT %s",
+                (entity_type, direction, current_key, limit),
+                fetch_all=True,
+            )
 
             if results:
                 logger.debug(f"Retrieved top {len(results)} entities by {window} usage")
@@ -659,35 +648,48 @@ class RateLimitDatabaseService:
 
         Returns:
             bool: True if successful, False otherwise
+
+        The real rate_limit_alerts table (confirmed via DESCRIBE) is
+        `id, organization_id, entity_type, identifier, window, usage_pct,
+        alert_level, created_at` -- no direction/current_usage/limit_value/
+        window_type/webhook_sent columns exist at all. This previously
+        inserted into columns that don't exist, throwing on every call --
+        a real problem since alert_service.py's background threshold
+        monitor (a real, always-running caller, not a dead code path)
+        calls this on every warning/critical/exceeded breach. direction/
+        current_usage/limit_value have nowhere to persist on this schema
+        and are dropped from the write (still visible in the log line
+        below); get_pending_webhook_alerts/update_webhook_alert_status
+        further down assume webhook-delivery-tracking columns that were
+        never added to this table either, and have no caller anywhere --
+        left as-is rather than guessing a schema this fix has no mandate
+        to change.
         """
         try:
             usage_percentage = (current_usage / limit_value * 100) if limit_value > 0 else 0
-
-            query = """
-                INSERT INTO rate_limit_alerts 
-                (type, identifier, direction, alert_level, current_usage, 
-                 limit_value, usage_percentage, window_type, webhook_sent)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """
-
-            params = (
-                entity_type,
-                identifier,
-                direction,
-                alert_level,
-                current_usage,
-                limit_value,
-                usage_percentage,
-                window_type,
-                False,
+            window = {"hourly": "hour", "daily": "day", "monthly": "month"}.get(
+                window_type, window_type
             )
+            organization_id = self._resolve_organization_id(entity_type, identifier)
 
-            result = self._execute_query(query, params)
+            result = self._execute_query(
+                "INSERT INTO rate_limit_alerts "
+                "(organization_id, entity_type, identifier, `window`, usage_pct, alert_level) "
+                "VALUES (%s, %s, %s, %s, %s, %s)",
+                (
+                    organization_id,
+                    entity_type,
+                    identifier,
+                    window,
+                    round(usage_percentage, 2),
+                    alert_level,
+                ),
+            )
 
             if result is not None:
                 logger.info(
                     f"Created {alert_level} alert for {entity_type}:{identifier} "
-                    f"({current_usage}/{limit_value} = {usage_percentage:.1f}%)"
+                    f"({current_usage}/{limit_value} = {usage_percentage:.1f}%, direction={direction})"
                 )
                 return True
             else:
@@ -696,6 +698,28 @@ class RateLimitDatabaseService:
         except Exception as e:
             logger.error(f"Error creating alert record: {e}")
             return False
+
+    def _resolve_organization_id(self, entity_type: str, identifier: str) -> str | None:
+        """Resolve just the organization_id for an entity, without the
+        domain_id/email_account_id _resolve_identifiers also looks up --
+        used by callers (create_alert_record) that only need the org."""
+        if entity_type == "organization":
+            return identifier
+        if entity_type == "domain":
+            row = self._execute_query(
+                "SELECT organization_id FROM domains WHERE domain = %s",
+                (identifier,),
+                fetch_one=True,
+            )
+        elif entity_type == "mailbox":
+            row = self._execute_query(
+                "SELECT organization_id FROM email_accounts WHERE email = %s",
+                (identifier,),
+                fetch_one=True,
+            )
+        else:
+            row = None
+        return row["organization_id"] if row else None
 
     def get_pending_webhook_alerts(self, limit: int = 100) -> list[dict[str, Any]]:
         """

@@ -28,6 +28,13 @@ from config import config_manager
 
 logger = logging.getLogger(__name__)
 
+# The API routes a recipient's client actually hits. Overridable because a
+# self-hoster may mount the API elsewhere, but these defaults match what
+# worker/api/routes/tracking.py serves today.
+TRACKING_PIXEL_PATH = os.getenv("TRACKING_PIXEL_PATH", "/api/v1/tracking/pixel")
+TRACKING_CLICK_PATH = os.getenv("TRACKING_CLICK_PATH", "/api/v1/tracking/click")
+TRACKING_UNSUBSCRIBE_PATH = os.getenv("TRACKING_UNSUBSCRIBE_PATH", "/api/v1/tracking/unsubscribe")
+
 
 class TrackingService:
     """
@@ -85,7 +92,7 @@ class TrackingService:
         )
         protocol = tracking_config.get("tracking_protocol", os.getenv("TRACKING_PROTOCOL", "https"))
 
-        return f"{protocol}://{subdomain}.{domain}/track/open/{tracking_id}"
+        return f"{config_manager.get_tracking_url_base()}{TRACKING_PIXEL_PATH}/{tracking_id}"
 
     def create_click_tracking_url(
         self, original_url: str, tracking_id: str, organization_id: str
@@ -111,7 +118,7 @@ class TrackingService:
         protocol = tracking_config.get("tracking_protocol", os.getenv("TRACKING_PROTOCOL", "https"))
 
         encoded_url = quote(original_url, safe="")
-        return f"{protocol}://{subdomain}.{domain}/track/click/{tracking_id}?url={encoded_url}"
+        return f"{config_manager.get_tracking_url_base()}{TRACKING_CLICK_PATH}/{tracking_id}?url={encoded_url}"
 
     def inject_tracking_into_html(self, html_content: str, tracking_data: dict[str, Any]) -> str:
         """
@@ -346,7 +353,12 @@ class TrackingService:
             return None
 
     def create_tracking_pixel_url(
-        self, email_id: str, recipient: str, tenant_id: str, domain_id: str
+        self,
+        email_id: str,
+        recipient: str,
+        tenant_id: str,
+        domain_id: str,
+        tracking_id: str | None = None,
     ) -> str:
         """
         Create a tracking pixel URL for open tracking.
@@ -356,13 +368,43 @@ class TrackingService:
             recipient: Email address of the recipient
             tenant_id: Tenant/organization identifier
             domain_id: Domain identifier
+            tracking_id: Reuse an already-generated id instead of minting a
+                fresh one. Every generate_tracking_id() call embeds a new
+                timestamp+nonce, so a caller that needs the pixel and the
+                unsubscribe link to share ONE id (inject reports both) must
+                generate once and pass it here.
 
         Returns:
             str: Complete URL for the tracking pixel
         """
-        tracking_id = self.generate_tracking_id(email_id, recipient, tenant_id, domain_id)
+        if tracking_id is None:
+            tracking_id = self.generate_tracking_id(email_id, recipient, tenant_id, domain_id)
         base_url = config_manager.get_tracking_url_base()
-        return f"{base_url}/track/open/{tracking_id}"
+        # /api/v1/tracking/pixel/, not /track/open/. The latter is served
+        # nowhere: verified live against the running service, /open/{id}
+        # returns 200 and /track/open/{id} returns 404, and the host these
+        # URLs are handed to is the API (behind Traefik), whose real route is
+        # /api/v1/tracking/pixel/{id}. Every injected pixel pointed at a path
+        # that did not exist, on a host that did not resolve.
+        return f"{base_url}{TRACKING_PIXEL_PATH}/{tracking_id}"
+
+    def create_unsubscribe_url(self, tracking_id: str) -> str:
+        """
+        Create the recipient-facing unsubscribe URL for a tracking id.
+
+        Deliberately takes the id instead of the email metadata: the caller
+        passes the SAME id the open pixel carries, so an unsubscribe can be
+        attributed to the exact send (decode_tracking_id recovers email_id,
+        recipient, tenant and domain from it on the POST).
+
+        Args:
+            tracking_id: The signed tracking id already generated for this send
+
+        Returns:
+            str: Complete unsubscribe confirmation-page URL
+        """
+        base_url = config_manager.get_tracking_url_base()
+        return f"{base_url}{TRACKING_UNSUBSCRIBE_PATH}/{tracking_id}"
 
     def create_click_tracking_url(
         self, original_url: str, email_id: str, recipient: str, tenant_id: str, domain_id: str
@@ -389,7 +431,7 @@ class TrackingService:
         # Safely encode the original URL
         encoded_url = quote(original_url, safe="")
 
-        tracking_url = f"{base_url}/track/click/{tracking_id}?url={encoded_url}"
+        tracking_url = f"{base_url}{TRACKING_CLICK_PATH}/{tracking_id}?url={encoded_url}"
 
         # Preserve UTM parameters if configured
         if self.config.preserve_utm_params:
@@ -523,7 +565,12 @@ class TrackingService:
         """
         try:
             # Get tenant-specific config from config manager
-            tenant_config = config_manager.get_tenant_tracking_config(tenant_id, domain_id)
+            # get_ORGANIZATION_tracking_config -- the method was renamed in the
+            # tenant->organization migration and this call site was not. It
+            # raised AttributeError on every message, was swallowed by the
+            # except below, and silently forced the defaults, so a
+            # per-organization "tracking off" setting could never apply.
+            tenant_config = config_manager.get_organization_tracking_config(tenant_id, domain_id)
 
             # Provide sensible defaults if tenant config is not found
             default_config = {

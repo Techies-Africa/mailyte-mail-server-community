@@ -35,22 +35,24 @@ What you need before deploying Mailyte — hardware, software, and network.
 
 ## Memory Breakdown by Service
 
-Each service has its own memory needs. Here's where the RAM goes:
+The stack is ~30 containers. `docker-compose.prod.yml` caps each one; the big consumers:
 
-| Service | Minimum | Recommended | Notes |
-|---------|---------|-------------|-------|
-| Postfix | 256 MB | 512 MB | Scales with queue size |
-| Dovecot | 256 MB | 512 MB | Scales with active connections |
-| Rspamd | 512 MB | 1 GB | Needs memory for spam rules |
-| MySQL | 512 MB | 2 GB | Buffer pool is the big one |
-| Redis | 128 MB | 512 MB | Depends on cache/queue size |
-| FastAPI | 256 MB | 512 MB | Scales with worker count |
-| Workers | 256 MB | 512 MB | Per worker process |
-| Health Monitor | 64 MB | 128 MB | Lightweight |
-| Prometheus | 256 MB | 1 GB | Scales with metrics count and retention |
-| Grafana | 128 MB | 256 MB | Mostly idle |
+| Service | Production limit | Notes |
+|---------|-----------------|-------|
+| MySQL | 2 GB | Buffer pool is the big one |
+| Postfix | 1 GB | Scales with queue size |
+| Dovecot | 1 GB | Scales with active connections |
+| Rspamd | 1 GB | Needs memory for spam rules |
+| Kafka | 1 GB | Plus Zookeeper at 512 MB |
+| Qdrant | 1 GB | Vector store for RAG search |
+| Prometheus | 1 GB | Scales with retention |
+| api | 512 MB | x2 replicas in production |
+| webhooks / tracking | 512 MB | x2 replicas each in production |
+| Redis, Grafana, monitoring | 512 MB | Each |
+| Other workers (~15 services) | 256-512 MB | Each |
+| Traefik | 256 MB | Reverse proxy |
 
-**Total:** 2.6 GB minimum, 6.4 GB recommended.
+The limits sum to well over the recommended 8 GB, but services do not all hit their caps simultaneously -- 8 GB runs the full stack comfortably at moderate volume. 4 GB works for development if you start only the essential services (`./start.sh` option 2).
 
 ## Software Requirements
 
@@ -68,7 +70,7 @@ Each service has its own memory needs. Here's where the RAM goes:
 | Component | Minimum Version |
 |-----------|----------------|
 | Docker Engine | 24.0+ |
-| Docker Compose | v2.20+ |
+| Docker Compose | v2.24+ (the override files use the `!override` / `!reset` YAML tags) |
 
 ```bash
 # Check your versions
@@ -98,8 +100,8 @@ These aren't required but make life easier:
 | `curl` | Test endpoints |
 | `htop` | Monitor system resources |
 | `nc` (netcat) | Test port connectivity |
-| `openssl` | TLS certificate management |
-| `certbot` | Let's Encrypt certificates |
+| `openssl` | Secret generation, TLS inspection |
+| `age` + `aws` CLI | Encrypted offsite backups (`scripts/backup.sh`) |
 
 ## Network Requirements
 
@@ -111,17 +113,16 @@ These ports need to be open (inbound):
 |------|----------|---------|----------|
 | 25 | TCP | SMTP (mail delivery) | Yes |
 | 587 | TCP | SMTP (submission) | Yes |
-| 465 | TCP | SMTPS (implicit TLS) | Optional |
+| 465 | TCP | SMTPS (implicit TLS) | Yes |
 | 993 | TCP | IMAPS | Yes |
 | 143 | TCP | IMAP (STARTTLS) | Optional |
 | 995 | TCP | POP3S | Optional |
 | 110 | TCP | POP3 (STARTTLS) | Optional |
-| 5000 | TCP | API | Yes (internal or proxied) |
-| 8080 | TCP | Health Monitor | Internal only |
-| 80 | TCP | HTTP (cert renewal) | If using Let's Encrypt |
-| 443 | TCP | HTTPS (API proxy) | If using reverse proxy |
+| 4190 | TCP | ManageSieve | Optional |
+| 80 | TCP | Traefik (HTTP, ACME HTTP-01 + redirect) | Yes |
+| 443 | TCP | Traefik (HTTPS -- API, webmail, console, docs, Grafana) | Yes |
 
-> **Warning:** Never expose ports `8080` (health monitor), `9090` (Prometheus), or `3000` (Grafana) to the public internet without authentication.
+> **Warning:** In production, every internal service port -- the API's 8083, Prometheus's 9090, Grafana's 3000, the worker ports 8081-8104, and the rest -- is bound to `127.0.0.1` by `docker-compose.prod.yml` (hardening applied 2026-08-22). Everything HTTP reaches the internet only through Traefik on 443. Docker publishes ports past ufw by writing its own iptables rules, so the bind address -- not a host firewall -- is what actually protects these.
 
 ### DNS Records
 
@@ -148,14 +149,17 @@ Your server needs to reach:
 
 ## Disk Layout Recommendations
 
-For production, separate your data onto different volumes:
+Almost everything lives in two places:
 
 ```
-/                   20 GB   (OS and containers)
-/var/lib/docker     30 GB   (Docker images and layers)
-/var/lib/mysql      50 GB+  (Database — size depends on usage)
-/var/mail           100 GB+ (Mail storage — grows over time)
-/var/log            10 GB   (Logs)
+/var/lib/docker           50 GB+  (images, build cache, and the named volumes:
+                                   mysql_data, redis_data, rspamd_data,
+                                   postfix_spool, prometheus_data, ...)
+<project root>/storage/   100 GB+ (bind-mounted data: mail_data/ -- the Maildirs,
+                                   dkim_keys/, ssl_certs/, backups/, archive-spool/)
+<project root>/logs/      10 GB   (Postfix/Dovecot/Rspamd and worker logs)
 ```
+
+Keeping mail data, backups, and secrets under the project root is deliberate -- moving the server is "move one folder", and on deploy-pipeline hosts `storage/`, `secrets/`, and `logs/` are anchored outside the timestamped release directories so they survive every deploy.
 
 Use SSDs for everything. Mail storage can use slower storage if cost is a concern, but MySQL and Redis should always be on fast disks.

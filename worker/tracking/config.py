@@ -192,7 +192,23 @@ class ConfigManager:
             raise ValueError("TRACKING_DATA_RETENTION_DAYS must be positive")
 
     def get_tracking_url_base(self) -> str:
-        """Get base URL for tracking endpoints"""
+        """Base URL that a recipient's mail client will actually reach.
+
+        TRACKING_BASE_URL wins when set, and it is what production uses.
+        Composing `{subdomain}.{domain}` produced
+        `https://track.courier.mailyte.com` -- a hostname that has never
+        existed in DNS. Every injected pixel and every rewritten link pointed
+        at it, so opens were unreportable and, worse, a recipient clicking a
+        link in our mail got a browser error instead of the destination.
+
+        An explicit base also lets this point at a host that is already
+        routed and certificated, rather than requiring a new DNS record,
+        Traefik router and certificate before tracking can work at all.
+        """
+        explicit = os.getenv("TRACKING_BASE_URL", "").strip().rstrip("/")
+        if explicit:
+            return explicit
+
         protocol = self.config.tracking_protocol
         domain = self.config.tracking_domain
         subdomain = self.config.tracking_subdomain

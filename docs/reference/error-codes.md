@@ -17,49 +17,64 @@ Three systems produce error codes: the API, SMTP (Postfix), and Rspamd. This pag
 | 201 | Created | Resource created |
 | 400 | Bad Request | Invalid input, missing fields |
 | 401 | Unauthorized | Missing or invalid API key |
-| 403 | Forbidden | Valid key but insufficient permissions |
-| 404 | Not Found | Resource doesn't exist |
-| 409 | Conflict | Resource already exists (duplicate domain, email) |
-| 422 | Unprocessable Entity | Validation failed (bad email format, etc.) |
-| 429 | Too Many Requests | Rate limit exceeded |
+| 403 | Forbidden | Valid key but insufficient permissions (or `mfa_required`) |
+| 404 | Not Found | Resource doesn't exist — also returned for resources belonging to *another* organization, so tenant existence never leaks |
+| 409 | Conflict | Resource already exists, or state prevents the operation (see codes below) |
+| 422 | Unprocessable Entity | Validation failed (FastAPI validation errors, idempotency key reuse) |
+| 429 | Too Many Requests | Brute-force lockout on API-key auth (20 invalid keys / 5 min per IP) |
 | 500 | Internal Server Error | Something broke on our end |
-| 503 | Service Unavailable | Database or dependency down |
+| 501 | Not Implemented | Operation unavailable in this deployment (e.g. `CERT_RENEW_UNAVAILABLE`) |
+| 503 | Service Unavailable | Dependency down or feature not configured (`ai_not_configured`, `sieve_not_configured`) |
 
 ### API Response Format
 
-**Success:**
+Success responses are typed per endpoint (Pydantic response models) — there is no single success envelope. Helper-built responses look like:
 
 ```json
 {
   "type": "success",
-  "msg": ["action_completed", "item_name"],
-  "log": ["entity", "action", "object", "data"]
+  "msg": "Human-readable message",
+  "data": { "...": "optional payload" }
 }
 ```
 
-**Error:**
+**Error** responses share one envelope. A custom exception handler in the `api` service strips FastAPI's usual `detail` wrapper:
 
 ```json
 {
   "type": "error",
-  "msg": "Error description"
+  "msg": "Error description",
+  "error_code": "MAILBOX_ALREADY_EXISTS",
+  "correlation_id": "..."
 }
 ```
 
-### Common API Errors
+- `type` and `msg` are always present.
+- `error_code` is a stable machine-readable identifier, present only on the subset of errors that carry one (see the table below).
+- `correlation_id` is injected by middleware into every JSON error body (status ≥ 400) and echoed in the `X-Correlation-Id` response header — quote it when reporting problems.
+- Validation failures (422) from FastAPI itself still use the framework's `{"detail": [...]}` shape.
 
-| Error Message | Cause | Fix |
-|--------------|-------|-----|
-| `domain_already_exists` | Domain already added | Check existing domains |
-| `domain_not_found` | Domain doesn't exist in DB | Verify domain name |
-| `mailbox_already_exists` | Email address taken | Use a different local part |
-| `mailbox_quota_exceeded` | Would exceed domain quota | Increase domain quota or reduce mailbox count |
-| `invalid_domain_format` | Domain name malformed | Check for typos, use lowercase |
-| `password_too_short` | Password doesn't meet requirements | Use at least 8 characters |
-| `organization_not_found` | Org ID doesn't exist | Create the org first |
-| `rate_limit_exceeded` | Too many API calls | Wait and retry, or increase limit |
-| `api_key_expired` | API key past expiry date | Generate a new key |
-| `ip_not_whitelisted` | Request from non-whitelisted IP | Add IP to key whitelist |
+Other worker services (`tracking`, `rag`, `monitoring`, `webhooks`, …) have their own ad-hoc shapes — most emit FastAPI's default `{"detail": "..."}`.
+
+### Stable `error_code` Values
+
+These are the machine-readable codes the API actually emits (the casing really is mixed):
+
+| `error_code` | HTTP | Where | Meaning |
+|--------------|------|-------|---------|
+| `DOMAIN_ALREADY_CLAIMED` | 409 | domains | Domain already exists (possibly under another organization) |
+| `MAILBOX_ALREADY_EXISTS` | 409 | mailboxes | Email address taken |
+| `IDEMPOTENCY_KEY_REUSED` | 422 | any idempotent write | Same `Idempotency-Key` reused with a different request body |
+| `IDEMPOTENCY_IN_PROGRESS` | 409 | any idempotent write | Concurrent request with the same key still running (`Retry-After: 1` header set) |
+| `CERT_RENEW_UNAVAILABLE` | 501 | ssl | Certificate renewal not available in this deployment |
+| `legal_hold_active` | 409 | compliance | Deletion blocked by an active legal hold (`data.holds` lists them) |
+| `mfa_required` | 403 | mailbox auth | Login requires a TOTP code |
+| `not_in_trash` | 409 | mailbox | Permanent delete attempted on a message not in Trash |
+| `cannot_revoke_current` | 409 | mailbox | Attempt to revoke the session in use |
+| `ai_not_configured` | 503 | mailbox | AI features requested but no provider configured |
+| `sieve_not_configured` | 503 | mailbox | Sieve/filter operation requested but ManageSieve not configured |
+
+A replayed idempotent request returns the original response with the header `Idempotency-Replayed: true`.
 
 ## SMTP Status Codes
 
@@ -151,39 +166,37 @@ DSN codes are 3-part codes (`x.y.z`) that give more detail. The first digit mirr
 
 ## Rspamd Action Codes
 
-Rspamd assigns a score and takes an action based on configured thresholds.
+Rspamd assigns a score and takes an action based on configured thresholds. The thresholds actually shipped (`mailer/rspamd/config/local.d/actions.conf`):
 
 ### Actions
 
-| Action | Default Threshold | Effect |
-|--------|------------------|--------|
+| Action | Threshold | Effect |
+|--------|-----------|--------|
 | `no action` | < 4 | Message delivered normally |
-| `greylist` | >= 4 | Temporary rejection (defer) |
-| `add header` | >= 6 | Add `X-Spam: Yes` header, deliver |
-| `rewrite subject` | >= 6 | Prepend `[SPAM]` to subject |
-| `soft reject` | >= 10 | Temporary rejection with 4xx |
-| `reject` | >= 15 | Permanent rejection with 5xx |
+| `greylist` | >= 4 | Temporary rejection (defer); skipped for authenticated/local senders and DKIM/SPF/DMARC-valid mail |
+| `add header` | >= 6 | Add spam headers, deliver (the global Sieve script files it into Junk) |
+| `rewrite subject` | >= 10 | Prepend `[SPAM]` to the subject |
+| `reject` | >= 15 | Permanent rejection at SMTP time |
+
+Per-organization overrides from the `settings.spam_policy` sync can replace these thresholds for a tenant's domains.
 
 ### Common Rspamd Symbols
 
-| Symbol | Score | Meaning |
-|--------|-------|---------|
-| `SPF_ALLOW` | -0.2 | SPF check passed |
-| `SPF_FAIL` | +4.0 | SPF check failed |
-| `DKIM_ALLOW` | -0.1 | DKIM signature valid |
-| `DKIM_REJECT` | +6.0 | DKIM signature invalid |
-| `DMARC_POLICY_ALLOW` | -0.5 | DMARC policy passed |
-| `DMARC_POLICY_REJECT` | +4.0 | DMARC policy failed |
-| `BAYES_SPAM` | +5.0 | Bayesian filter says spam |
-| `BAYES_HAM` | -3.0 | Bayesian filter says not spam |
-| `RBL_SPAMHAUS_ZEN` | +4.0 | Listed on Spamhaus ZEN |
-| `MIME_GOOD` | -0.1 | Well-formed MIME |
-| `MIME_BAD` | +1.0 | Malformed MIME |
-| `FORGED_SENDER` | +3.0 | From header doesn't match envelope |
-| `R_DKIM_ALLOW` | -0.2 | Reputation-adjusted DKIM pass |
-| `MISSING_MID` | +2.5 | No Message-ID header |
-| `URL_REDIRECTOR` | +1.5 | Links through URL shortener |
-| `PHISHING` | +6.0 | Phishing URL detected |
+Symbol scores are Rspamd's stock defaults (Mailyte doesn't override individual symbol scores), plus the Mailyte-specific multimap symbols with fixed scores:
+
+| Symbol | Meaning |
+|--------|---------|
+| `SPF_ALLOW` / `SPF_FAIL` | SPF check passed / failed |
+| `DKIM_ALLOW` / `DKIM_REJECT` | DKIM signature valid / invalid |
+| `DMARC_POLICY_ALLOW` / `DMARC_POLICY_REJECT` | DMARC evaluation result |
+| `BAYES_SPAM` / `BAYES_HAM` | Bayesian classifier verdict (active after 200 learns) |
+| `RBL_SPAMHAUS_ZEN` | Listed on Spamhaus ZEN |
+| `PHISHING` | Phishing URL detected (OpenPhish/PhishTank feeds) |
+| `NEURAL_SPAM` | Neural-network classifier verdict |
+| `LOCAL_FUZZY_DENIED` | Matches locally learned fuzzy spam hash |
+| `ORG_SENDER_WHITELIST` (−5.0) / `ORG_SENDER_BLACKLIST` (+10.0) / `ORG_DOMAIN_WHITELIST` (−3.0) | Per-organization sender lists from Redis |
+| `DISPOSABLE_EMAIL` (+3.0) | Sender uses a disposable-mail domain |
+| `CLAM_VIRUS` | Virus detected — only if ClamAV has been deployed (disabled by default) |
 
 ## Postfix Rejection Codes
 

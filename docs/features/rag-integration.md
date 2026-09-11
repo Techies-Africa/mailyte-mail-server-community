@@ -1,53 +1,35 @@
 # AI-Powered Search
 
-> **Enterprise Edition** — This feature is available in [Mailyte Enterprise](https://mailyte.com). The Community Edition does not include this functionality.
+**Search your emails by meaning, not just keywords.**
 
-
-**Search your emails by meaning, not just keywords. "Find that message about the quarterly budget" actually works.**
-
-The RAG (Retrieval-Augmented Generation) service (port `8090`) turns email content into vector embeddings and stores them in a Qdrant vector database. When you search, your query is also embedded and compared against stored vectors using cosine similarity. The result: semantic search that understands what you mean, even when you don't use the exact words from the email.
+The RAG (Retrieval-Augmented Generation) service (container port `8090`, published on host port `8091`) turns email content into vector embeddings stored in a Qdrant vector database. Searches embed the query the same way and rank stored vectors by cosine similarity — semantic search that works even when you don't use the exact words from the email.
 
 ## How it works
 
 ```mermaid
 flowchart LR
     subgraph Indexing
-        A[New Email] --> B[Chunk text]
+        A[Email content\nvia API] --> B[Chunk text]
         B --> C[Generate embeddings]
-        C --> D[Store in Qdrant]
+        C --> D[Store in per-org\nQdrant collection]
     end
 
     subgraph Searching
         E[Search query] --> F[Embed query]
         F --> G[Cosine similarity\nsearch in Qdrant]
-        G --> H[Return ranked\nresults]
+        G --> H[Ranked results]
     end
 
     D -.->|same collection| G
 ```
 
-### The pipeline, step by step
+1. **Chunking.** Long emails are split into chunks (default 1,000 characters, 200-character overlap).
+2. **Embedding.** Each chunk becomes a dense vector. The default provider (`sentence_transformers`, model `all-MiniLM-L6-v2`) runs locally — email content never leaves your infrastructure. OpenAI, Azure OpenAI, HuggingFace, and Ollama backends are supported via configuration.
+3. **Storage.** Vectors land in Qdrant, one collection per organization (`{prefix}_{org_id}_{type}`, e.g. `mailrag_org123_emails`).
+4. **Search.** The query vector is compared against the org's collection; matches return with relevance scores.
 
-1. **Chunking.** Long emails are split into chunks (default: 1,000 characters with 200-character overlap). This is important because embedding models have sequence length limits, and smaller chunks give more precise search results.
-
-2. **Embedding.** Each chunk is converted into a dense vector (a list of numbers) by an embedding model. Mailyte supports multiple providers -- local models run on your hardware with zero data leaving your server, or you can use cloud APIs for higher quality.
-
-3. **Storage.** Vectors are stored in Qdrant, a purpose-built vector database. Each organization gets its own Qdrant collection for data isolation.
-
-4. **Search.** Your search query goes through the same embedding model, producing a query vector. Qdrant finds the stored vectors most similar to the query vector (cosine distance) and returns the matching email chunks with relevance scores.
-
-### Embedding providers
-
-| Provider | Model | Privacy | Quality | Speed |
-|----------|-------|---------|---------|-------|
-| **Sentence Transformers** (default) | `all-MiniLM-L6-v2` | Data stays local | Good | Fast |
-| **HuggingFace** | `sentence-transformers/all-MiniLM-L6-v2` | Data stays local | Good | Fast |
-| **Ollama** | `nomic-embed-text` | Data stays local | Good | Medium |
-| **OpenAI** | `text-embedding-ada-002` | Data sent to OpenAI | Excellent | Fast |
-| **Azure OpenAI** | Configurable | Data sent to Azure | Excellent | Fast |
-| **Cohere** | `embed-english-v3.0` | Data sent to Cohere | Excellent | Fast |
-
-The default (`sentence_transformers`) runs entirely on your server. Your email content never leaves your infrastructure.
+!!! warning "Indexing is API-driven, not automatic"
+    Nothing in the mail flow indexes messages as they arrive. Content reaches Qdrant when your application (or the tenant surface) calls the indexing endpoints, or when a reindex is triggered per organization. Plan an ingestion step if you want the whole mailbox searchable.
 
 ## Configuration
 
@@ -56,146 +38,97 @@ The default (`sentence_transformers`) runs entirely on your server. Your email c
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `RAG_MODE` | `local` | Operating mode |
-| `RAG_HOST` | `0.0.0.0` | Service bind address |
-| `RAG_PORT` | `8090` | Service port |
-| `RAG_WORKERS` | `1` | Uvicorn worker processes |
-| `RAG_ENABLE_MULTI_TENANCY` | `true` | Org-level data isolation |
+| `RAG_HOST` / `RAG_PORT` / `RAG_WORKERS` | `0.0.0.0` / `8090` / `1` | Service binding |
+| `RAG_ENABLE_MULTI_TENANCY` | `true` | Per-org Qdrant collections |
+| `RAG_TENANT_ISOLATION_LEVEL` | `collection` | `collection` (separate collections) or `filter` |
 
 ### Qdrant settings
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `QDRANT_HOST` | `localhost` | Qdrant server host |
-| `QDRANT_PORT` | `6333` | Qdrant HTTP port |
-| `QDRANT_GRPC_PORT` | `6334` | Qdrant gRPC port |
-| `QDRANT_PREFER_GRPC` | `true` | Use gRPC for better performance |
+| `QDRANT_HOST` / `QDRANT_PORT` / `QDRANT_GRPC_PORT` | `localhost` / `6333` / `6334` | Qdrant location |
 | `QDRANT_COLLECTION_PREFIX` | `mailrag` | Collection name prefix |
-| `QDRANT_VECTOR_SIZE` | `1536` | Vector dimensions (must match embedding model) |
+| `QDRANT_VECTOR_SIZE` | derived from the embedding model (`384` for the default) | Vector dimensions — set explicitly only to override |
 | `QDRANT_DISTANCE_METRIC` | `cosine` | Similarity metric |
+
+!!! note "Vector size follows the embedding model (fixed 2026-08-30)"
+    `QDRANT_VECTOR_SIZE` used to default to **1536** (OpenAI ada-002) while the
+    default local model produces **384**-dimensional vectors, so indexing into a
+    fresh collection failed on the stock configuration. The vector size is now
+    derived from the configured embedding model when the variable is unset, and
+    collection creation always asks the **active** model for its dimension —
+    logging a clear warning when an explicitly-set `QDRANT_VECTOR_SIZE`
+    disagrees, and creating the collection at the model's dimension so indexing
+    works.
 
 ### Embedding settings
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `EMBEDDING_PROVIDER` | `sentence_transformers` | Which embedding provider to use |
+| `EMBEDDING_PROVIDER` | `sentence_transformers` | `sentence_transformers`, `huggingface`, `ollama`, `openai`, `azure_openai` |
 | `EMBEDDING_MODEL_NAME` | `all-MiniLM-L6-v2` | Model name |
-| `EMBEDDING_PRIVACY_MODE` | `true` | Enforce local-only processing |
-| `EMBEDDING_BATCH_SIZE` | `100` | Emails to embed per batch |
-| `EMBEDDING_MAX_SEQ_LENGTH` | `512` | Max tokens per chunk |
+| `EMBEDDING_PRIVACY_MODE` | `true` | Refuse cloud providers; local-only processing |
 | `EMBEDDING_ENABLE_FALLBACK` | `true` | Fall back to another provider on failure |
+| `EMBEDDING_BATCH_SIZE` / `EMBEDDING_MAX_SEQ_LENGTH` | `100` / `512` | Batch and sequence limits |
+| `OPENAI_API_KEY`, `AZURE_OPENAI_*`, `HF_*` | — | Cloud/provider credentials when used |
 
-### Chunking settings
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `CHUNK_SIZE` | `1000` | Characters per chunk |
-| `CHUNK_OVERLAP` | `200` | Overlap between chunks |
-| `CHUNK_STRATEGY` | `recursive` | Chunking algorithm |
-| `CHUNK_PRESERVE_SENTENCES` | `true` | Avoid splitting mid-sentence |
-
-### Search settings
+### Chunking and search
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `CHUNK_SIZE` / `CHUNK_OVERLAP` | `1000` / `200` | Chunking parameters |
+| `CHUNK_STRATEGY` / `CHUNK_PRESERVE_SENTENCES` | `recursive` / `true` | Chunking behavior |
 | `SEARCH_STRATEGY` | `semantic` | Search type |
-| `SEARCH_TOP_K` | `10` | Max results to return |
-| `SEARCH_SCORE_THRESHOLD` | `0.7` | Minimum similarity score (0-1) |
-| `SEARCH_ENABLE_RERANKING` | `true` | Re-rank results for better accuracy |
-| `SEARCH_ENABLE_CACHING` | `true` | Cache frequent queries |
-| `SEARCH_CACHE_TTL` | `300` | Cache TTL in seconds |
-
-### What gets indexed
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `INDEX_EMAIL_HEADERS` | `true` | Index subject, from, to |
-| `INDEX_EMAIL_BODY` | `true` | Index email body text |
-| `INDEX_ATTACHMENTS` | `true` | Index attachment text content |
-| `ANONYMIZE_PERSONAL_DATA` | `true` | Redact PII before indexing |
+| `SEARCH_TOP_K` / `SEARCH_SCORE_THRESHOLD` | `10` / `0.7` | Result count and minimum score |
+| `SEARCH_ENABLE_RERANKING` | `true` | Re-rank results |
+| `SEARCH_CACHE_TTL` | `300` | Query cache TTL (seconds) |
 
 ## API endpoints
 
-The RAG service is a FastAPI application, so it comes with interactive docs at `http://localhost:8090/docs`.
+### Via the platform API (authenticated with `X-API-Key`, org-scoped)
 
-### Search emails
+The real gateway routes (see [RAG System](../api/rag-system.md) for bodies and
+details):
 
-```bash
-curl -X POST http://localhost:8090/api/v1/organizations/org_123/search \
-  -H "Content-Type: application/json" \
-  -d '{
-    "query": "quarterly budget review meeting",
-    "top_k": 5,
-    "score_threshold": 0.7
-  }'
+```
+POST /api/v1/rag/search                          # semantic search
+GET  /api/v1/rag/rag/index/status/{domain}
+POST /api/v1/rag/rag/index/trigger
+GET  /api/v1/rag/collections/{domain}
+POST /api/v1/rag/collections/{domain}
+GET  /api/v1/rag/collections/{domain}/stats
+POST /api/v1/rag/documents/{collection_id}       # add documents
+GET  /api/v1/rag/organizations/{org_id}/collections
+GET/PUT /api/v1/rag/organizations/{org_id}/rag/config
+GET  /api/v1/rag/organizations/{org_id}/rag/stats
+GET  /api/v1/rag/organizations/{org_id}/rag/documents
+POST /api/v1/rag/organizations/{org_id}/rag/reindex
+GET  /api/v1/rag/health
 ```
 
-```json
-{
-  "results": [
-    {
-      "email_id": "msg_789",
-      "subject": "Q3 Budget Review - Action Items",
-      "from": "finance@company.com",
-      "score": 0.92,
-      "chunk": "...the quarterly budget review highlighted several areas where we need to cut spending...",
-      "metadata": {
-        "date": "2026-03-10",
-        "has_attachments": true
-      }
-    }
-  ],
-  "total": 1,
-  "search_time_ms": 45
-}
+### Direct service endpoints (compose network / host port 8091)
+
+```
+GET  /api/v1/organizations/                             # list org RAG configs
+GET/POST/DELETE /api/v1/organizations/{org_id}/config   # per-org indexing config
+GET  /api/v1/organizations/{org_id}/indexing-status
+POST /api/v1/organizations/{org_id}/reindex
+GET  /api/v1/organizations/available-fields             # what can be indexed
+GET  /health/                                           # Qdrant + embedding health
+GET  /config                                            # effective configuration
+GET  /admin/collections, /admin/metrics, /admin/embedding/models, ...
 ```
 
-### Index emails
-
-```bash
-curl -X POST http://localhost:8090/api/v1/organizations/org_123/index \
-  -H "Content-Type: application/json" \
-  -d '{
-    "emails": [
-      {
-        "email_id": "msg_789",
-        "subject": "Q3 Budget Review",
-        "from": "finance@company.com",
-        "body": "The quarterly budget review highlighted..."
-      }
-    ]
-  }'
-```
-
-### Service health
-
-```bash
-curl http://localhost:8090/health/
-```
-
-Returns health status of Qdrant, the embedding model, and overall service readiness.
-
-### Admin endpoints
-
-```bash
-# View configuration
-curl http://localhost:8090/config
-
-# Admin dashboard
-curl http://localhost:8090/admin/stats
-```
+Interactive OpenAPI docs are served at `/docs` on the service.
 
 ## Things to know
 
-- **Vector size must match your embedding model.** If you use `all-MiniLM-L6-v2`, the vectors are 384 dimensions. If you use OpenAI's `text-embedding-ada-002`, they're 1,536 dimensions. Set `QDRANT_VECTOR_SIZE` accordingly, or you'll get errors on indexing.
+- **Vector size follows your embedding model** — derived automatically; see the note above. Switching models still means re-indexing everything; vectors from different models are not comparable.
 
-- **Privacy mode is on by default.** With `EMBEDDING_PRIVACY_MODE=true`, the service will refuse to use cloud-based embedding providers (OpenAI, Azure, Cohere). This is a safety rail for organizations that can't send email content to third parties. Turn it off explicitly if you want to use cloud embeddings.
+- **Privacy mode is on by default.** With `EMBEDDING_PRIVACY_MODE=true` the service refuses cloud embedding providers. Turn it off explicitly (and set the provider + API key) to use OpenAI or Azure.
 
-- **Re-indexing is needed if you change the embedding model.** Vectors from different models aren't compatible. If you switch from `all-MiniLM-L6-v2` to OpenAI, you need to re-index all emails in the new model's vector space.
+- **Multi-tenancy is collection-per-org.** Search is scoped to the requesting organization's collection; Org A cannot find Org B's content. Collections are created on demand at first index.
 
-- **Multi-tenancy means separate Qdrant collections.** Each organization gets its own collection (e.g., `mailrag_org_123`). Search queries are scoped to the requesting org's collection, so Org A can never accidentally find Org B's emails.
+- **Qdrant needs its own resources.** Vector indices live in RAM for fast search — roughly 1.5 GB per million 384-dimensional vectors. In production Qdrant is bound to loopback (`127.0.0.1:6333`).
 
-- **The fallback mechanism helps with resilience.** If your primary embedding provider fails (model OOM, API down), the service can fall back to a secondary provider. This means search might use a different model temporarily, and result quality might differ, but the service stays up.
-
-- **Qdrant needs its own resources.** On a server with millions of emails, the Qdrant database can consume significant memory (it keeps vector indices in RAM for fast search). Plan your server sizing accordingly. A rough guide: 1 million 384-dimensional vectors ~ 1.5 GB RAM.
-
-- **Search quality improves with good chunking.** The default settings work well for typical emails. But if you're indexing very long emails or attachments, you might want to increase `CHUNK_SIZE` and `CHUNK_OVERLAP` for better context preservation. Experiment and see what gives the best results for your data.
+- **RAG operations emit webhooks** — `rag.indexing.started`, `rag.indexing.complete`, `rag.search.complete`, and `rag.ai.transaction` flow through the [webhook system](webhooks.md).

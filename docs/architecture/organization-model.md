@@ -1,6 +1,6 @@
 # Organization Model
 
-The multi-tenant hierarchy that keeps everything organized: who owns what, how quotas work, and how Mailyte maps to your upstream system.
+The multi-tenant hierarchy that keeps everything organized: who owns what, how quotas work, and how Mailyte maps to your upstream system. Field lists below are verified against `database/models/core.py` as of 2026-08-30.
 
 ---
 
@@ -21,17 +21,21 @@ Organization
 
 Think of it like a company structure: the Organization is the company, Domains are departments, and Email Accounts are employees. Aliases are name badges — they point to a real person but aren't a person themselves.
 
+All three levels use **ULID primary keys** — 26-character, time-sortable strings like `01J5YGKB3ZJR4DPNZN9SMTHF4R` — and all three carry their own `external_id` for mapping to an upstream system.
+
 ## Organization
 
 The top-level tenant. This is typically one of your customers.
 
 | Field | What it is |
 |-------|-----------|
-| `id` | Mailyte's internal auto-increment ID |
+| `id` | ULID primary key (`CHAR(26)`) |
 | `external_id` | Your system's identifier for this customer |
 | `name` | Human-readable name ("Acme Corp") |
-| `storage_quota_mb` | Total storage allowed across all mailboxes |
-| `sending_rate_limit` | Max emails per hour for the whole org |
+| `rate_limits` | JSON — default rate limits for the org |
+| `storage_quotas` | JSON — default storage quotas for the org |
+| `webhook_urls` / `webhook_secret` | The org's event callback configuration |
+| `quota_override` (+ `_at`, `_by`) | Set when an operator hand-edits quotas via the console; upstream plan sync then won't overwrite them without `force=true` |
 | `active` | Kill switch — deactivating an org stops all mail flow |
 
 ### The `external_id` Field
@@ -39,27 +43,20 @@ The top-level tenant. This is typically one of your customers.
 This is how you connect Mailyte to your own system. When your app creates an organization via the API, you pass your own customer ID as `external_id`:
 
 ```http
-POST /api/v1/organizations
-X-Admin-Password: your-admin-password
+POST /api/v1/organizations/
+X-API-Key: <platform-scoped API key>
 Content-Type: application/json
 
 {
   "name": "Acme Corp",
-  "external_id": "cust_abc123",
-  "storage_quota_mb": 5000,
-  "sending_rate_limit": 1000
+  "external_id": "cust_abc123"
 }
 ```
 
-Later, you can look up the org by `external_id` instead of having to store Mailyte's internal ID:
-
-```http
-GET /api/v1/organizations?external_id=cust_abc123
-X-Admin-Password: your-admin-password
-```
+Creating organizations is a **platform-level action** — it requires an admin-scoped API key with platform scope, not a tenant credential.
 
 !!! tip "Always use `external_id`"
-    Storing Mailyte's auto-increment IDs in your database creates a tight coupling. Use `external_id` to keep the two systems loosely connected. If you ever need to migrate or rebuild Mailyte, the IDs won't change.
+    Storing Mailyte's IDs in your database creates a tight coupling. Use `external_id` to keep the two systems loosely connected — each side generates its own ULIDs and maps through `external_id`.
 
 ## Domain
 
@@ -67,13 +64,14 @@ A mail domain under an organization. One org can own many domains.
 
 | Field | What it is |
 |-------|-----------|
-| `name` | The domain name (`acme.com`) |
-| `verified` | Whether DNS records have been validated |
-| `dkim_enabled` | Whether outgoing mail is DKIM-signed |
-| `dkim_private_key` | The DKIM signing key (stored encrypted) |
+| `domain` | The domain name (`acme.com`), globally unique |
+| `max_quota` / `max_users` | Domain-level caps (default 10 GB / 1000 accounts) |
+| `dkim_enabled` / `dkim_selector` | DKIM signing configuration (keys live in the `dkim_keys` table, envelope-encrypted) |
+| `rate_limits` / `storage_quotas` | JSON overrides of the org defaults |
+| `total_storage_used`, `total_email_accounts`, … | Denormalised usage counters maintained by the workers |
 | `active` | Per-domain kill switch |
 
-Before a domain can send or receive email, it needs to be verified. Verification means your DNS has the correct MX, SPF, DKIM, and DMARC records pointing to your Mailyte instance. The API provides the exact records you need to add.
+Before a domain can send or receive email reliably, its DNS must be set up. Creating a domain returns the exact records to add (MX, SPF, DKIM, DMARC), and the API's verification endpoint checks live DNS against them.
 
 ## Email Account
 
@@ -81,16 +79,14 @@ A mailbox under a domain. This is a real account with storage and authentication
 
 | Field | What it is |
 |-------|-----------|
-| `email` | The full email address (`alice@acme.com`) |
-| `password_hash` | Hashed password for SMTP/IMAP auth |
-| `quota_mb` | Per-mailbox storage limit |
-| `active` | Per-account kill switch |
+| `email` | The full address (`alice@acme.com`), unique |
+| `local_part` | The part before `@` |
+| `password` | bcrypt hash used by Dovecot for SMTP/IMAP/POP3 auth |
+| `status` | Lifecycle state — Dovecot's auth queries filter on it |
+| `storage_quota` | Per-mailbox byte limit (default 1 GB) |
+| `storage_used` (+ email/attachment breakdowns) | Usage, measured by the `storage_usage` worker over IMAP QUOTA |
 
-Email accounts can:
-
-- Send email (via SMTP or the API)
-- Receive email
-- Be accessed via IMAP or POP3
+Email accounts can send (SMTP, webmail, or API), receive, and be accessed via IMAP/POP3/JMAP. An account can also hold **SMTP credentials** — per-application API keys for sending that don't expose the mailbox password and can be rotated or revoked independently (with immediate effect, via a Dovecot auth-cache flush).
 
 ## Alias
 
@@ -98,26 +94,24 @@ A forwarding address that doesn't have its own mailbox.
 
 | Field | What it is |
 |-------|-----------|
-| `source_address` | The alias address (`support@acme.com`) |
-| `destination_address` | Where mail gets forwarded (`alice@acme.com`) |
+| `source` | The alias address (`support@acme.com`) |
+| `destination` | Where mail gets forwarded — a text field, so multiple destinations are supported |
 | `active` | On/off switch |
 
 Aliases are lightweight. They don't consume storage quota because they don't store mail — they just redirect it.
 
-You can set up many-to-one aliases (multiple addresses forwarding to one account) or one-to-many (one address forwarding to multiple accounts, if your Postfix config supports it).
+## Quotas and Limits
 
-## Quota Inheritance
-
-Quotas flow down the hierarchy:
+Quotas flow down the hierarchy, with each level able to override the one above:
 
 ```mermaid
 graph TB
-    Org["Organization<br>storage_quota_mb: 5000<br>sending_rate_limit: 1000/hr"]
-    D1["Domain: acme.com"]
-    D2["Domain: acme.io"]
-    A1["alice@acme.com<br>quota_mb: 1000"]
-    A2["bob@acme.com<br>quota_mb: 1000"]
-    A3["hello@acme.io<br>quota_mb: 2000"]
+    Org["Organization<br>storage_quotas / rate_limits (JSON defaults)"]
+    D1["Domain: acme.com<br>max_quota, overrides"]
+    D2["Domain: acme.io<br>max_quota, overrides"]
+    A1["alice@acme.com<br>storage_quota: 1 GB"]
+    A2["bob@acme.com<br>storage_quota: 1 GB"]
+    A3["hello@acme.io<br>storage_quota: 2 GB"]
 
     Org --> D1
     Org --> D2
@@ -130,29 +124,22 @@ graph TB
     style D2 fill:#f3e5f5
 ```
 
-In this example:
-
-- The org has 5,000 MB total.
-- Alice has 1,000 MB, Bob has 1,000 MB, hello@ has 2,000 MB.
-- That's 4,000 MB allocated, leaving 1,000 MB unallocated for future accounts.
-- Even if you try to create a new account with a 2,000 MB quota, the API will reject it because it would exceed the org's total.
-
-**Sending rate limits** work at the org level. All accounts under all domains share the org's sending rate limit. If the org allows 1,000 emails/hour and Alice sends 800, Bob can only send 200 more that hour.
-
-The **Storage Usage** worker periodically recalculates actual usage per account and per org. If an account exceeds its quota, Dovecot will reject new incoming mail for that account until the user deletes some messages.
+- **Storage**: each account has a byte quota; each domain a `max_quota` and `max_users` cap; the org sets the defaults. The `storage_usage` worker keeps `storage_used` current from Dovecot's own QUOTA figures and fires warning/exceeded webhooks.
+- **Rate limits**: the `rate_limits` JSON at org level (overridable per domain) feeds the `rate_limiter` service, which Postfix consults per message.
+- **Operator overrides**: quotas edited by hand through the console set `quota_override`, which stops the upstream plan sync from silently reverting them.
 
 ## Lifecycle
 
 A typical lifecycle looks like:
 
-1. **Create org** (via admin API)
+1. **Create org** (platform-scoped API key)
 2. **Add domain** (API returns required DNS records)
-3. **Verify domain** (API checks DNS after you've added the records)
+3. **Verify domain** (API checks live DNS after you've added the records)
 4. **Create accounts** under the domain
 5. **Set up aliases** as needed
-6. **Create API keys** scoped to the org for your app to use
+6. **Issue SMTP credentials** for applications that send
 
-To tear down, work in reverse — delete accounts, then domains, then the org. Or just deactivate the org to stop all mail flow without deleting data.
+To tear down, work in reverse — the API enforces it: deleting an organization returns `400` while it still has domains or accounts. Delete accounts, then domains, then the org. Or just deactivate the org to stop all mail flow without deleting data.
 
-!!! warning "Deactivation cascades"
-    Deactivating an org effectively deactivates all its domains and accounts. Reactivating the org restores everything. But deactivating a single domain only affects that domain's accounts — other domains in the org keep working.
+!!! warning "Deactivation cascades — with one caveat"
+    Deactivating an org effectively deactivates all its domains and accounts; reactivating restores everything. Deactivating a single domain only affects that domain. The caveat: Dovecot's auth cache keeps already-cached credentials working for up to 1 hour unless flushed — the SMTP-credential endpoints flush it automatically, direct database edits don't.

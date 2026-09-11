@@ -30,29 +30,31 @@ The Rate Limiter provides:
 
 ## API Endpoints
 
-All endpoints are accessed through the API Gateway at `/api/v1/rate-limiter/`:
+### This service's own endpoints (FastAPI, port 8082)
 
-### Rate Limit Management
 ```
-GET  /api/v1/rate-limiter/limits                    # List all rate limits
-POST /api/v1/rate-limiter/limits                    # Create rate limit rule
-GET  /api/v1/rate-limiter/limits/{id}              # Get specific rule
-PUT  /api/v1/rate-limiter/limits/{id}              # Update rule
-DELETE /api/v1/rate-limiter/limits/{id}            # Delete rule
-```
-
-### Usage Monitoring
-```
-GET  /api/v1/rate-limiter/usage/organization/{org_id}    # Organization usage
-GET  /api/v1/rate-limiter/usage/domain/{domain}         # Domain usage stats
-GET  /api/v1/rate-limiter/usage/mailbox/{email}         # Mailbox usage stats
+POST /check_rate_limit                      # Check (and optionally record) usage
+POST /increment_usage                       # Record usage without a check
+GET  /get_usage/{entity_type}/{identifier}  # Current usage and limits
+POST /set_limits                            # Per-entity limit overrides
+POST /reset_counters                        # Reset counters
+POST /policy                                # Raw Postfix policy protocol over HTTP
+GET  /stats                                 # Service statistics
+GET  /health                                # Health check
+GET  /metrics                               # Prometheus metrics
 ```
 
-### Real-Time Checking
+### Through the API Gateway (`worker/api/routes/rate_limiter.py`)
+
 ```
-POST /api/v1/rate-limiter/check                         # Check rate limit status
-GET  /api/v1/rate-limiter/status                        # Live usage dashboard
+GET/PUT /api/v1/rate-limiter/rate-limits/domain/{domain}
+GET/PUT /api/v1/rate-limiter/rate-limits/mailbox/{email}
+GET     /api/v1/rate-limiter/rate-limits/usage/{domain}
+POST    /api/v1/rate-limiter/rate-limits/reset
+GET/PUT /api/v1/rate-limiter/quotas/domain/{domain}
 ```
+
+The gateway proxies to this service and enforces organization ownership of the domain/email path params before forwarding.
 
 ## Configuration
 
@@ -113,11 +115,8 @@ MAILBOX_INBOUND_BURST_DEFAULT=50
 
 ## Integration
 
-### API Gateway Integration
-The rate limiter is integrated into the API Gateway for automatic checking of all requests.
-
 ### Postfix Integration
-Rate limits are enforced at the SMTP level through policy service integration.
+`mailer/postfix/scripts/rate_limit_policy.py` (the `policy-rate-limit` spawn service) speaks the Postfix policy protocol and delegates every decision to this service's `/check_rate_limit` over HTTP with `record: true`. It is referenced from exactly one restriction list -- `smtpd_data_restrictions` -- so each message is counted once; adding it to other lists re-creates a documented production outage (see `main.cf`'s comments). Over quota, Postfix answers `DEFER_IF_PERMIT 4.7.1`; if this service is unreachable, the policy script fails open.
 
 ## Performance Features
 
@@ -144,10 +143,10 @@ python app.py
 # Health check
 curl http://0.0.0.0:8082/health
 
-# Test rate limit check via API Gateway
-curl -X POST http://0.0.0.0:5000/api/v1/rate-limiter/check \
+# Read-only rate limit check (no quota consumed without "record": true)
+curl -X POST http://localhost:8082/check_rate_limit \
   -H "Content-Type: application/json" \
-  -d '{"organization_id": "org_123", "action": "send_email", "count": 1}'
+  -d '{"email": "user@example.com", "direction": "outbound"}'
 ```
 
 ## Dependencies

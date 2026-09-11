@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="robots" content="noindex, nofollow">
+    <title>Unsubscribe &mdash; Mailyte</title>
+    <!-- Served by worker/api/routes/tracking.py, which substitutes the
+         {{TRACKING_ID}} placeholders via str.replace (same raw-read approach
+         as landing.html -- no template engine). Fully self-contained on
+         purpose: no /static assets, so the page renders correctly even when
+         reached through a host that only routes /api/v1/tracking/*. -->
+    <style>
+        *{margin:0;padding:0;box-sizing:border-box}
+        body{font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#09090B;color:#F9F9F9;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:24px;-webkit-font-smoothing:antialiased}
+        .card{background:#111114;border:1px solid rgba(255,255,255,.06);border-radius:14px;padding:44px 36px;max-width:440px;width:100%;text-align:center;position:relative;overflow:hidden}
+        .card::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,#EBAE13,#FF9900)}
+        .brand{font-size:20px;font-weight:700;margin-bottom:28px;background:linear-gradient(135deg,#EBAE13,#FF9900);-webkit-background-clip:text;-webkit-text-fill-color:transparent;display:inline-block}
+        .icon{width:52px;height:52px;border-radius:50%;background:rgba(235,174,19,.1);border:1px solid rgba(235,174,19,.2);display:flex;align-items:center;justify-content:center;font-size:22px;color:#EBAE13;margin:0 auto 20px}
+        h1{font-size:26px;font-weight:700;line-height:1.2;margin-bottom:12px;background:linear-gradient(135deg,#FFF 20%,#EBAE13 80%);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+        p{font-size:14px;color:#A1A1A9;line-height:1.7;margin-bottom:28px}
+        .btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;padding:11px 26px;border-radius:50px;font-size:13px;font-weight:600;border:none;cursor:pointer;font-family:inherit;background:#EBAE13;color:#09090B;transition:all .25s}
+        .btn:hover{background:#DBA500;transform:translateY(-1px);box-shadow:0 4px 20px rgba(235,174,19,.3)}
+        .btn:disabled{opacity:.6;cursor:default;transform:none;box-shadow:none}
+        .fine{font-size:12px;color:#52525B;line-height:1.6;margin:24px 0 0}
+        footer{position:fixed;bottom:16px;left:0;right:0;text-align:center;font-size:12px;color:#3F3F46}
+        footer a{color:#52525B;text-decoration:none}
+        footer a:hover{color:#EBAE13}
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div class="brand">Mailyte</div>
+
+        <!-- Default state: ask for an explicit confirmation. Nothing is
+             recorded until the POST below fires, so a mail scanner
+             prefetching this GET cannot unsubscribe anyone. -->
+        <div id="confirm">
+            <div class="icon">&#9993;</div>
+            <h1>Unsubscribe</h1>
+            <p>Click confirm to stop receiving future emails from this sender. You can only undo this by contacting the sender directly.</p>
+            <button type="button" class="btn" id="confirm-btn">Confirm unsubscribe</button>
+            <noscript>
+                <!-- JS off: hide the inert button and post a plain form to the
+                     same endpoint. The endpoint ignores the (empty) form body. -->
+                <style>#confirm-btn{display:none}</style>
+                <form method="post" action="/api/v1/tracking/unsubscribe/{{TRACKING_ID}}">
+                    <button type="submit" class="btn">Confirm unsubscribe</button>
+                </form>
+            </noscript>
+            <p class="fine">Sent to you by mistake? Just close this page &mdash; nothing happens until you confirm.</p>
+        </div>
+
+        <div id="done" style="display:none">
+            <div class="icon">&#10003;</div>
+            <h1>You&rsquo;ve been unsubscribed</h1>
+            <p>You won&rsquo;t receive future emails from this sender. It may take a short while for messages already queued to stop.</p>
+        </div>
+
+        <div id="failed" style="display:none">
+            <div class="icon">&#9888;</div>
+            <h1>Something went wrong</h1>
+            <p>We couldn&rsquo;t process your unsubscribe request &mdash; the link may have expired. Please try the unsubscribe link from a more recent email, or contact the sender directly.</p>
+        </div>
+    </div>
+
+    <footer>Powered by <a href="https://mailyte.com">Mailyte</a></footer>
+
+    <script>
+        (function () {
+            var btn = document.getElementById("confirm-btn");
+            function show(id) {
+                document.getElementById("confirm").style.display = "none";
+                document.getElementById(id).style.display = "block";
+            }
+            btn.addEventListener("click", function () {
+                btn.disabled = true;
+                btn.textContent = "Unsubscribing…";
+                // Relative URL: works behind whichever host served this page.
+                // The POST is what validates the tracking id -- a bad or
+                // expired id 404s here and lands in the failed state.
+                fetch("/api/v1/tracking/unsubscribe/{{TRACKING_ID}}", { method: "POST" })
+                    .then(function (res) { show(res.ok ? "done" : "failed"); })
+                    .catch(function () { show("failed"); });
+            });
+        })();
+    </script>
+</body>
+</html>

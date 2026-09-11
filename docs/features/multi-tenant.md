@@ -1,182 +1,129 @@
 # Multi-Tenant Support
 
-> **Enterprise Edition** — This feature is available in [Mailyte Enterprise](https://mailyte.com). The Community Edition does not include this functionality.
+**Run multiple organizations on one Mailyte instance with organization-scoped data isolation.**
 
-
-**Run multiple organizations on one Mailyte instance with complete data isolation.**
-
-Every piece of Mailyte -- mailboxes, domains, rate limits, webhooks, templates, analytics, storage quotas, and AI search -- is scoped to an organization. Org A can't see Org B's data, even though they share the same server. This is the foundation that makes Mailyte work as a platform for hosting multiple customers.
+Every major entity — domains, mailboxes, aliases, rate limits, quotas, templates, tracking data, archives, SMTP credentials, and AI search collections — carries an `organization_id` and is filtered by it. Org A cannot see Org B's data through the API, even though they share the same server.
 
 ## How it works
 
 ```mermaid
 flowchart TD
     subgraph "Mailyte Instance"
-        API[API Gateway\nport 5000]
+        API["Platform API :8080\n(api.yourdomain via Traefik)"]
 
         subgraph "Organization: Acme Corp"
             A1[acme.com domain]
-            A2[bigclient.com domain]
-            A3[Mailboxes, templates, webhooks]
-            A4[Rate limits, quotas]
-            A5[RAG collection: mailrag_acme]
+            A2[Mailboxes, aliases, SMTP keys]
+            A3[Rate limits, quotas]
+            A4[Qdrant collection mailrag_acme_emails]
         end
 
         subgraph "Organization: Widgets Inc"
             B1[widgets.io domain]
-            B2[Mailboxes, templates, webhooks]
+            B2[Mailboxes, aliases, SMTP keys]
             B3[Rate limits, quotas]
-            B4[RAG collection: mailrag_widgets]
+            B4[Qdrant collection mailrag_widgets_emails]
         end
     end
 
-    API --> A1 & A2 & B1
-    A5 -.->|isolated| Qdrant[(Qdrant)]
-    B4 -.->|isolated| Qdrant
+    API --> A1 & B1
 ```
 
 ### The org model
 
-An **organization** is the top-level entity. Everything hangs off it:
+An **organization** is the top-level entity:
 
-- **Domains** belong to an organization. A domain can only belong to one org.
-- **Mailboxes** belong to a domain (and therefore to an org).
-- **Rate limits** can be set at org, domain, or mailbox level.
-- **Storage quotas** roll up from mailbox to domain to org.
-- **Webhooks** are configured per-org. Each org gets its own webhook URL and secret.
-- **Templates** are scoped to the org that created them.
-- **Analytics** are aggregated per-org, per-domain, and per-mailbox.
-- **RAG search** uses a separate Qdrant collection per org, so vector data is physically isolated.
+- **Domains** belong to exactly one organization.
+- **Mailboxes and aliases** belong to a domain (and therefore an org).
+- **SMTP API keys** are domain-scoped credentials under the org.
+- **Rate limits** apply at org, domain, and mailbox level ([Rate Limiting](rate-limiting.md)).
+- **Storage quotas** roll up mailbox → domain → org ([Storage & Quotas](storage-quotas.md)).
+- **Spam policy** can be overridden per org via the Rspamd settings sync ([Anti-Spam](anti-spam.md)).
+- **Templates, tracking data, archives, suppression lists** are all org-scoped rows.
+- **RAG search** uses a separate Qdrant collection per org ([AI-Powered Search](rag-integration.md)).
 
 ### How isolation is enforced
 
-Isolation happens at multiple layers:
-
 | Layer | Mechanism |
 |-------|-----------|
-| **API** | Every API request includes an org identifier. Queries are filtered by org ID. |
-| **Database** | All tables include an `organization_id` column. Indexes and queries are scoped. |
-| **Postfix** | Virtual domain maps are per-org. Postfix only accepts mail for domains belonging to the server. |
-| **Dovecot** | Each org's mail is stored in separate directory trees under `/var/mail/vhosts/{domain}/`. |
-| **Qdrant** | Each org gets its own collection (e.g., `mailrag_org_123`). |
-| **Redis** | Rate limit keys are prefixed with the org ID. |
-| **Webhooks** | Each org has its own webhook URL and HMAC secret. |
+| **API** | Two credential scopes: **organization-scoped** API keys see only their own org's rows; **platform-scoped** keys (operators/console) see everything. Every `/api` route carries a `require_api_key` guard, and org-scope queries filter by the key's `organization_id`. |
+| **Database** | Tenant tables carry `organization_id`; queries and indexes are scoped. |
+| **Postfix** | Virtual domain/mailbox/alias maps come from MySQL; sender-login maps tie each SASL login to the addresses it may send as (enforced on 587/465). |
+| **Dovecot** | Mailboxes live under `/var/mail/vhosts/{domain}/{user}` per domain tree; auth is per-mailbox against MySQL. |
+| **Qdrant** | Collection per org (`mailrag_{org}_emails`). |
+| **Redis** | Rate-limit and optimizer counters are keyed by org (and domain/mailbox). |
 
-## Configuration
+!!! warning "Webhooks are the exception today"
+    Webhook *delivery* is not per-organization: all events go to one globally configured URL signed with one global secret ([details](webhooks.md)). Per-org endpoint registrations can be stored via the API but do not receive event traffic yet. If you multiplex tenants behind one receiving endpoint, route on the envelope's `org_id` field yourself.
 
-Multi-tenancy is on by default. There's no single switch to disable it -- the org model is baked into the data architecture.
+## Authentication
 
-### RAG multi-tenancy
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `RAG_ENABLE_MULTI_TENANCY` | `true` | Create separate Qdrant collections per org |
-| `RAG_TENANT_ISOLATION_LEVEL` | `collection` | Isolation level (`collection` or `filter`) |
-
-The `collection` level creates a physically separate Qdrant collection per org. The `filter` level uses a single collection with metadata filters -- faster to set up but slightly weaker isolation.
-
-### Default org settings
-
-When a new org is created, it inherits defaults from these env vars:
-
-| Variable | Applied To | Description |
-|----------|-----------|-------------|
-| `ORG_OUTBOUND_HOURLY_DEFAULT` | Rate limiting | Default outbound hourly limit |
-| `ORG_OUTBOUND_DAILY_DEFAULT` | Rate limiting | Default outbound daily limit |
-| `ORG_OUTBOUND_MONTHLY_DEFAULT` | Rate limiting | Default outbound monthly limit |
-| `DOMAIN_*_DEFAULT` | Rate limiting | Default domain-level limits |
-| `MAILBOX_*_DEFAULT` | Rate limiting | Default mailbox-level limits |
+All platform API requests use the `X-API-Key` header. Keys live in the `api_keys` table with a scope (`platform` or `organization`), a permission level, and optional role gates. In production the API is reachable at `https://api.<your-domain>` via Traefik (host port `8083` → container `8080` locally).
 
 ## API examples
 
-### Create an organization
+### Create an organization (platform-scoped key)
 
 ```bash
-curl -X POST http://localhost:5000/api/v1/organizations \
+curl -X POST https://api.yourdomain.com/api/v1/organizations \
   -H "Content-Type: application/json" \
-  -H "X-Admin-Token: your-admin-token" \
-  -d '{
-    "name": "Acme Corp",
-    "plan": "enterprise",
-    "admin_email": "admin@acme.com"
-  }'
+  -H "X-API-Key: <platform-key>" \
+  -d '{"name": "Acme Corp", "admin_email": "admin@acme.com"}'
 ```
 
-### Add a domain to an org
+### Add a domain
 
 ```bash
-curl -X POST http://localhost:5000/api/v1/organizations/org_acme/domains \
+curl -X POST https://api.yourdomain.com/api/v1/domains \
   -H "Content-Type: application/json" \
-  -H "X-Admin-Token: your-admin-token" \
-  -d '{
-    "domain": "acme.com"
-  }'
+  -H "X-API-Key: <key>" \
+  -d '{"domain": "acme.com", "organization_id": "<org-ulid>"}'
 ```
+
+Creating a domain generates its DKIM keypair and the DNS records the customer must publish; `GET /api/v1/domains/{id}/verify-dns` live-checks them.
 
 ### Set org-specific rate limits
 
 ```bash
 curl -X POST http://localhost:8082/set_limits \
   -H "Content-Type: application/json" \
-  -d '{
-    "type": "organization",
-    "identifier": "org_acme",
-    "direction": "outbound",
-    "hourly_limit": 20000,
-    "daily_limit": 200000,
-    "monthly_limit": 2000000
-  }'
+  -d '{"type": "organization", "identifier": "<org-ulid>", "direction": "outbound",
+       "hourly_limit": 20000, "daily_limit": 200000, "monthly_limit": 2000000}'
 ```
 
-### Configure org webhook
+### Issue a domain-scoped SMTP credential
 
 ```bash
-curl -X POST http://localhost:5000/api/v1/organizations/org_acme/webhooks \
-  -H "Content-Type: application/json" \
-  -H "X-Admin-Token: your-admin-token" \
-  -d '{
-    "url": "https://acme.com/webhooks/mailyte",
-    "secret": "acme-webhook-secret-here",
-    "events": ["email.smtp.inbound", "email.smtp.outbound", "tracking.open", "tracking.click"]
-  }'
+curl -X POST https://api.yourdomain.com/api/v1/smtp-credentials/ \
+  -H "X-API-Key: <key>" -H "Content-Type: application/json" \
+  -d '{"domain_id": "<domain-ulid>", "name": "CI mailer"}'
 ```
 
-### Get org-level stats
-
-```bash
-curl http://localhost:5000/api/v1/organizations/org_acme/stats?period=monthly
-```
+See [SMTP API Keys](smtp-credentials.md).
 
 ## Data model
-
-Here's a simplified view of how the main entities relate:
 
 ```mermaid
 erDiagram
     Organization ||--o{ Domain : has
-    Domain ||--o{ Mailbox : has
-    Organization ||--o{ Webhook : has
-    Organization ||--o{ Template : has
+    Domain ||--o{ EmailAccount : has
+    Domain ||--o{ Alias : has
+    Domain ||--o{ SmtpCredential : has
+    Domain ||--o{ DKIMKey : has
+    Organization ||--o{ ApiKey : has
     Organization ||--o{ RateLimitRule : has
-    Domain ||--o{ RateLimitRule : has
-    Mailbox ||--o{ RateLimitRule : has
-    Organization ||--o{ StorageQuota : has
-    Domain ||--o{ StorageQuota : has
-    Mailbox ||--o{ StorageQuota : has
+    Organization ||--o{ SuppressionEntry : has
+    Organization ||--o{ RetentionPolicy : has
 ```
 
 ## Things to know
 
-- **Organization IDs are permanent.** Once assigned, an org ID is used across all services (database, Redis, Qdrant). Changing an org ID would require a data migration across every system. Use meaningful, stable identifiers.
+- **IDs are ULIDs and permanent.** An org's ID is used across MySQL, Redis, and Qdrant; changing it would require cross-system migration.
 
-- **Deleting an org is a big operation.** It needs to cascade through domains, mailboxes, mail data, Qdrant collections, Redis keys, webhook configs, templates, and tracking data. This is intentionally not a one-click operation to prevent accidents.
+- **Cross-org queries need platform scope.** Organization-scoped keys always filter to their own org; global views (total volume across orgs, platform monitoring) go through platform-scoped keys and the `/api/v1/platform/*` routes.
 
-- **Cross-org queries aren't possible through the API.** The API always filters by org. If you need a global view (e.g., total emails across all orgs), use direct database queries or the admin endpoints.
+- **Deleting an org is a big operation.** It must cascade through domains, mailboxes, mail data, Qdrant collections, Redis keys, and tenant rows — deliberately not a one-click action.
 
-- **Webhook secrets should be unique per org.** If Org A and Org B share a webhook secret, a compromise of one means the other's webhooks can be forged. Always generate unique secrets.
+- **Resource sharing is implicit.** All orgs share one Postfix, Dovecot, MySQL, Redis, and Qdrant. Rate limits and quotas are how you keep one org from starving the others.
 
-- **RAG collections are created on demand.** The first time an org indexes an email, its Qdrant collection is created. Empty orgs don't consume Qdrant resources.
-
-- **Resource sharing is implicit.** All orgs share the same Postfix, Dovecot, MySQL, Redis, and Qdrant instances. Rate limits and quotas are how you prevent one org from starving others. Set them appropriately for your hosting model.
-
-- **Plan your org structure early.** Deciding what constitutes an "organization" (one company? one department? one billing account?) affects everything downstream. Most SaaS setups map one customer = one organization.
+- **Sender identity is enforced per login, not per org.** `smtpd_sender_login_maps` (backed by MySQL) decides which addresses each SASL login may use on the submission ports; an SMTP API key may send as any address at its domain.

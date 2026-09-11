@@ -1,7 +1,7 @@
 
 # Email Tracking
 
-The Mailyte Mail Server provides comprehensive email tracking capabilities that allow you to monitor email opens, link clicks, and delivery status in real-time. This feature is essential for marketing campaigns, transactional emails, and understanding email engagement.
+The Enterprise Mail Server provides comprehensive email tracking capabilities that allow you to monitor email opens, link clicks, and delivery status in real-time. This feature is essential for marketing campaigns, transactional emails, and understanding email engagement.
 
 ## Overview
 
@@ -453,7 +453,7 @@ else:
 
 ### Dashboard Metrics
 
-The Mailyte Mail Server provides a comprehensive tracking dashboard:
+The Enterprise Mail Server provides a comprehensive tracking dashboard:
 
 ```bash
 # Access tracking dashboard

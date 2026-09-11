@@ -20,6 +20,11 @@ from fastapi.responses import JSONResponse
 
 logger = logging.getLogger(__name__)
 
+# What the tenant-side renderer emits for {{ unsubscribe_url }} (it cannot
+# know the tracking id at render time). Must stay in sync with mailyte-api's
+# TemplateRenderer::UNSUBSCRIBE_URL_MARKER.
+UNSUBSCRIBE_URL_MARKER = "%%UNSUBSCRIBE_URL%%"
+
 # Create router for stats and injection endpoints
 stats_api = APIRouter()
 
@@ -94,6 +99,36 @@ async def inject_tracking(request: Request):
             enable_click_tracking = False
             logger.info(f"Click tracking disabled by tenant config for {tenant_id}")
 
+        # One id serves the open pixel, the unsubscribe link, and the
+        # response's tracking_id, so an unsubscribe POST can be attributed to
+        # the exact send that carried it. Built even when open/click tracking
+        # is off (unsubscribe is a recipient right, not an analytics
+        # feature), and failure degrades to None rather than failing the
+        # injection -- the mail must still go out.
+        tracking_id = None
+        unsubscribe_url = None
+        try:
+            tracking_id = request.app.tracking_service.generate_tracking_id(
+                email_id, recipient, tenant_id, domain_id
+            )
+            unsubscribe_url = request.app.tracking_service.create_unsubscribe_url(tracking_id)
+        except Exception as e:
+            logger.error(f"Failed to build unsubscribe URL for email {email_id}: {e}")
+
+        # Resolve the {{ unsubscribe_url }} content tag. The tenant renderer
+        # (mailyte-api TemplateRenderer::UNSUBSCRIBE_URL_MARKER -- keep in
+        # sync) emits this marker because the tracking id does not exist at
+        # render time; the real per-recipient URL is minted right above.
+        # Substituted BEFORE the disabled-path return and before link
+        # rewriting: the rewriter skips tracking-base URLs, so the
+        # substituted link is never click-wrapped, and the marker must never
+        # reach a recipient on ANY path. "#" is the dead-but-harmless
+        # fallback when URL minting failed.
+        if UNSUBSCRIBE_URL_MARKER in html_content:
+            html_content = html_content.replace(
+                UNSUBSCRIBE_URL_MARKER, unsubscribe_url or "#"
+            )
+
         # If both tracking types are disabled, return original content
         if not enable_open_tracking and not enable_click_tracking:
             logger.info(f"All tracking disabled for tenant {tenant_id}, returning original content")
@@ -107,6 +142,8 @@ async def inject_tracking(request: Request):
                         "links_rewritten": 0,
                     },
                     "tracking_urls": {},
+                    "tracking_id": tracking_id,
+                    "unsubscribe_url": unsubscribe_url,
                     "email_id": email_id,
                     "message": "Tracking disabled by configuration",
                 }
@@ -121,7 +158,7 @@ async def inject_tracking(request: Request):
         if enable_open_tracking:
             try:
                 tracking_pixel_url = request.app.tracking_service.create_tracking_pixel_url(
-                    email_id, recipient, tenant_id, domain_id
+                    email_id, recipient, tenant_id, domain_id, tracking_id=tracking_id
                 )
                 modified_content = request.app.tracking_service.inject_tracking_pixel(
                     modified_content, tracking_pixel_url
@@ -159,6 +196,8 @@ async def inject_tracking(request: Request):
                 "links_rewritten": links_rewritten,
             },
             "tracking_urls": tracking_urls,
+            "tracking_id": tracking_id,
+            "unsubscribe_url": unsubscribe_url,
             "email_id": email_id,
             "tenant_id": tenant_id,
             "domain_id": domain_id,
@@ -282,6 +321,60 @@ async def get_tenant_stats(
     except Exception as e:
         logger.error(f"Error retrieving tenant stats for {tenant_id}: {e}")
         return JSONResponse({"error": "Failed to retrieve tenant statistics"}, status_code=500)
+
+
+@stats_api.get("/tracking/stats/domain/{domain}")
+async def get_domain_stats(
+    domain: str,
+    request: Request,
+    days: int = Query(default=30),
+):
+    """
+    Get tracking statistics for all emails sent from a domain.
+
+    Args:
+        domain: Domain name (e.g. "example.com"), not its internal id
+
+    Returns:
+        JSON: Domain tracking statistics
+    """
+    try:
+        if not domain:
+            return JSONResponse({"error": "Domain is required"}, status_code=400)
+
+        if days <= 0 or days > 365:
+            return JSONResponse({"error": "Days must be between 1 and 365"}, status_code=400)
+
+        rows = request.app.database_service.execute_query(
+            "SELECT id FROM domains WHERE domain = %s LIMIT 1", (domain,)
+        )
+        if not rows:
+            return JSONResponse({"error": "Domain not found"}, status_code=404)
+
+        domain_id = rows[0]["id"]
+        stats = request.app.database_service.get_domain_stats(domain_id, days)
+
+        if not stats:
+            return JSONResponse(
+                {
+                    "domain": domain,
+                    "message": "No tracking data found for this domain",
+                    "period_days": days,
+                    "event_statistics": {},
+                    "total_sent": 0,
+                    "total_opens": 0,
+                    "total_clicks": 0,
+                    "generated_at": datetime.utcnow().isoformat() + "Z",
+                }
+            )
+
+        stats["domain"] = domain
+        logger.debug(f"Retrieved domain stats for {domain} (last {days} days)")
+        return JSONResponse(stats)
+
+    except Exception as e:
+        logger.error(f"Error retrieving stats for domain {domain}: {e}")
+        return JSONResponse({"error": "Failed to retrieve domain statistics"}, status_code=500)
 
 
 @stats_api.get("/tracking/stats/summary")

@@ -1,259 +1,99 @@
 # Monitoring Stack Deployment
 
-> **Enterprise Edition** — This feature is available in [Mailyte Enterprise](https://mailyte.com). The Community Edition does not include this functionality.
-
-
-How to deploy the full monitoring stack — Prometheus, Grafana, and Alertmanager — alongside your Mailyte email server.
+How the monitoring stack — Prometheus, Grafana, and Alertmanager — is deployed alongside your Mailyte email server.
 
 ## Overview
 
-The monitoring stack runs as its own Docker Compose file (or can be merged into the main one). It's optional but strongly recommended for production.
+There is no separate monitoring compose file. Prometheus, Grafana, Alertmanager, and the database exporters are services **inside the main `docker-compose.yml`** and come up with the rest of the stack.
 
 ```mermaid
 graph LR
-    subgraph Monitoring Stack
+    subgraph Scrape targets
+        RS[rspamd :11334]
+        API[api + every worker<br/>:its own /metrics]
+        ME[mysql-exporter :9104]
+        RE[redis-exporter :9121]
+    end
+
+    subgraph Monitoring services
         PR[Prometheus :9090]
         GR[Grafana :3000]
         AM[Alertmanager :9093]
-        NE[Node Exporter :9100]
-        CA[cAdvisor :8081]
     end
 
-    subgraph Exporters
-        PE[Postfix Exporter :9154]
-        DE[Dovecot Exporter :9166]
-        ME[MySQL Exporter :9104]
-        RE[Redis Exporter :9121]
-    end
-
-    PE --> PR
-    DE --> PR
+    RS --> PR
+    API --> PR
     ME --> PR
     RE --> PR
-    NE --> PR
-    CA --> PR
     PR --> GR
     PR --> AM
 ```
 
-## Docker Compose File
+The images are pinned in the compose file:
 
-```yaml
-# docker-compose.monitoring.yml
-version: "3.8"
+| Service | Image | Host port (base file) |
+|---------|-------|----------------------|
+| `prometheus` | `prom/prometheus:v2.51.0` | 9090 |
+| `grafana` | `grafana/grafana:10.4.0` | 3000 |
+| `alertmanager` | `prom/alertmanager:v0.27.0` | 9093 |
+| `mysql-exporter` | `prom/mysqld-exporter:v0.15.1` | 9104 |
+| `redis-exporter` | `oliver006/redis_exporter:v1.58.0` | 9121 |
 
-services:
-  # ─────────────────────────────────────────
-  # Prometheus — Metrics storage and queries
-  # ─────────────────────────────────────────
-  prometheus:
-    image: prom/prometheus:latest
-    container_name: mailyte-prometheus
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:9090:9090"   # Localhost only
-    volumes:
-      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - ./monitoring/prometheus/rules:/etc/prometheus/rules:ro
-      - prometheus-data:/prometheus
-    command:
-      - "--config.file=/etc/prometheus/prometheus.yml"
-      - "--storage.tsdb.path=/prometheus"
-      - "--storage.tsdb.retention.time=30d"
-      - "--storage.tsdb.retention.size=10GB"
-      - "--web.enable-lifecycle"        # Allows config reload via API
-      - "--web.enable-admin-api"        # Allows admin operations
-    networks:
-      - mailyte-network
-      - monitoring-network
-    deploy:
-      resources:
-        limits:
-          cpus: "1.0"
-          memory: 2G
+In production (`docker-compose.prod.yml`), all five are rebound to `127.0.0.1`; Grafana additionally gets a Traefik router at `https://grafana.<DOMAIN>`.
 
-  # ─────────────────────────────────────────
-  # Grafana — Dashboards and visualization
-  # ─────────────────────────────────────────
-  grafana:
-    image: grafana/grafana:latest
-    container_name: mailyte-grafana
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:3000:3000"   # Localhost only
-    volumes:
-      - grafana-data:/var/lib/grafana
-      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
-    environment:
-      - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-changeme}
-      - GF_USERS_ALLOW_SIGN_UP=false
-      - GF_AUTH_ANONYMOUS_ENABLED=false
-      - GF_SERVER_ROOT_URL=http://localhost:3000
-      - GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-piechart-panel
-    depends_on:
-      - prometheus
-    networks:
-      - monitoring-network
-    deploy:
-      resources:
-        limits:
-          cpus: "0.5"
-          memory: 512M
+## Configuration Layout
 
-  # ─────────────────────────────────────────
-  # Alertmanager — Alert routing
-  # ─────────────────────────────────────────
-  alertmanager:
-    image: prom/alertmanager:latest
-    container_name: mailyte-alertmanager
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:9093:9093"
-    volumes:
-      - ./monitoring/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
-      - alertmanager-data:/alertmanager
-    command:
-      - "--config.file=/etc/alertmanager/alertmanager.yml"
-      - "--storage.path=/alertmanager"
-    networks:
-      - monitoring-network
-    deploy:
-      resources:
-        limits:
-          cpus: "0.25"
-          memory: 128M
-
-  # ─────────────────────────────────────────
-  # Node Exporter — OS metrics
-  # ─────────────────────────────────────────
-  node-exporter:
-    image: prom/node-exporter:latest
-    container_name: mailyte-node-exporter
-    restart: unless-stopped
-    pid: host
-    volumes:
-      - /proc:/host/proc:ro
-      - /sys:/host/sys:ro
-      - /:/rootfs:ro
-    command:
-      - "--path.procfs=/host/proc"
-      - "--path.sysfs=/host/sys"
-      - "--path.rootfs=/rootfs"
-      - "--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)"
-    networks:
-      - monitoring-network
-
-  # ─────────────────────────────────────────
-  # cAdvisor — Container metrics
-  # ─────────────────────────────────────────
-  cadvisor:
-    image: gcr.io/cadvisor/cadvisor:latest
-    container_name: mailyte-cadvisor
-    restart: unless-stopped
-    volumes:
-      - /:/rootfs:ro
-      - /var/run:/var/run:ro
-      - /sys:/sys:ro
-      - /var/lib/docker/:/var/lib/docker:ro
-      - /dev/disk/:/dev/disk:ro
-    privileged: true
-    devices:
-      - /dev/kmsg
-    networks:
-      - monitoring-network
-
-  # ─────────────────────────────────────────
-  # Service Exporters
-  # ─────────────────────────────────────────
-  postfix-exporter:
-    image: mailyte/postfix-exporter:latest
-    container_name: mailyte-postfix-exporter
-    restart: unless-stopped
-    environment:
-      - POSTFIX_HOST=postfix
-    networks:
-      - mailyte-network
-      - monitoring-network
-
-  mysql-exporter:
-    image: prom/mysqld-exporter:latest
-    container_name: mailyte-mysql-exporter
-    restart: unless-stopped
-    environment:
-      - DATA_SOURCE_NAME=exporter:${MYSQL_EXPORTER_PASSWORD}@(mysql:3306)/
-    networks:
-      - mailyte-network
-      - monitoring-network
-
-  redis-exporter:
-    image: oliver006/redis_exporter:latest
-    container_name: mailyte-redis-exporter
-    restart: unless-stopped
-    environment:
-      - REDIS_ADDR=redis://redis:6379
-      - REDIS_PASSWORD=${REDIS_PASSWORD}
-    networks:
-      - mailyte-network
-      - monitoring-network
-
-volumes:
-  prometheus-data:
-  grafana-data:
-  alertmanager-data:
-
-networks:
-  monitoring-network:
-    driver: bridge
-  mailyte-network:
-    external: true
-    name: mailyte_mailyte-network
-```
-
-## Directory Structure
-
-Create the monitoring config directories:
-
-```bash
-mkdir -p monitoring/{prometheus/rules,grafana/{provisioning/{datasources,dashboards},dashboards},alertmanager}
-```
+All configuration is bind-mounted from the repository's `monitoring/` directory — edit there, then restart the service:
 
 ```
 monitoring/
 ├── prometheus/
-│   ├── prometheus.yml        # Main Prometheus config
+│   ├── prometheus.yml            # Scrape configs (15s interval) + alerting wiring
 │   └── rules/
-│       ├── postfix.yml       # Mail alert rules
-│       ├── services.yml      # Service health rules
-│       ├── infrastructure.yml # CPU, disk, memory rules
-│       └── database.yml      # MySQL and Redis rules
+│       ├── mail_alerts.yml       # Mail-flow alert rules
+│       └── backup_alerts.yml     # Backup freshness alert rules
 ├── grafana/
 │   ├── provisioning/
-│   │   ├── datasources/
-│   │   │   └── prometheus.yml
-│   │   └── dashboards/
-│   │       └── dashboards.yml
+│   │   ├── datasources/prometheus.yml
+│   │   └── dashboards/dashboards.yml
 │   └── dashboards/
-│       ├── mail-flow.json
-│       ├── queue-status.json
-│       ├── api-performance.json
-│       └── system-overview.json
+│       ├── mail_overview.json
+│       └── security_dashboard.json
 └── alertmanager/
     └── alertmanager.yml
 ```
 
-## Starting the Stack
+Prometheus scrapes every worker service on its **container** port (`api:8080`, `webhooks:8081`, `monitoring:8085`, ...), plus rspamd's built-in `/metrics` on 11334 and the two exporters. Time-series data lives in the `prometheus_data` named volume with 30-day retention.
+
+## Credentials
+
+Grafana's admin login comes from `.env`:
+
+```dotenv
+GRAFANA_ADMIN_USER=admin
+GRAFANA_ADMIN_PASSWORD=<generated by scripts/generate-secrets.sh>
+```
+
+`GRAFANA_ADMIN_PASSWORD` is one of the eight secrets the stack validates fail-closed at startup — sign-up is disabled (`GF_USERS_ALLOW_SIGN_UP=false`).
+
+The MySQL exporter authenticates as the application user (`DB_USER`/`DB_PASSWORD`) and runs with `--no-collect.slave_status` because no replica exists in this stack.
+
+## Starting and Reloading
+
+The monitoring services start with the stack — there is nothing extra to run:
 
 ```bash
-# Start the monitoring stack
-docker compose -f docker-compose.monitoring.yml up -d
+docker compose up -d prometheus grafana alertmanager   # or just: docker compose up -d
+```
 
-# Or if you merged it into the main compose file
-docker compose --profile monitoring up -d
+After editing configuration:
 
-# Verify everything is running
-docker compose -f docker-compose.monitoring.yml ps
+```bash
+# Prometheus supports live reload (--web.enable-lifecycle is on)
+curl -X POST http://localhost:9090/-/reload
+
+# Grafana and Alertmanager need a restart
+docker compose restart grafana alertmanager
 ```
 
 ## Post-Deploy Verification
@@ -278,54 +118,44 @@ curl -s http://localhost:9093/-/healthy
 curl -s 'http://localhost:9090/api/v1/query?query=up' | python3 -m json.tool
 ```
 
+!!! note "Two targets are expected to be down"
+    `prometheus.yml` still defines `postfix` and `dovecot` scrape jobs pointing at `postfix-exporter:9154` / `dovecot-exporter:9166` — exporters that are not part of the compose stack. Those two targets showing `down` is a known configuration leftover, not a mail problem; Postfix delivery data reaches the platform through the `log_ingestor` service instead.
+
 ## Accessing Remotely
 
-These services are bound to `127.0.0.1` for security. To access them:
+In production these services are bound to `127.0.0.1`. To reach them:
 
-### Option 1: SSH Tunnel (Recommended for occasional use)
+### Option 1: Traefik (Grafana only, built in)
+
+`docker-compose.prod.yml` already routes `https://grafana.<DOMAIN>` to Grafana, with a certificate issued by cert_manager (`grafana` is in the default `TRAEFIK_ADMIN_SUBDOMAINS`). Just publish the DNS record.
+
+### Option 2: SSH Tunnel (Prometheus / Alertmanager)
 
 ```bash
 # From your local machine
-ssh -L 3000:localhost:3000 -L 9090:localhost:9090 user@your-server
-# Now open http://localhost:3000 in your browser
-```
-
-### Option 2: Reverse Proxy (Recommended for team access)
-
-```nginx
-# /etc/nginx/sites-available/grafana
-server {
-    listen 443 ssl;
-    server_name grafana.yourdomain.com;
-
-    ssl_certificate /etc/letsencrypt/live/grafana.yourdomain.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/grafana.yourdomain.com/privkey.pem;
-
-    location / {
-        proxy_pass http://127.0.0.1:3000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-    }
-}
+ssh -L 3000:localhost:3000 -L 9090:localhost:9090 -L 9093:localhost:9093 user@your-server
+# Now open http://localhost:9090 in your browser
 ```
 
 ### Option 3: VPN
 
-If your team uses a VPN, just make sure the monitoring ports are reachable through the VPN tunnel.
+If your team uses a VPN terminating on the server, the loopback-bound ports are reachable through it.
+
+Do **not** add your own nginx on the host for this — Traefik already owns ports 80/443, and only one process can bind them.
+
+## Beyond Prometheus: the monitoring service
+
+Do not confuse the Prometheus stack with the `monitoring` **worker service** (port 8085). That service is Mailyte's own health monitor: it checks the other containers and restarts unhealthy ones through the scoped `docker-proxy` — the auto-healing described in [Monitoring > Auto-healing](../monitoring/auto-healing.md). Both run by default.
 
 ## Resource Usage
 
-The monitoring stack itself uses resources. Here's what to expect:
+Production memory limits from `docker-compose.prod.yml`:
 
-| Component | CPU (idle) | CPU (busy) | Memory |
-|-----------|-----------|-----------|--------|
-| Prometheus | 0.1 core | 0.5 core | 500MB - 2GB |
-| Grafana | 0.05 core | 0.2 core | 150MB - 300MB |
-| Alertmanager | 0.01 core | 0.05 core | 50MB |
-| Node Exporter | 0.01 core | 0.05 core | 30MB |
-| cAdvisor | 0.05 core | 0.2 core | 100MB |
-| Exporters (total) | 0.05 core | 0.1 core | 100MB |
+| Component | Limit |
+|-----------|-------|
+| Prometheus | 1 GB |
+| Grafana | 512 MB |
+| Alertmanager | 256 MB |
+| mysql-exporter / redis-exporter | 128 MB each |
 
-**Total:** About 1 GB of RAM and 0.3 CPU cores when idle. Budget 2-3 GB for the full monitoring stack.
-
-> **Tip:** If you're tight on resources, skip cAdvisor and rely on `docker stats` for container metrics. It saves about 200MB of RAM.
+Budget roughly 2 GB for the whole monitoring tier at moderate scrape volume.

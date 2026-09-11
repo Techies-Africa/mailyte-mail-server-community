@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+"""Inbound archive producer: hand every delivered message to the archiver.
+
+Runs as a Dovecot Sieve `pipe :copy` action from the global script, so it sees
+every message LMTP delivers, exactly once, with the full RFC 2822 body on
+stdin -- and it sees it BEFORE Dovecot writes it to the Maildir, which is the
+only moment inbound mail exists in plaintext on this host. Reading it back out
+of the Maildir instead would mean reading mail_crypt ciphertext and
+reimplementing Dovecot's encryption and lz4 framing to get anywhere.
+
+The outbound half of the pair lives in tracking_injector.py, which is on the
+submission path only (`content_filter=tracking-filter:` is a per-service
+override in master.cf for the submission listeners, not a global setting), so
+it never sees inbound mail. Together the two cover every accepted message.
+
+THIS SCRIPT MUST ALWAYS EXIT 0.
+
+Dovecot's sieve_extprograms treats a non-zero exit as a failed sieve action.
+A failed action fails the script, a failed script makes LMTP return a
+temporary error, and Postfix then queues -- or eventually bounces -- a message
+we had already accepted. The archive is a durability guarantee; it is not
+allowed to become a delivery dependency. Every failure path below therefore
+logs and exits 0, and the whole body is wrapped as a last resort.
+
+The same lesson, learned the hard way: an earlier version of the outbound
+producer let Python's shutdown chatter reach stderr inside a Postfix pipe(8)
+transport, CPython exited 120, and messages bounced AFTER being delivered.
+Nothing here writes to stderr.
+"""
+
+import os
+import sys
+
+EXIT_OK = 0
+
+LOG_PATH = os.getenv("ARCHIVE_PIPE_LOG", "/var/log/dovecot/archive-pipe.log")
+ARCHIVE_URL = os.getenv("ARCHIVE_SERVICE_URL", "http://archiver:8083").rstrip("/")
+TIMEOUT = float(os.getenv("ARCHIVE_TIMEOUT", "3"))
+# Dovecot's default pipe buffer is generous, but a 40 MB attachment does not
+# belong in an HTTP POST on the delivery path. Oversized messages are skipped
+# here and remain covered by the 15-minute Maildir sync and nightly backups.
+MAX_BYTES = int(os.getenv("ARCHIVE_MAX_MESSAGE_BYTES", str(25 * 1024 * 1024)))
+
+
+def log(message: str) -> None:
+    """Append to a file. Never stdout (Dovecot reads it), never stderr."""
+    try:
+        with open(LOG_PATH, "a") as handle:
+            handle.write(f"{message}\n")
+    except OSError:
+        pass
+
+
+def main() -> int:
+    raw = sys.stdin.buffer.read()
+    if not raw:
+        log("archive-pipe: empty message on stdin, skipping")
+        return EXIT_OK
+    if len(raw) > MAX_BYTES:
+        log(f"archive-pipe: message of {len(raw)} bytes exceeds cap, skipping")
+        return EXIT_OK
+
+    # argv[1] is the envelope recipient, passed by the sieve script. Falling
+    # back to headers keeps this working if the script is ever invoked without
+    # arguments.
+    recipient = sys.argv[1] if len(sys.argv) > 1 else ""
+
+    import email
+    from email import policy
+
+    try:
+        message = email.message_from_bytes(raw, policy=policy.default)
+    except Exception as exc:  # noqa: BLE001 - never fail a delivery over parsing
+        log(f"archive-pipe: parse failed: {exc}")
+        return EXIT_OK
+
+    message_id = (message.get("Message-ID") or "").strip()
+    if not message_id:
+        # Without an id there is no stable key and no way to retrieve it later.
+        log("archive-pipe: no Message-ID, skipping")
+        return EXIT_OK
+
+    recipient = recipient or (message.get("Delivered-To") or message.get("To") or "")
+
+    payload = {
+        "message_id": message_id,
+        # The archiver resolves the owning organization from the recipient
+        # domain; this producer has no database access and should not grow one.
+        "organization_id": "",
+        "sender": str(message.get("From") or "")[:255],
+        "recipient": str(recipient)[:255],
+        "subject": str(message.get("Subject") or "")[:998],
+        "content": raw.decode("utf-8", errors="replace"),
+        "direction": "inbound",
+    }
+
+    try:
+        import json
+        import urllib.error
+        import urllib.request
+
+        request = urllib.request.Request(
+            f"{ARCHIVE_URL}/archive",
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json", "User-Agent": "dovecot-sieve-pipe/1.0"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+            if response.status != 200:
+                log(f"archive-pipe: archiver returned HTTP {response.status} for {message_id}")
+    except Exception as exc:  # noqa: BLE001 - see the module docstring
+        log(f"archive-pipe: archive call failed for {message_id} ({exc}); delivery unaffected")
+
+    return EXIT_OK
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except BaseException as exc:  # noqa: BLE001 - including SystemExit/KeyboardInterrupt
+        # The outermost guard. Whatever went wrong, this process exits 0 so
+        # Dovecot delivers the message.
+        try:
+            log(f"archive-pipe: unhandled {type(exc).__name__}: {exc}")
+        except Exception:
+            pass
+        os._exit(EXIT_OK)

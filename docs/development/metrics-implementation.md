@@ -1,18 +1,28 @@
 ---
 title: Metrics Implementation
-description: Implementing new Prometheus metrics — counters, gauges, histograms, labels, and best practices.
+description: Implementing new metrics with shared/metrics.py — counters, gauges, histograms, labels, and best practices.
 ---
 
 # Metrics Implementation
 
-> **Enterprise Edition** — This feature is available in [Mailyte Enterprise](https://mailyte.com). The Community Edition does not include this functionality.
+This is the nuts-and-bolts guide to implementing metrics in Mailyte. If you're adding a new metric, start here.
 
+## The Shared Helper, Not prometheus_client
 
-This is the nuts-and-bolts guide to implementing Prometheus metrics in Mailyte. If you're adding a new metric, start here.
+Workers do **not** use the `prometheus_client` library directly (the one exception is `worker/queue_manager/metrics.py`). The standard path is `shared/metrics.py`, which every worker's `/metrics` endpoint is built on:
+
+```python
+from shared.metrics import get_metrics
+
+metrics = get_metrics("my_service")  # one instance per service name, cached
+```
+
+`get_metrics()` returns a `PrometheusMetrics` instance that collects counters, gauges, and histograms in-process and renders them in Prometheus exposition format via `get_prometheus_metrics()`. It also emits some series for free:
+
+- `{service}_info`, `{service}_uptime_seconds`
+- `{service}_cpu_usage_percent`, `{service}_memory_usage_percent`, `{service}_memory_usage_bytes` (via `psutil` — which is why every worker's requirements pin it)
 
 ## Metric Types
-
-Prometheus has four metric types. You'll mostly use three:
 
 ### Counter
 
@@ -21,95 +31,132 @@ A value that only goes up. Resets to zero when the service restarts.
 **Use for:** requests served, emails sent, errors encountered, bytes transferred.
 
 ```python
-from prometheus_client import Counter
-
-EMAILS_SENT = Counter(
-    "mailyte_emails_sent_total",  # metric name
-    "Total emails sent",  # help text
-    ["organization_id", "domain"],  # labels
-)
-
 # Increment by 1
-EMAILS_SENT.labels(organization_id="acme", domain="acme.com").inc()
+metrics.increment_counter("emails_sent_total", labels={"domain": "acme.com"})
 
 # Increment by N
-EMAILS_SENT.labels(organization_id="acme", domain="acme.com").inc(5)
+metrics.increment_counter("emails_sent_total", value=5, labels={"domain": "acme.com"})
 ```
 
 ### Gauge
 
 A value that can go up and down.
 
-**Use for:** queue depth, memory usage, active connections, temperature.
+**Use for:** queue depth, active connections, current usage.
 
 ```python
-from prometheus_client import Gauge
-
-QUEUE_SIZE = Gauge(
-    "mailyte_mail_queue_size",
-    "Current number of messages in the mail queue",
-    ["status"],
-)
-
-# Set to a specific value
-QUEUE_SIZE.labels(status="queued").set(42)
-
-# Increment / decrement
-QUEUE_SIZE.labels(status="processing").inc()
-QUEUE_SIZE.labels(status="processing").dec()
+metrics.set_gauge("mail_queue_size", 42, labels={"status": "queued"})
 ```
 
 ### Histogram
 
-Measures the distribution of values (like request duration). Automatically creates buckets.
+Measures the distribution of values (like request duration). The shared helper keeps the last 1000 observations per series and exposes them as a Prometheus **summary**: `_count`, `_sum`, and `0.5`/`0.95`/`0.99` quantiles.
 
 **Use for:** latency, response times, sizes, durations.
 
 ```python
-from prometheus_client import Histogram
-
-REQUEST_DURATION = Histogram(
-    "mailyte_api_request_duration_seconds",
-    "API request duration in seconds",
-    ["method", "endpoint"],
-    buckets=[0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0],
-)
-
-# Observe a value
-REQUEST_DURATION.labels(method="POST", endpoint="/add/domain").observe(0.235)
-
-# Or use as a context manager (times automatically)
-with REQUEST_DURATION.labels(method="POST", endpoint="/add/domain").time():
-    do_work()
+metrics.observe_histogram("processing_seconds", duration, labels={"operation": "deliver"})
 ```
 
-A histogram creates three time series:
+## Built-in Recorders
 
-- `_bucket` — count of observations in each bucket
-- `_sum` — sum of all observed values
-- `_count` — total number of observations
+For the three most common patterns, use the purpose-built methods instead of raw counters — they keep label names consistent across every service:
+
+```python
+# HTTP requests — usually wired up once as FastAPI middleware (see below)
+metrics.record_request(method="POST", path="/api/v1/domains", status_code=200, duration=0.235)
+# -> {service}_http_requests_total, {service}_http_request_duration_seconds,
+#    {service}_http_errors_total (for status >= 400)
+
+# Database operations
+metrics.record_database_operation(operation="insert_domain", duration=0.012, success=True)
+# -> {service}_database_operations_total, {service}_database_operation_duration_seconds
+
+# Webhook deliveries
+metrics.record_webhook_delivery(url=url, status_code=200, duration=0.4)
+# -> {service}_webhook_deliveries_total, {service}_webhook_delivery_duration_seconds
+```
+
+The standard middleware every worker carries:
+
+```python
+@app.middleware("http")
+async def metrics_middleware(request: Request, call_next):
+    start_time = time.time()
+    response = await call_next(request)
+    metrics.record_request(
+        method=request.method,
+        path=request.url.path,
+        status_code=response.status_code,
+        duration=time.time() - start_time,
+    )
+    return response
+```
+
+## Exposing /metrics
+
+```python
+from fastapi.responses import PlainTextResponse
+
+
+@app.get("/metrics")
+async def prometheus_metrics():
+    return PlainTextResponse(metrics.get_prometheus_metrics())
+```
+
+Then register the service in `monitoring/prometheus/prometheus.yml` (targets use **container** ports, not host-mapped ports):
+
+```yaml
+- job_name: 'my_service'
+  metrics_path: /metrics
+  static_configs:
+    - targets: ['my_service:8094']
+```
+
+## Naming Conventions
+
+The helper prefixes every metric with the service name you passed to `get_metrics()`:
+
+```
+{service}_{metric}_{unit}
+```
+
+| Part | Rules | Examples |
+|------|-------|---------|
+| Service | Set once via `get_metrics("...")` | `api`, `storage`, `tracking`, `webhook` |
+| Metric | What's being measured | `http_requests`, `emails_sent`, `processing_duration` |
+| Unit | Standard unit suffix | `_total` (counter), `_seconds` (duration), `_bytes` (size) |
+
+### Unit Suffixes
+
+| Suffix | Meaning | Example |
+|--------|---------|---------|
+| `_total` | Counter (cumulative) | `storage_http_requests_total` |
+| `_seconds` | Duration | `api_http_request_duration_seconds` |
+| `_bytes` | Size | `storage_usage_bytes` |
+| `_percent` | Percentage (0-100) | `api_cpu_usage_percent` |
+| (none) | Gauge of current count | `queue_manager_mail_queue_size` |
 
 ## Labels
 
-Labels add dimensions to your metrics. Use them to slice data by organization, domain, status, etc.
+Labels add dimensions to your metrics. Pass them as a dict; the helper renders them into the series name.
 
 ### Good Label Usage
 
 ```python
 # Good — useful for filtering and aggregation
-Counter("mailyte_emails_total", "Emails", ["direction", "status"])
-# -> mailyte_emails_total{direction="inbound", status="delivered"}
-# -> mailyte_emails_total{direction="outbound", status="bounced"}
+metrics.increment_counter("emails_total", labels={"direction": "inbound", "status": "delivered"})
 ```
 
 ### Bad Label Usage
 
 ```python
-# Bad — email address has infinite cardinality, will explode memory
-Counter("mailyte_emails_total", "Emails", ["recipient_email"])
+# Bad — email address has unbounded cardinality; every unique value is a new
+# in-memory series AND a new Prometheus series
+metrics.increment_counter("emails_total", labels={"recipient_email": email})
 
-# Bad — timestamp labels are unique, creates infinite series
-Counter("mailyte_emails_total", "Emails", ["timestamp"])
+# Bad — timestamps are unique, creates infinite series
+metrics.increment_counter("emails_total", labels={"timestamp": now_iso})
 ```
 
 ### Label Rules
@@ -117,118 +164,40 @@ Counter("mailyte_emails_total", "Emails", ["timestamp"])
 1. **Low cardinality** — labels should have a small, bounded set of values
 2. **Useful for grouping** — every label should enable useful queries
 3. **No user-generated content** — don't use email addresses, message IDs, or subject lines as labels
-4. **Consistent naming** — use the same label names across related metrics
+4. **Consistent naming** — use the same label names across related metrics (the built-in recorders exist for exactly this reason)
 
 Good labels: `organization_id`, `domain`, `status`, `method`, `direction`, `event_type`
 Bad labels: `email`, `message_id`, `subject`, `ip_address`, `user_agent`
 
-## Naming Conventions
-
-```
-mailyte_{subsystem}_{metric}_{unit}
-```
-
-| Part | Rules | Examples |
-|------|-------|---------|
-| Prefix | Always `mailyte_` | |
-| Subsystem | Service or component | `api`, `tracking`, `queue`, `webhook` |
-| Metric | What's being measured | `requests`, `emails_sent`, `processing_duration` |
-| Unit | Standard unit suffix | `_total` (counter), `_seconds` (duration), `_bytes` (size) |
-
-### Unit Suffixes
-
-| Suffix | Meaning | Example |
-|--------|---------|---------|
-| `_total` | Counter (cumulative) | `mailyte_emails_sent_total` |
-| `_seconds` | Duration | `mailyte_delivery_duration_seconds` |
-| `_bytes` | Size | `mailyte_storage_used_bytes` |
-| `_ratio` | Ratio (0.0-1.0) | `mailyte_storage_usage_ratio` |
-| (none) | Gauge of current count | `mailyte_mail_queue_size` |
-
 ## Complete Example
 
-Here's a worker with full metrics instrumentation:
+A worker instrumenting its processing loop:
 
 ```python
-from prometheus_client import Counter, Histogram, Gauge, Info
-import time
+from shared.metrics import get_metrics
 
-# Service info
-SERVICE_INFO = Info("mailyte_queue_manager", "Queue manager service info")
-SERVICE_INFO.info({"version": "1.0.0", "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ")})
-
-# Counters
-MESSAGES_PROCESSED = Counter(
-    "mailyte_queue_processed_total",
-    "Total messages processed from the queue",
-    ["status"],  # sent, bounced, rejected, deferred
-)
-
-PROCESSING_ERRORS = Counter(
-    "mailyte_queue_errors_total",
-    "Total processing errors",
-    ["error_type"],
-)
-
-# Histograms
-PROCESSING_DURATION = Histogram(
-    "mailyte_queue_processing_seconds",
-    "Time to process each message",
-    buckets=[0.1, 0.5, 1.0, 5.0, 10.0, 30.0, 60.0],
-)
-
-MESSAGE_SIZE = Histogram(
-    "mailyte_queue_message_size_bytes",
-    "Size of messages being processed",
-    buckets=[1024, 10240, 102400, 1048576, 10485760, 52428800],
-)
-
-# Gauges
-QUEUE_DEPTH = Gauge(
-    "mailyte_mail_queue_size",
-    "Current queue depth",
-    ["status"],
-)
-
-ACTIVE_WORKERS = Gauge(
-    "mailyte_queue_active_workers",
-    "Number of currently active worker threads",
-)
-
-OLDEST_MESSAGE_AGE = Gauge(
-    "mailyte_queue_oldest_message_age_seconds",
-    "Age of the oldest message in the queue",
-)
+metrics = get_metrics("my_worker")
 
 
 class QueueProcessor:
     def process_message(self, message):
-        # Track message size
-        MESSAGE_SIZE.observe(message.size)
+        metrics.observe_histogram("message_size_bytes", message.size)
 
-        # Track active workers
-        ACTIVE_WORKERS.inc()
+        start = time.time()
         try:
-            with PROCESSING_DURATION.time():
-                result = self._deliver(message)
-
-            MESSAGES_PROCESSED.labels(status=result.status).inc()
+            result = self._deliver(message)
+            metrics.increment_counter("processed_total", labels={"status": result.status})
         except Exception as e:
-            PROCESSING_ERRORS.labels(error_type=type(e).__name__).inc()
+            metrics.increment_counter("errors_total", labels={"error_type": type(e).__name__})
             raise
         finally:
-            ACTIVE_WORKERS.dec()
+            metrics.observe_histogram("processing_seconds", time.time() - start)
 
     def update_queue_metrics(self):
-        """Called periodically to update gauge metrics."""
+        """Called periodically to refresh gauges."""
         for status in ["queued", "sending", "deferred"]:
-            count = self.db.execute("SELECT COUNT(*) FROM mail_queue WHERE status = %s", (status,))
-            QUEUE_DEPTH.labels(status=status).set(count)
-
-        oldest = self.db.execute("SELECT MIN(created_at) FROM mail_queue WHERE status = 'queued'")
-        if oldest:
-            age = (datetime.now() - oldest).total_seconds()
-            OLDEST_MESSAGE_AGE.set(age)
+            count = self.count_by_status(status)
+            metrics.set_gauge("mail_queue_size", count, labels={"status": status})
 ```
 
 ## PromQL Queries for Your Metrics
@@ -237,27 +206,29 @@ After implementing metrics, you'll query them in Prometheus/Grafana:
 
 ```promql
 # Request rate (per second)
-rate(mailyte_queue_processed_total[5m])
+rate(my_worker_processed_total[5m])
 
 # Error rate as percentage
-rate(mailyte_queue_errors_total[5m]) / rate(mailyte_queue_processed_total[5m]) * 100
+rate(my_worker_errors_total[5m]) / rate(my_worker_processed_total[5m]) * 100
 
-# 95th percentile processing time
-histogram_quantile(0.95, rate(mailyte_queue_processing_seconds_bucket[5m]))
+# p95 processing time (the helper exposes summary quantiles directly)
+my_worker_processing_seconds{quantile="0.95"}
 
 # Average message size
-rate(mailyte_queue_message_size_bytes_sum[5m]) / rate(mailyte_queue_message_size_bytes_count[5m])
+rate(my_worker_message_size_bytes_sum[5m]) / rate(my_worker_message_size_bytes_count[5m])
 ```
+
+Note: because the helper exposes **summaries** (pre-computed quantiles), `histogram_quantile()` does not apply — query the `quantile` label directly.
 
 ## Debugging Metrics
 
 ```bash
-# Check that metrics are being emitted
-curl -s http://localhost:8085/metrics | grep mailyte_queue
-
-# Check specific metric values
-curl -s http://localhost:8085/metrics | grep "mailyte_queue_processed_total"
+# Check the raw exposition output (host-mapped port; e.g. monitoring on 8085)
+curl -s http://localhost:8085/metrics | grep http_requests
 
 # Check via Prometheus
-curl -s "http://localhost:9090/api/v1/query?query=mailyte_queue_processed_total" | python3 -m json.tool
+curl -s "http://localhost:9090/api/v1/query?query=api_http_requests_total" | python3 -m json.tool
 ```
+
+!!! info "Malformed exposition kills the whole scrape"
+    Prometheus rejects an entire scrape on a single malformed line (a `TYPE` declared twice, or with labels in the name). `shared/metrics.py`'s emitter handles family grouping correctly — one more reason to go through it instead of hand-rolling exposition text.

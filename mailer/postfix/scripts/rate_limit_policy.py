@@ -19,6 +19,7 @@ We reply with a single line:
 
     action=DUNNO\n\n              -- allow (let other restrictions decide)
     action=DEFER_IF_PERMIT ...\n\n -- soft-reject when over quota
+    action=REJECT 5.7.1 ...\n\n   -- permanent reject (suppressed recipient)
 
 If the HTTP service is unreachable the script fails open (DUNNO) so that
 mail is never silently dropped because of a service outage.
@@ -116,9 +117,19 @@ def check_via_json_api(attrs: dict[str, str]) -> str:
 
     direction = "outbound" if sasl_username else "inbound"
 
+    # Postfix only fills `recipient` at the DATA stage when the message has
+    # exactly one recipient; recipient_count lets the service log the
+    # multi-recipient case it cannot check. The service uses these for
+    # outbound suppression-list enforcement.
+    recipient = attrs.get("recipient", "")
+    recipient_count_raw = attrs.get("recipient_count", "")
+    recipient_count = int(recipient_count_raw) if recipient_count_raw.isdigit() else 0
+
     payload = {
         "email": email,
         "direction": direction,
+        "recipient": recipient,
+        "recipient_count": recipient_count,
         # Each policy query is one RCPT on the live mail path -- the service
         # increments usage for allowed messages only when this flag is set,
         # so read-only callers of the same endpoint don't consume quota.
@@ -136,6 +147,19 @@ def check_via_json_api(attrs: dict[str, str]) -> str:
 
     allowed = resp.get("allowed", True)
     message = resp.get("message", "")
+
+    # A suppressed recipient is a PERMANENT refusal, not an over-quota
+    # defer: REJECT hands the authenticated sender a 554 5.7.1 naming the
+    # suppression, in-session -- refused loudly, never silently dropped.
+    # The service only sets this flag on outbound single-recipient
+    # messages, and fails open itself when its suppression data is
+    # unreachable.
+    if resp.get("suppressed"):
+        reject_text = " ".join(
+            str(message or "5.7.1 Recipient address is on the suppression list.").split()
+        )
+        logger.warning(f"Suppressed recipient rejected for {email}: {recipient}")
+        return f"REJECT {reject_text}"
 
     if allowed:
         return "DUNNO"
