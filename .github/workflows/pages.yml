@@ -1,0 +1,96 @@
+name: Publish the handbook
+
+# Builds docs/ with MkDocs and publishes it to GitHub Pages, which is what
+# serves docs.mailyte.com.
+#
+# Why Pages rather than the docs container: the container exists so that a
+# self-hoster gets the handbook alongside their own install, on :8000. It is the
+# wrong thing to serve the PUBLIC site from, because the public site has to be
+# readable by someone deciding whether to install at all — and until now it was
+# not published anywhere, which meant the install guide could only be read after
+# installing.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - '.github/workflows/pages.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One publish at a time; never cancel one midway and leave the site half-written.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history, NOT the default shallow clone. The
+          # git-revision-date-localized plugin reads each page's last commit to
+          # show "updated 3 days ago"; with a shallow clone every page falls
+          # back to the build date, so the whole site claims to have been
+          # updated today, every day.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          cache-dependency-path: docs/requirements.txt
+
+      - name: Install MkDocs
+        run: pip install -r docs/requirements.txt
+
+      - name: Stage the MkDocs layout
+        # This repo keeps mkdocs.yml INSIDE docs/ alongside the pages, while
+        # MkDocs wants the config beside a docs/ directory, and the theme
+        # overrides and snippet includes beside the config rather than under it.
+        # docs/Dockerfile does the same restaging with a list of COPY lines that
+        # has to be edited whenever a section is added; this derives it instead,
+        # so a new section cannot be silently left out of the published site.
+        run: |
+          mkdir -p build/docs
+          cp docs/mkdocs.yml build/mkdocs.yml
+          cp -R docs/overrides build/overrides
+          cp -R docs/includes  build/includes
+          for d in docs/*/; do
+            name="$(basename "$d")"
+            case "$name" in scripts|nginx|overrides|includes|versions) continue;; esac
+            cp -R "$d" "build/docs/$name"
+          done
+          cp docs/*.md build/docs/ 2>/dev/null || true
+          cp docs/CNAME build/docs/CNAME 2>/dev/null || true
+          # Carry .git so the revision-date plugin still resolves per-page dates.
+          ln -s "$PWD/.git" build/.git
+
+      - name: Build
+        # --strict, so a broken internal link or a missing nav target fails the
+        # publish instead of shipping. The generator that produces this repo
+        # rewrites links to pages it dropped, so a dangling link here means a
+        # genuine mistake rather than an edition difference.
+        working-directory: build
+        run: mkdocs build --strict --site-dir ../_site
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

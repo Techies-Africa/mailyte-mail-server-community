@@ -37,7 +37,7 @@ Every control documented in this section is one that actually executes in the de
 
     TLS configuration, mail_crypt at-rest encryption, envelope-encrypted private keys, DKIM signing.
 
-    [:octicons-arrow-right-24: Encryption](encryption.md)
+    :octicons-arrow-right-24: Encryption (Enterprise Edition)
 
 -   :material-wall:{ .lg .middle } **Network Security**
 
@@ -53,7 +53,7 @@ Every control documented in this section is one that actually executes in the de
 
     GDPR endpoints, data retention, right to erasure, legal holds, and audit logging.
 
-    [:octicons-arrow-right-24: Compliance](compliance.md)
+    :octicons-arrow-right-24: Compliance (Enterprise Edition)
 
 -   :material-bug:{ .lg .middle } **Vulnerability Management**
 
@@ -154,7 +154,7 @@ See: [Network Security](network-security.md)
 
 External connections use TLS 1.2+. SMTP supports STARTTLS (25/587) and implicit TLS (465), and Postfix refuses AUTH on unencrypted connections (`smtpd_tls_auth_only = yes`). Dovecot sets `ssl = required` with `ssl_min_protocol = TLSv1.2`. HTTP APIs are fronted by Traefik with TLS.
 
-See: [Encryption](encryption.md)
+See: Encryption (Enterprise Edition)
 
 ### Layer 3: Authentication
 
@@ -213,10 +213,10 @@ See: [Security Monitoring](security-monitoring.md)
 |---|---|
 | Set up API keys for my app | [Authentication](authentication.md) |
 | Give an app SMTP-only send access | [Authentication](authentication.md#smtp-api-key-credentials) |
-| Configure TLS certificates | [Encryption](encryption.md) |
+| Configure TLS certificates | Encryption (Enterprise Edition) |
 | Lock down exposed ports | [Network Security](network-security.md) |
 | Block brute-force attacks | [Intrusion Detection](intrusion-detection.md) |
-| Ensure GDPR compliance | [Compliance](compliance.md) |
+| Ensure GDPR compliance | Compliance (Enterprise Edition) |
 | Monitor for attacks | [Security Monitoring](security-monitoring.md) |
 | Run a pre-deployment audit | [Security Checklist](security-checklist.md) |
 

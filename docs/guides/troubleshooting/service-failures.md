@@ -261,7 +261,7 @@ docker inspect <container_name> --format='{{json .State.Health}}' | python3 -m j
 
 ### Test Health Endpoint Manually
 
-Worker services answer `/health` on their published host port (dev bindings — see [Monitoring Setup](../monitoring-setup.md) for the port table):
+Worker services answer `/health` on their published host port (dev bindings — see Monitoring Setup (Enterprise Edition) for the port table):
 
 ```bash
 curl -s http://localhost:8083/health   # api (host 8083 → container 8080)

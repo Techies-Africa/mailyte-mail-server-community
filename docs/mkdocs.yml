@@ -86,6 +86,14 @@ plugins:
   - git-revision-date-localized:
       enable_creation_date: true
       type: timeago
+      # Without this the plugin raises InvalidGitRepositoryError and aborts the
+      # whole build wherever .git is absent -- which is every place this site is
+      # actually built. The docs container runs `mkdocs build` in /srv, into
+      # which the Dockerfile copies pages but no repository; CI checkouts are
+      # shallow by default; and a contributor building from a tarball has none
+      # either. The container's healthcheck only asks whether nginx answers, so
+      # a failed build still reports healthy and serves nothing.
+      fallback_to_build_date: true
   - exclude:
       glob:
         - "Dockerfile"
