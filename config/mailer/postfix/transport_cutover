@@ -1,0 +1,52 @@
+# Domains provisioned on this server whose mail still lives somewhere else.
+#
+# Every domain here exists in this server's virtual_mailbox_domains (it was
+# created during the mailcow migration), which normally means "deliver
+# locally". But their public MX still points at the old server -- or, for
+# peekride.com and talkam.net, at Microsoft 365 and Zoho. Delivering locally
+# would drop the mail into this server's copy of the mailbox, which nobody
+# reads, while the real mailbox never receives it. That is exactly what
+# happened to mail sent from the webmail to techies.africa.
+#
+# `smtp:` with no nexthop means "route by the recipient domain's MX", i.e.
+# normal internet routing -- so each of these reaches wherever its mail
+# actually lives.
+#
+# REMOVE a domain's line the moment its MX is cut over to
+# courier.mailyte.com, otherwise its mail will be relayed straight back out
+# instead of being delivered here. tmahelp.ng is deliberately absent: it is
+# already cut over and must deliver locally.
+#
+# After editing: postfix reload  (no postmap -- see texthash note below)
+#
+# THIS FILE MUST STAY IN THE REPO. It was originally created directly on the
+# server, and a deployment replaced config/mailer/postfix/ with a fresh
+# checkout -- deleting it. main.cf still referenced it, so every transport_maps
+# lookup failed, and a transport_maps failure makes Postfix reject EVERY sender
+# with "451 4.3.0 Temporary lookup failure". All outbound mail stopped.
+#
+# main.cf uses texthash: rather than hash: so there is no compiled .db to
+# generate or to go missing -- Postfix reads this file directly. That also
+# means no postmap step: edit, then `postfix reload`.
+
+# 2026-08-27: thirteen domains removed because their MX now points here.
+#
+# They had been cut over but their lines were left behind, which is the exact
+# failure this file's header warns about: Postfix routed each one straight
+# back out to its own MX, connected to itself, and bounced the mail
+# "5.4.6 mail for <domain> loops back to myself". 167 messages were lost that
+# way between 22 and 27 August -- permanently, because 5.x.x bounces are not
+# retried. Nothing surfaced it: the sender is told it bounced, the recipient
+# never hears, and this server's own queue stays empty.
+#
+# Only domains whose mail genuinely lives elsewhere belong below. Check the
+# MX before adding one back:
+#     dig +short MX <domain>
+#
+# Removed 2026-08-27 (MX -> mail.mailyte.com, deliver locally): devpilot.io,
+# harbourgate.org, holarscouture.com, informly.app, jivetech.com.ng, kata.ng,
+# luminarylabs.ng, mailyte.com, ogapethomes.com, ondgo.co, reapwork.com,
+# techies.africa, thatsign.ai
+
+peekride.com	smtp:
+talkam.net	smtp:

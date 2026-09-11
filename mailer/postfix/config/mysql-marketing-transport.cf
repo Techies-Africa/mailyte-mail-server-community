@@ -1,0 +1,16 @@
+user = ${DB_USER}
+password = ${DB_PASSWORD}
+hosts = ${DB_HOST}:${DB_PORT}
+dbname = ${DB_NAME}
+# Sender-dependent transport selection for the marketing stream (SMTP-Send
+# workstream, phase-01). Returns the `marketing` transport for envelope
+# senders whose organization is classed `sending_profile='marketing'`; every
+# other sender gets no row and falls through to default_transport = smtp on
+# the primary IP. Postfix consults this map with the full sender address AND
+# the bare domain, so SUBSTRING_INDEX normalizes both forms. The map is only
+# wired into sender_dependent_default_transport_maps when MARKETING_BIND_IP
+# is set (entrypoint.sh) -- with it unset this file is inert, and the
+# mailbox/transactional invariant ("no marketing-classed message ever leaves
+# the mailbox IP" -- and vice versa: nothing routes differently at all)
+# holds trivially.
+query = SELECT 'marketing:' FROM domains d JOIN organizations o ON o.id = d.organization_id WHERE d.domain = SUBSTRING_INDEX('%s', '@', -1) AND o.sending_profile = 'marketing'

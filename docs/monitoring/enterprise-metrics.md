@@ -1,58 +1,65 @@
 # Enterprise Metrics
 
-> **Enterprise Edition** — This feature is available in [Mailyte Enterprise](https://mailyte.com). The Community Edition does not include this functionality.
-
-
 Business-level numbers that matter to your organization — not just whether servers are up, but how they're being used.
 
-## Why Enterprise Metrics
+## Where They Come From
 
-Infrastructure metrics tell you the server is running. Enterprise metrics tell you the server is *useful*. They answer questions from stakeholders, help with billing, and catch abuse early.
+Enterprise metrics are collected by the monitoring service (`worker/monitoring/enterprise_metrics.py`), not by Prometheus. The collector queries MySQL and Redis directly and returns a JSON payload — available on demand and refreshed automatically during the 5-minute monitoring sweep.
 
-## Emails Per Organization
+```bash
+# Full enterprise metrics payload
+curl -s http://localhost:8085/api/metrics | python3 -m json.tool
 
-Track send and receive volume broken down by organization.
-
-```promql
-# Emails sent by each org in the last 24 hours
-increase(api_emails_sent_total[24h]) by (org_id)
-
-# Top 10 sending organizations
-topk(10, increase(api_emails_sent_total[24h]) by (org_id))
-
-# Single org's sending trend over time
-rate(api_emails_sent_total{org_id="acme-corp"}[1h]) * 3600
+# Lighter system + mail stats
+curl -s http://localhost:8085/api/stats | python3 -m json.tool
 ```
 
-**Grafana panel setup:**
+Through the API gateway, the same data backs `GET /api/v1/monitoring/metrics` and the dashboard-stats endpoint (platform-scope credential, `support` role).
 
-| Setting | Value |
-|---------|-------|
-| Visualization | Bar gauge |
-| Query | `increase(api_emails_sent_total[24h])` |
-| Group by | `org_id` |
-| Sort | Descending |
+## What Is Collected
 
-## Delivery Rates
+### Mail metrics (from MySQL)
 
-Delivery success rate is the most important email metric. A drop here means something is wrong — bad reputation, DNS issues, or content problems.
+| Field | Source | Meaning |
+|-------|--------|---------|
+| `hourly_email_stats` | `tracking_events` (last hour) | total / delivered / bounced / failed counts |
+| `active_domains` | `domains WHERE active = 1` | Domain count |
+| `rate_limit_stats` | `rate_limit_usage` (last hour) | Average and peak request counts |
+| `storage_stats` | `storage_usage_current` | Total bytes used, organizations using storage |
 
-```promql
-# Overall delivery success rate
-(
-  rate(postfix_delivery_total[1h])
-  - rate(postfix_bounce_total[1h])
-)
-/ rate(postfix_delivery_total[1h]) * 100
+### Performance metrics
 
-# Per-org delivery rate
-(
-  rate(api_emails_delivered_total{org_id="acme-corp"}[1h])
-  / rate(api_emails_sent_total{org_id="acme-corp"}[1h])
-) * 100
-```
+| Field | Source |
+|-------|--------|
+| `redis.connected_clients`, `used_memory`, `keyspace_hits/misses` | Redis `INFO` |
+| `database.connections`, `total_queries` | MySQL `SHOW STATUS` |
 
-**Healthy delivery rates:**
+### System metrics
+
+CPU, memory, disk, load average, and network/disk I/O counters via psutil — the same numbers the [system monitor](system-monitoring.md) alerts on.
+
+### SLA metrics
+
+| Field | How it's computed |
+|-------|-------------------|
+| `uptime_percentage` | Share of non-`down` rows in `health_checks` over the last 24 h |
+| `delivery_success_rate` | Share of `delivered` rows in `tracking_events` over the last 24 h |
+| `sla_compliance` | `min(uptime, delivery_rate)` |
+
+See [SLA Monitoring](sla-monitoring.md) for how to use these.
+
+## Per-Organization Numbers
+
+Per-organization usage does **not** come from Prometheus — worker metrics are not labelled by `org_id`. Use the database-backed APIs instead:
+
+| Question | Where to look |
+|----------|--------------|
+| Emails sent/delivered/bounced per org | `/api/v1/analytics/*` (backed by `mail_logs` / `delivery_events`, produced by `log_ingestor` since 2026-08-22) |
+| Storage per org | `/api/v1/storage/*` (backed by `storage_usage_current`) |
+| Rate-limit consumption per org | `/api/v1/rate-limiter/*` (backed by `rate_limit_usage`) |
+| SMTP credential usage per key | `/api/v1/smtp-credentials/{id}/usage` |
+
+**Healthy delivery rates** to hold organizations to:
 
 | Metric | Healthy | Concerning | Critical |
 |--------|---------|-----------|----------|
@@ -60,127 +67,28 @@ Delivery success rate is the most important email metric. A drop here means some
 | Bounce rate | < 3% | 3-5% | > 5% |
 | Spam complaint rate | < 0.1% | 0.1-0.3% | > 0.3% |
 
-> **Warning:** If a single org's bounce rate spikes, they might be sending to a bad list. That can hurt your entire server's reputation. Catch it early.
+> **Warning:** If a single org's bounce rate spikes, they might be sending to a bad list. That can hurt your entire server's reputation. Catch it early — and note that `AUTO_SUSPEND_ENABLED` (automatic suspension of abusive SMTP credentials by `log_ingestor`) is **off by default** until thresholds have been observed against real traffic.
 
-## Storage Usage Trends
+## Metrics Reports via Webhook
 
-Track how much disk space each organization is consuming and predict when you'll need more.
+During each 5-minute sweep, `send_metrics_report()` pushes the full metrics payload to the configured webhook endpoints (the `webhook_urls` table, falling back to the `WEBHOOK_URLS` environment variable). If no webhook is configured, the report is skipped silently — the `/api/metrics` endpoint always works regardless.
 
-```promql
-# Total mail storage used
-sum(dovecot_storage_bytes) by (org_id)
+## Exporting for External Reporting
 
-# Storage growth rate (bytes per day)
-deriv(sum(dovecot_storage_bytes) by (org_id)[7d:1h]) * 86400
-
-# Days until disk is full (at current growth rate)
-(node_filesystem_avail_bytes{mountpoint="/var/mail"}
-/ deriv(node_filesystem_size_bytes{mountpoint="/var/mail"}[7d:1h]))
-/ 86400
-```
-
-**Storage summary table:**
-
-```promql
-# For a Grafana table panel
-sort_desc(
-  sum by (org_id) (dovecot_storage_bytes)
-)
-```
-
-| Org | Current Usage | 30-Day Growth | Projected Full |
-|-----|--------------|---------------|---------------|
-| acme-corp | 12.4 GB | +2.1 GB | 85 days |
-| widgets-inc | 8.7 GB | +0.8 GB | 210 days |
-| startup-co | 1.2 GB | +0.3 GB | 560 days |
-
-## API Request Volume
-
-Track who's using the API and how much.
-
-```promql
-# Total API requests by org (last 24h)
-increase(http_requests_total[24h]) by (org_id)
-
-# API requests by endpoint
-topk(10, increase(http_requests_total[24h]) by (endpoint))
-
-# Error rate by org
-rate(http_requests_total{status=~"5.."}[1h]) by (org_id)
-/ rate(http_requests_total[1h]) by (org_id) * 100
-```
-
-## Usage Reports
-
-Build a monthly usage report with these queries:
-
-```promql
-# Monthly email volume
-increase(api_emails_sent_total[30d]) by (org_id)
-
-# Monthly API calls
-increase(http_requests_total[30d]) by (org_id)
-
-# Average daily active users
-avg_over_time(dovecot_active_connections[30d])
-
-# Peak concurrent connections
-max_over_time(dovecot_active_connections[30d])
-```
-
-### Exporting Reports
-
-Pull data from Prometheus for external reporting:
+Pull the JSON and reshape it however you need:
 
 ```bash
-# Get monthly email totals per org
-curl -s 'http://localhost:9090/api/v1/query' \
-  --data-urlencode 'query=increase(api_emails_sent_total[30d]) by (org_id)' \
-  | python3 -m json.tool
+# Snapshot the current metrics to a dated file
+curl -s http://localhost:8085/api/metrics \
+  > "metrics-$(date +%Y%m%d-%H%M).json"
 
-# Export to CSV
-curl -s 'http://localhost:9090/api/v1/query' \
-  --data-urlencode 'query=increase(api_emails_sent_total[30d]) by (org_id)' \
-  | python3 -c "
-import json, sys, csv
-data = json.load(sys.stdin)
-writer = csv.writer(sys.stdout)
-writer.writerow(['org_id', 'emails_sent'])
-for result in data['data']['result']:
-    writer.writerow([result['metric']['org_id'], int(float(result['value'][1]))])
+# Extract the 24h SLA numbers
+curl -s http://localhost:8085/api/metrics | python3 -c "
+import json, sys
+m = json.load(sys.stdin)
+sla = m.get('sla', {})
+print(f\"uptime={sla.get('uptime_percentage')}% delivery={sla.get('delivery_success_rate')}%\")
 "
 ```
 
-## Rate Limiting Metrics
-
-Track which organizations are hitting their limits:
-
-```promql
-# Rate limit hits by org
-increase(api_rate_limit_exceeded_total[1h]) by (org_id)
-
-# Orgs closest to their sending limit
-(api_emails_sent_total / api_sending_limit) by (org_id)
-```
-
-## Grafana Dashboard Layout
-
-A suggested layout for the enterprise metrics dashboard:
-
-```
-+----------------------------+----------------------------+
-|   Total Emails Today       |   Active Organizations     |
-|   (single stat)            |   (single stat)            |
-+----------------------------+----------------------------+
-|   Emails by Organization (bar chart, 24h)               |
-|                                                         |
-+---------------------------------------------------------+
-|   Delivery Rate Trend      |   Storage Usage by Org     |
-|   (time series)            |   (bar gauge)              |
-+----------------------------+----------------------------+
-|   API Requests by Org      |   Top Endpoints            |
-|   (table)                  |   (pie chart)              |
-+----------------------------+----------------------------+
-```
-
-> **Tip:** Set up a scheduled Grafana report to email these stats to your team weekly. Go to a dashboard, click the share icon, and configure the report schedule.
+For historical trends beyond what a snapshot gives you, query the underlying tables (`tracking_events`, `mail_logs`, `usage_history`, `storage_usage_current`) directly — they carry timestamps and organization IDs.

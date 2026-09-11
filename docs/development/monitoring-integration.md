@@ -1,12 +1,9 @@
 ---
 title: Monitoring Integration
-description: How to add Prometheus metrics to your code and implement custom health checks.
+description: How to add health checks and Prometheus metrics to your code using the shared metrics helper.
 ---
 
 # Monitoring Integration
-
-> **Enterprise Edition** — This feature is available in [Mailyte Enterprise](https://mailyte.com). The Community Edition does not include this functionality.
-
 
 Every Mailyte service should expose health checks and Prometheus metrics. This guide shows how to add both to your code.
 
@@ -32,45 +29,35 @@ async def health():
 
 ### Health Check with Dependency Verification
 
-A proper health check verifies that the service can actually do its job:
+A proper health check verifies that the service can actually do its job. The convention the existing workers use (see `worker/storage_usage/app.py`) is a `services` map plus a three-state status — `healthy` (all dependencies up, 200), `degraded` (some up, still 200), `unhealthy` (none up, 503):
 
 ```python
+from fastapi.responses import JSONResponse
+
+
 @app.get("/health")
-async def health():
-    checks = {}
-    overall_healthy = True
-
-    # Check database
-    try:
-        db.execute("SELECT 1")
-        checks["database"] = "healthy"
-    except Exception as e:
-        checks["database"] = f"unhealthy: {e}"
-        overall_healthy = False
-
-    # Check Redis
-    try:
-        redis_client.ping()
-        checks["redis"] = "healthy"
-    except Exception as e:
-        checks["redis"] = f"unhealthy: {e}"
-        overall_healthy = False
-
-    # Check worker thread
-    checks["worker_thread"] = "alive" if worker.is_alive() else "dead"
-    if not worker.is_alive():
-        overall_healthy = False
-
-    return {
-        "status": "healthy" if overall_healthy else "unhealthy",
-        "service": "my-service",
-        "checks": checks,
+async def health_check():
+    services = {
+        "database": database_is_available(),
+        "cache": redis_is_available(),
     }
+
+    if all(services.values()):
+        status, code = "healthy", 200
+    elif any(services.values()):
+        status, code = "degraded", 200
+    else:
+        status, code = "unhealthy", 503
+
+    return JSONResponse(
+        content={"status": status, "service": "my-service", "services": services},
+        status_code=code,
+    )
 ```
 
 ### Docker Health Check
 
-Configure Docker to use your health endpoint:
+Configure Docker to use your health endpoint (stdlib only — the slim images have no curl):
 
 ```yaml
 healthcheck:
@@ -81,187 +68,118 @@ healthcheck:
   start_period: 15s
 ```
 
-The `start_period` gives the service time to initialize before health checks begin.
+The `start_period` gives the service time to initialize before health checks begin. Health status matters beyond `docker ps`: the monitoring worker restarts unhealthy containers through the Docker socket proxy, and other services' `depends_on: condition: service_healthy` clauses key off it.
 
 ## Prometheus Metrics
 
 ### Setup
 
-Install the client library:
-
-```bash
-pip install prometheus-client
-```
-
-Expose the metrics endpoint:
+Use the shared helper — not `prometheus_client` directly. It's already in `shared/` and needs only `psutil` in your requirements:
 
 ```python
-from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
-from starlette.responses import Response
+import time
+
+from fastapi import Request
+from fastapi.responses import PlainTextResponse
+
+from shared.metrics import get_metrics
+
+metrics = get_metrics("my_service")
+
+
+@app.middleware("http")
+async def metrics_middleware(request: Request, call_next):
+    start_time = time.time()
+    response = await call_next(request)
+    metrics.record_request(
+        method=request.method,
+        path=request.url.path,
+        status_code=response.status_code,
+        duration=time.time() - start_time,
+    )
+    return response
 
 
 @app.get("/metrics")
-async def metrics():
-    return Response(
-        content=generate_latest(),
-        media_type=CONTENT_TYPE_LATEST,
-    )
+async def prometheus_metrics():
+    return PlainTextResponse(metrics.get_prometheus_metrics())
 ```
 
-### Naming Conventions
+That gives you, with no further code:
 
-All Mailyte metrics should follow this pattern:
+- `my_service_http_requests_total{method=...,path=...,status_code=...}`
+- `my_service_http_request_duration_seconds` (summary)
+- `my_service_http_errors_total` (status ≥ 400)
+- `my_service_uptime_seconds`, `my_service_info`
+- `my_service_cpu_usage_percent`, `my_service_memory_usage_*`
 
-```
-mailyte_{service}_{metric_name}_{unit}
-```
-
-Examples:
-
-- `mailyte_api_requests_total` (counter)
-- `mailyte_api_request_duration_seconds` (histogram)
-- `mailyte_queue_size` (gauge)
-- `mailyte_webhook_delivery_duration_seconds` (histogram)
-
-### Adding Metrics to Existing Code
-
-Here's a real example — adding metrics to an API route:
+### Custom Metrics
 
 ```python
-from prometheus_client import Counter, Histogram
-import time
+# Counters
+metrics.increment_counter("items_processed_total", labels={"status": "success"})
 
-# Define metrics at module level
-REQUEST_COUNT = Counter(
-    "mailyte_api_requests_total",
-    "Total API requests",
-    ["method", "endpoint", "status"],
-)
+# Gauges
+metrics.set_gauge("queue_size", pending_count)
 
-REQUEST_DURATION = Histogram(
-    "mailyte_api_request_duration_seconds",
-    "API request duration",
-    ["method", "endpoint"],
-    buckets=[0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0],
-)
+# Histograms (exposed as summaries with p50/p95/p99)
+metrics.observe_histogram("processing_seconds", duration)
 
-
-# Use them in your route
-@app.post("/api/v1/add/domain")
-async def add_domain(request: DomainRequest):
-    start = time.time()
-    try:
-        result = await create_domain(request)
-        REQUEST_COUNT.labels(
-            method="POST",
-            endpoint="/api/v1/add/domain",
-            status="200",
-        ).inc()
-        return result
-    except HTTPException as e:
-        REQUEST_COUNT.labels(
-            method="POST",
-            endpoint="/api/v1/add/domain",
-            status=str(e.status_code),
-        ).inc()
-        raise
-    finally:
-        REQUEST_DURATION.labels(
-            method="POST",
-            endpoint="/api/v1/add/domain",
-        ).observe(time.time() - start)
+# Database + webhook convenience recorders
+metrics.record_database_operation(operation="insert", duration=0.01, success=True)
+metrics.record_webhook_delivery(url=url, status_code=200, duration=0.4)
 ```
 
-### Using Middleware for Automatic Metrics
-
-Instead of instrumenting every route, use middleware:
-
-```python
-from starlette.middleware.base import BaseHTTPMiddleware
-import time
-
-
-class MetricsMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request, call_next):
-        start = time.time()
-        response = await call_next(request)
-        duration = time.time() - start
-
-        REQUEST_COUNT.labels(
-            method=request.method,
-            endpoint=request.url.path,
-            status=str(response.status_code),
-        ).inc()
-
-        REQUEST_DURATION.labels(
-            method=request.method,
-            endpoint=request.url.path,
-        ).observe(duration)
-
-        return response
-
-
-app.add_middleware(MetricsMiddleware)
-```
+See [Metrics Implementation](metrics-implementation.md) for naming conventions, label rules, and the full API.
 
 ### Registering with Prometheus
 
-Add your service to the Prometheus scrape config:
+Add your service to the scrape config. Targets use **container** ports (the right-hand side of a compose port mapping), not host-mapped ports:
 
 ```yaml
 # monitoring/prometheus/prometheus.yml
-- job_name: "mailyte-my-service"
+- job_name: 'my_service'
+  metrics_path: /metrics
   static_configs:
-    - targets: ["my-service:8080"]
-      labels:
-        service: "my-service"
-        component: "worker"
+    - targets: ['my_service:8105']
 ```
 
-### Testing Metrics
+### Verifying Metrics
+
+```bash
+# Straight from the service (host-mapped port)
+curl -s http://localhost:8105/metrics | head -30
+
+# Confirm Prometheus is scraping it
+curl -s "http://localhost:9090/api/v1/targets" | python3 -m json.tool | grep -A3 my_service
+
+# Query a series
+curl -s "http://localhost:9090/api/v1/query?query=my_service_http_requests_total" | python3 -m json.tool
+```
+
+In a test, hit the endpoint through the FastAPI test client and assert on the exposition text:
 
 ```python
-from prometheus_client import REGISTRY
-
-
-def test_request_counter_increments(client, api_key_header):
-    # Get current count
-    before = (
-        REGISTRY.get_sample_value(
-            "mailyte_api_requests_total",
-            {"method": "POST", "endpoint": "/api/v1/add/domain", "status": "200"},
-        )
-        or 0
-    )
-
-    # Make a request
-    client.post("/api/v1/add/domain", headers=api_key_header, json={...})
-
-    # Check count increased
-    after = REGISTRY.get_sample_value(
-        "mailyte_api_requests_total",
-        {"method": "POST", "endpoint": "/api/v1/add/domain", "status": "200"},
-    )
-    assert after == before + 1
+def test_metrics_endpoint_exposes_request_counter(client):
+    client.get("/health")
+    body = client.get("/metrics").text
+    assert "my_service_http_requests_total" in body
 ```
 
 ## Database Health in Metrics
 
-Expose database connection health as a metric:
+Expose database connection health as a gauge, refreshed by your worker loop:
 
 ```python
-from prometheus_client import Gauge
-
-DB_HEALTHY = Gauge("mailyte_db_healthy", "Database connection health (1=up, 0=down)")
-DB_CONNECTIONS = Gauge("mailyte_db_connections_active", "Active database connections")
-
-
-# Update periodically
 def update_db_metrics():
     try:
         db.execute("SELECT 1")
-        DB_HEALTHY.set(1)
-        DB_CONNECTIONS.set(db.pool.size())
+        metrics.set_gauge("db_healthy", 1)
     except Exception:
-        DB_HEALTHY.set(0)
+        metrics.set_gauge("db_healthy", 0)
 ```
+
+## Related
+
+- [Metrics Implementation](metrics-implementation.md) — the full metric-authoring guide
+- [Monitoring section](../monitoring/index.md) — Prometheus, Grafana, alerting, and auto-healing from the operator's side

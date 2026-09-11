@@ -3,7 +3,7 @@ services:
   # Development overrides — all services use uvicorn with hot-reload
   # ==========================================================================
 
-  # Postfix: disable postscreen DNSBL and DNS lookups for dev
+  # Postfix: disable postscreen DNSBL and DNS lookups for dev (no external DNS in Docker)
   postfix:
     environment:
       - POSTFIX_DEV_MODE=true
@@ -17,5 +17,100 @@ services:
   webhooks:
     command: ["python", "-m", "uvicorn", "app:app", "--host=0.0.0.0", "--port=8081", "--reload"]
 
+  analytics:
+    # 8085, not 8087. 8087 is the HOST half of the "8087:8085" mapping; every
+    # other override in this file names the CONTAINER port (monitoring 8085,
+    # archiver 8083 behind 8089:8083, rate_limiter 8082). Listening on 8087
+    # meant nothing was on 8085, where both the healthcheck and the API
+    # gateway (routes/analytics.py ANALYTICS_API_BASE) dial -- so the
+    # container sat permanently unhealthy and every analytics endpoint
+    # answered 503 "Analytics service unavailable".
+    command: ["python", "-m", "uvicorn", "app:app", "--host=0.0.0.0", "--port=8085", "--reload"]
+
   rate_limiter:
     command: ["python", "-m", "uvicorn", "app:app", "--host=0.0.0.0", "--port=8082", "--reload"]
+
+  docs:
+    command: >
+      sh -c "mkdocs serve --dev-addr=0.0.0.0:80 --config-file=/srv/mkdocs.yml"
+    working_dir: /srv
+    environment:
+      - GIT_PYTHON_REFRESH=quiet
+    volumes:
+      - ./docs/mkdocs.yml:/srv/mkdocs.yml:ro
+      - ./docs/index.md:/srv/docs/index.md
+      - ./docs/getting-started:/srv/docs/getting-started
+      - ./docs/architecture:/srv/docs/architecture
+      - ./docs/configuration:/srv/docs/configuration
+      - ./docs/api:/srv/docs/api
+      - ./docs/features:/srv/docs/features
+      - ./docs/monitoring:/srv/docs/monitoring
+      - ./docs/deployment:/srv/docs/deployment
+      - ./docs/guides:/srv/docs/guides
+      - ./docs/reference:/srv/docs/reference
+      - ./docs/development:/srv/docs/development
+      - ./docs/security:/srv/docs/security
+      - ./docs/mailer:/srv/docs/mailer
+      - ./docs/worker:/srv/docs/worker
+      - ./docs/operations:/srv/docs/operations
+      - ./docs/stylesheets:/srv/docs/stylesheets
+      - ./docs/javascripts:/srv/docs/javascripts
+      - ./docs/overrides:/srv/overrides
+      - ./docs/includes:/srv/includes
+      - ./docs/API_DOCUMENTATION.md:/srv/docs/API_DOCUMENTATION.md
+      - ./docs/ARCHITECTURE.md:/srv/docs/ARCHITECTURE.md
+      - ./docs/DATA_FLOW_DOCUMENTATION.md:/srv/docs/DATA_FLOW_DOCUMENTATION.md
+      - ./docs/DELIVERABILITY_GUIDE.md:/srv/docs/DELIVERABILITY_GUIDE.md
+      - ./docs/DNS_SETUP.md:/srv/docs/DNS_SETUP.md
+      - ./docs/WEBHOOK_DOCUMENTATION.md:/srv/docs/WEBHOOK_DOCUMENTATION.md
+      - ./.git:/srv/.git:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # ==========================================================================
+  # Mailyte Console — from source, with hot reload (PRD §9 shipping model)
+  #
+  # The base file pins a published image; here it builds from the sibling
+  # checkout instead, so `./start.sh` → Development mode runs the console the
+  # same way it runs the workers: live, against the stack it manages.
+  #
+  # This override also drops the base file's `profiles: ["console"]`, so the
+  # console comes up with `up -d` in dev regardless of whether the image has
+  # been published yet. That is deliberate — dev never needs the registry.
+  # ==========================================================================
+  console:
+    build:
+      context: ../mailyte-console
+      dockerfile: Dockerfile
+      target: dev
+    image: ghcr.io/techies-africa/mailyte-console:dev
+    profiles: []
+    environment:
+      - NODE_ENV=development
+      # The band shown in the console's own header. Honest by default: an
+      # operator who sees "production" on a dev instance eventually acts like
+      # it. Unlike the production image this is a runtime value, because
+      # `next dev` reads NEXT_PUBLIC_* at request time rather than inlining
+      # them at build time.
+      - NEXT_PUBLIC_CONSOLE_ENV=development
+      - PLATFORM_API_URL=http://api:8080
+      # Dev runs over plain http://localhost, so the operator session cookie
+      # must not carry Secure — a browser on an http:// origin silently drops
+      # it, and login appears to succeed and then bounces straight back to the
+      # sign-in screen. That flag is set on the API, not here:
+      # MAILYTE_COOKIE_SECURE=false in .env (already set in this repo's).
+      # The console itself has no say in it, so there is deliberately no
+      # console-side variable for it.
+    volumes:
+      # Source mounted for hot reload. The two anonymous volumes below mask
+      # it: node_modules must stay the Linux tree installed in the image (a
+      # host one built on macOS is the wrong platform), and .next must not be
+      # shared with a `npm run dev` running on the host.
+      - ../mailyte-console:/app
+      - /app/node_modules
+      - /app/.next
+    command: ["npm", "run", "dev"]

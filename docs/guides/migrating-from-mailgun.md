@@ -1,6 +1,6 @@
 ---
 title: Migrating from Mailgun
-description: Move your domains, mailboxes, and sending configuration from Mailgun to Mailyte without downtime.
+description: Move your domains, sending credentials, suppression lists, and DNS from Mailgun to Mailyte without downtime.
 ---
 
 # Migrating from Mailgun
@@ -15,6 +15,9 @@ Make sure you have:
 - Admin access to your Mailgun account
 - Access to your DNS provider
 - Your Mailyte API key (see [Authentication](../api/authentication.md))
+
+!!! info "API base URL"
+    Examples use `https://api.yourdomain.com` — in production Traefik publishes the API at `api.<your-domain>`; a dev checkout exposes it at `http://localhost:8083`.
 
 !!! warning "Plan for overlap"
     Keep Mailgun active until you've confirmed Mailyte is receiving and sending mail correctly. Don't delete anything from Mailgun until you're fully migrated.
@@ -59,8 +62,10 @@ curl -s -u "api:YOUR_MAILGUN_API_KEY" \
 
 ## Step 2: Create the Organization in Mailyte
 
+Requires an admin-scoped platform API key:
+
 ```bash
-curl -X POST http://mail.yourdomain.com:8083/api/v1/add/organization \
+curl -X POST https://api.yourdomain.com/api/v1/organizations/ \
   -H "X-API-Key: YOUR_MAILYTE_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -75,18 +80,21 @@ curl -X POST http://mail.yourdomain.com:8083/api/v1/add/organization \
 For each domain you exported from Mailgun:
 
 ```bash
-curl -X POST http://mail.yourdomain.com:8083/api/v1/add/domain \
+curl -X POST https://api.yourdomain.com/api/v1/domains/ \
   -H "X-API-Key: YOUR_MAILYTE_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "domain": "mycompany.com",
-    "description": "Migrated from Mailgun",
     "organization_id": "my-company",
-    "mailboxes": 100,
-    "aliases": 400,
-    "maxquota": 10240
+    "description": "Migrated from Mailgun"
   }'
 ```
+
+The response is important — save it. It contains:
+
+- `domain_id` — the ULID you'll need for every later call
+- `dns_records` — the exact MX, SPF, and DMARC records to publish in Step 6
+- `dkim_record` / `dkim_dns_name` — the DKIM TXT record (generated automatically)
 
 ### Bulk Import Script
 
@@ -94,9 +102,8 @@ If you have many domains, script it:
 
 ```python
 import requests
-import json
 
-MAILYTE_API = "http://mail.yourdomain.com:8083/api/v1"
+MAILYTE_API = "https://api.yourdomain.com/api/v1"
 API_KEY = "YOUR_MAILYTE_API_KEY"
 ORG_ID = "my-company"
 
@@ -105,82 +112,92 @@ headers = {"X-API-Key": API_KEY, "Content-Type": "application/json"}
 # Domains exported from Mailgun
 domains = ["domain1.com", "domain2.com", "domain3.com"]
 
+dns_plans = {}
 for domain in domains:
     resp = requests.post(
-        f"{MAILYTE_API}/add/domain",
+        f"{MAILYTE_API}/domains/",
         headers=headers,
         json={
             "domain": domain,
             "organization_id": ORG_ID,
             "description": "Migrated from Mailgun",
-            "mailboxes": 100,
-            "aliases": 400,
         },
     )
     result = resp.json()
     print(f"{domain}: {result.get('type', 'unknown')} - {result.get('msg', '')}")
+    if result.get("type") == "success":
+        dns_plans[domain] = result["data"]["dns_records"]
 ```
 
-## Step 4: Create Mailboxes
+## Step 4: Create Mailboxes and Aliases
 
-For each mailbox that needs to exist on Mailyte:
+For each mailbox that needs to exist on Mailyte (use the `domain_id` from Step 3):
 
 ```bash
-curl -X POST http://mail.yourdomain.com:8083/api/v1/add/mailbox \
+curl -X POST https://api.yourdomain.com/api/v1/mailboxes/email-accounts \
   -H "X-API-Key: YOUR_MAILYTE_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "local_part": "user",
-    "domain": "mycompany.com",
-    "password": "a-strong-password",
+    "email": "user@mycompany.com",
+    "password": "Temp0rary-Passw0rd-2026",
     "name": "User Name",
-    "quota": 5120
+    "domain_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV"
   }'
 ```
-
-!!! tip "Password handling"
-    If you're migrating real user accounts, generate temporary passwords and force a password reset on first login by setting `"force_pw_update": 1`.
-
-## Step 5: Set Up Aliases and Forwarding
 
 Recreate your Mailgun routes as Mailyte aliases:
 
 ```bash
-curl -X POST http://mail.yourdomain.com:8083/api/v1/add/alias \
+curl -X POST https://api.yourdomain.com/api/v1/aliases/add \
   -H "X-API-Key: YOUR_MAILYTE_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "address": "info@mycompany.com",
-    "goto": "user@mycompany.com",
-    "active": 1
+    "source": "info@mycompany.com",
+    "destination": "user@mycompany.com"
   }'
 ```
 
-## Step 6: Generate DKIM Keys
+`destination` accepts a comma-separated list for routes that forwarded to several recipients. Note that Mailyte's alias API requires a full source address — Mailgun catch-all routes have no direct equivalent.
 
-Generate DKIM keys for each domain on Mailyte:
+## Step 5: Replace the Mailgun Sending API with SMTP Credentials
+
+Mailyte has no HTTP "send message" endpoint — applications send over standard SMTP submission (port 587 STARTTLS or 465 TLS) using a domain-scoped **SMTP credential** (available since 2026-08-27):
 
 ```bash
-curl -X POST http://mail.yourdomain.com:8083/api/v1/add/dkim \
+curl -X POST https://api.yourdomain.com/api/v1/smtp-credentials/ \
   -H "X-API-Key: YOUR_MAILYTE_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "domains": "mycompany.com",
-    "dkim_selector": "default",
-    "key_size": "2048"
+    "domain_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    "name": "app sending",
+    "daily_limit": 50000
   }'
 ```
 
-Retrieve the public key for DNS:
+The response contains a generated `username` (shaped like `mycompany-com-smtp-a1b2c3d4`) and the plaintext `secret` — **shown exactly once**. Then swap your Mailgun HTTP calls for SMTP:
 
-```bash
-curl http://mail.yourdomain.com:8083/api/v1/get/dkim/mycompany.com \
-  -H "X-API-Key: YOUR_MAILYTE_API_KEY"
+```python
+import smtplib
+from email.message import EmailMessage
+
+msg = EmailMessage()
+msg["From"] = "noreply@mycompany.com"
+msg["To"] = "user@example.com"
+msg["Subject"] = "Hello from Mailyte"
+msg.set_content("Plain-text body")
+
+with smtplib.SMTP("mail.yourdomain.com", 587) as smtp:
+    smtp.starttls()
+    smtp.login("mycompany-com-smtp-a1b2c3d4", "THE_SECRET")
+    smtp.send_message(msg)
 ```
 
-## Step 7: Update DNS Records
+!!! warning "Sender must match the credential's domain"
+    Sender-login mismatch is enforced on ports 587 and 465: a credential scoped to `mycompany.com` can only send `From:` addresses at that domain.
 
-This is the critical step. Update your DNS records to point to Mailyte instead of Mailgun.
+## Step 6: Update DNS Records
+
+This is the critical step. Publish the records returned in Step 3 — don't compose them by hand.
 
 ### MX Record
 
@@ -192,23 +209,26 @@ Remove the Mailgun MX records (`mxa.mailgun.org`, `mxb.mailgun.org`).
 
 ### SPF Record
 
-Replace the Mailgun include with your Mailyte server:
+Replace the Mailgun include with the SPF record from the domain-creation response (it uses an `include:` for the Mailyte SPF host):
 
 ```
 ; Before (Mailgun)
 mycompany.com.  IN  TXT  "v=spf1 include:mailgun.org -all"
 
-; After (Mailyte)
-mycompany.com.  IN  TXT  "v=spf1 mx a:mail.yourdomain.com ip4:YOUR_SERVER_IP -all"
+; After (Mailyte — copy the exact value from dns_records)
+mycompany.com.  IN  TXT  "v=spf1 include:spf.mail.yourdomain.com ~all"
 ```
 
 ### DKIM Record
 
-Replace Mailgun's DKIM with the key from Step 6:
+Replace Mailgun's DKIM with the `dkim_record` from Step 3, published at `dkim_dns_name`:
 
 ```
 default._domainkey.mycompany.com.  IN  TXT  "v=DKIM1; k=rsa; p=YOUR_PUBLIC_KEY"
 ```
+
+!!! warning "Make sure DKIM signing is actually on"
+    The API-generated key enables verification records, but Rspamd signs from key files on disk — see [Setting Up DKIM](setting-up-dkim.md) for the step that writes the key file. Skipping it means mail goes out unsigned.
 
 ### DMARC Record
 
@@ -221,38 +241,63 @@ _dmarc.mycompany.com.  IN  TXT  "v=DMARC1; p=none; rua=mailto:dmarc@mycompany.co
 !!! info "DNS propagation"
     Lower your TTL to 300 seconds (5 minutes) a day before the migration. This makes the switchover much faster. After confirming everything works, raise it back to 3600.
 
+## Step 7: Import Suppression Lists
+
+Feed the exports from Step 1 into Mailyte's suppression list so previously bounced or unsubscribed addresses are never mailed again:
+
+```python
+import json
+import requests
+
+headers = {"X-API-Key": "YOUR_MAILYTE_API_KEY", "Content-Type": "application/json"}
+
+for filename, stype in [
+    ("bounces.json", "BOUNCE"),
+    ("complaints.json", "COMPLAINT"),
+    ("unsubscribes.json", "UNSUBSCRIBE"),
+]:
+    with open(filename) as f:
+        items = json.load(f).get("items", [])
+    emails = [i["address"] for i in items]
+    # At most 1000 addresses per call
+    for chunk in (emails[i : i + 1000] for i in range(0, len(emails), 1000)):
+        resp = requests.post(
+            "https://api.yourdomain.com/api/v1/tracking/suppressions/bulk",
+            headers=headers,
+            json={
+                "emails": chunk,
+                "suppression_type": stype,
+                "reason": "imported from Mailgun",
+            },
+        )
+        print(filename, resp.status_code, resp.json().get("msg"))
+```
+
+The bulk endpoint requires an operator-role credential; single additions go through `POST /api/v1/tracking/suppress` with `{"email": ..., "reason": ...}`.
+
 ## Step 8: Verify the Migration
 
-### Check DNS Propagation
+### Check DNS via the API
 
 ```bash
-# MX record
+curl https://api.yourdomain.com/api/v1/domains/DOMAIN_ID/verify-dns \
+  -H "X-API-Key: YOUR_MAILYTE_API_KEY"
+```
+
+All four checks — `mx`, `spf`, `dkim`, `dmarc` — should pass.
+
+### Check DNS Manually
+
+```bash
 dig MX mycompany.com +short
-
-# SPF
 dig TXT mycompany.com +short | grep spf
-
-# DKIM
 dig TXT default._domainkey.mycompany.com +short
-
-# DMARC
 dig TXT _dmarc.mycompany.com +short
 ```
 
 ### Send a Test Email
 
-```bash
-# Send from Mailyte
-curl -X POST http://mail.yourdomain.com:8083/api/v1/send/email \
-  -H "X-API-Key: YOUR_MAILYTE_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "from": "test@mycompany.com",
-    "to": "your-personal-email@gmail.com",
-    "subject": "Mailyte migration test",
-    "text": "If you see this, the migration is working."
-  }'
-```
+Use the SMTP credential from Step 5 to send to an external address (Gmail works well), then check the received headers for `spf=pass`, `dkim=pass`, and `dmarc=pass`.
 
 ### Verify with External Tools
 
@@ -260,18 +305,18 @@ curl -X POST http://mail.yourdomain.com:8083/api/v1/send/email \
 - [mail-tester.com](https://www.mail-tester.com/) — send a test and get a deliverability score
 - [Google Postmaster Tools](https://postmaster.google.com/) — monitor reputation over time
 
-## Step 9: Update Webhook Endpoints
+## Step 9: Update Webhook Handling
 
-If you were using Mailgun webhooks, update your application to accept Mailyte's webhook format. See [Webhook Events](../reference/webhook-events.md) for the full payload structure.
-
-Key differences from Mailgun:
+Mailgun's event webhooks map onto Mailyte's global event dispatcher: set `WEBHOOK_URL` and `WEBHOOK_SECRET` on the Mailyte deployment and point them at your receiver. Key differences from Mailgun:
 
 | Mailgun | Mailyte |
 |---------|---------|
-| `event-data.event` | `event` |
-| `event-data.message.headers` | `payload.metadata` |
-| `event-data.recipient` | `payload.delivery_info.recipient` |
-| Signature in body | Signature in `X-Webhook-Signature` header |
+| `event-data.event` | top-level `event` (e.g. `email.delivered`, `email.bounced`) |
+| `event-data.recipient` | inside the `data` object |
+| Per-domain webhook config in the dashboard | One global `WEBHOOK_URL`; tracking/rate-limit/storage events can additionally target endpoints registered via `POST /api/v1/webhooks/endpoints` |
+| Signature: `timestamp`+`token` HMAC | Same idea — inline `signature` block, plus `X-Webhook-Signature` over the raw body |
+
+See [Custom Integrations](custom-integrations.md) for the full envelope format, verification code, and the retry schedule (which is deliberately Mailgun-compatible: 7 retries over ~8 hours, HTTP 406 to stop).
 
 ## Step 10: Decommission Mailgun
 
@@ -280,7 +325,7 @@ Once you've confirmed:
 - [x] Mail is flowing in and out through Mailyte
 - [x] DKIM signatures are passing
 - [x] SPF checks are passing
-- [x] Webhooks are firing correctly
+- [x] Webhooks are arriving at your receiver
 - [x] Users can log in to their mailboxes
 - [x] No mail is stuck in Mailgun's queue
 

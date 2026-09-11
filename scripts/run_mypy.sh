@@ -3,9 +3,9 @@
 #
 # Can't run mypy once across the whole tree: worker/* and mailer/* are
 # independently deployed services with no __init__.py between them, so a
-# single invocation collides on repeated module names (every service's
-# app.py resolves to the same module "app"). Each directory below is
-# type-checked in its own invocation instead.
+# single invocation collides on repeated module names (worker/api/app.py and
+# worker/analytics/app.py both resolve to module "app"). Each directory below
+# is type-checked in its own invocation instead.
 #
 # Usage:
 #   scripts/run_mypy.sh | mypy-baseline filter   # CI gate

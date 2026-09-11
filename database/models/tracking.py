@@ -21,7 +21,7 @@ from sqlalchemy.sql import func
 from shared.ulid_utils import generate_ulid
 
 from . import Base
-from .enums import EventType
+from .enums import EventType, enum_values
 
 
 # Email Tracking
@@ -40,7 +40,7 @@ class EmailTracking(Base):
     domain_id = Column(String(26), ForeignKey("domains.id"), nullable=False, index=True)
 
     # Event details
-    event_type = Column(SQLEnum(EventType), nullable=False, index=True)
+    event_type = Column(SQLEnum(EventType, values_callable=enum_values), nullable=False, index=True)
     timestamp = Column(DateTime, nullable=False, default=func.now(), index=True)
 
     # Request metadata
@@ -106,7 +106,7 @@ class TrackingStatistics(Base):
     email_id = Column(String(255), nullable=False, index=True)
     organization_id = Column(String(26), ForeignKey("organizations.id"), nullable=False, index=True)
     domain_id = Column(String(26), ForeignKey("domains.id"), nullable=False, index=True)
-    event_type = Column(SQLEnum(EventType), nullable=False, index=True)
+    event_type = Column(SQLEnum(EventType, values_callable=enum_values), nullable=False, index=True)
 
     # Statistics
     total_count = Column(Integer, nullable=False, default=0)

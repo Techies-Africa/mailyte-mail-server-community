@@ -1,407 +1,175 @@
 ---
 title: Prometheus Configuration
-description: Detailed Prometheus configuration for scraping every Mailyte service, with recording rules and alert definitions.
+description: The Prometheus configuration Mailyte ships — scrape jobs, alert rules, retention, reloading, and how to extend it.
 ---
 
 # Prometheus Configuration
 
-> **Enterprise Edition** — This feature is available in [Mailyte Enterprise](https://mailyte.com). The Community Edition does not include this functionality.
+Prometheus is part of the base compose stack. Its configuration is bind-mounted read-only from the repo:
 
+| What | Repo path | Mounted at |
+|------|-----------|------------|
+| Main config | `monitoring/prometheus/prometheus.yml` | `/etc/prometheus/prometheus.yml` |
+| Alert rules | `monitoring/prometheus/rules/*.yml` | `/etc/prometheus/rules/` |
+| TSDB storage | `prometheus_data` volume | `/prometheus` |
 
-This guide covers the full Prometheus configuration for monitoring every Mailyte component — mail services, workers, databases, and system resources.
+The container runs `prom/prometheus:v2.51.0` with `--storage.tsdb.retention.time=30d` and `--web.enable-lifecycle` (so config reloads work without a restart).
 
-## Full Configuration
+## The Shipped Configuration
+
+Global settings — every job inherits them (no per-job overrides are set):
 
 ```yaml
-# monitoring/prometheus/prometheus.yml
 global:
   scrape_interval: 15s
   evaluation_interval: 15s
   scrape_timeout: 10s
 
-  external_labels:
-    cluster: "mailyte-production"
-    environment: "production"
-
 rule_files:
-  - "alerts/*.yml"
-  - "recording_rules/*.yml"
+  - /etc/prometheus/rules/*.yml
 
 alerting:
   alertmanagers:
     - static_configs:
         - targets: ["alertmanager:9093"]
-
-scrape_configs:
-  # ==========================================================
-  # Mailyte Services
-  # ==========================================================
-
-  - job_name: "mailyte-api"
-    metrics_path: /metrics
-    scrape_interval: 10s
-    static_configs:
-      - targets: ["api:8080"]
-        labels:
-          service: "api"
-          component: "core"
-
-  - job_name: "mailyte-tracking"
-    metrics_path: /metrics
-    static_configs:
-      - targets: ["tracking:8086"]
-        labels:
-          service: "tracking"
-          component: "worker"
-
-  - job_name: "mailyte-webhooks"
-    metrics_path: /metrics
-    static_configs:
-      - targets: ["webhooks:8081"]
-        labels:
-          service: "webhooks"
-          component: "worker"
-
-  - job_name: "mailyte-analytics"
-    metrics_path: /metrics
-    static_configs:
-      - targets: ["analytics:8082"]
-        labels:
-          service: "analytics"
-          component: "worker"
-
-  - job_name: "mailyte-rate-limiter"
-    metrics_path: /metrics
-    static_configs:
-      - targets: ["rate-limiter:8084"]
-        labels:
-          service: "rate-limiter"
-          component: "worker"
-
-  - job_name: "mailyte-queue-manager"
-    metrics_path: /metrics
-    scrape_interval: 10s
-    static_configs:
-      - targets: ["queue-manager:8085"]
-        labels:
-          service: "queue-manager"
-          component: "worker"
-
-  - job_name: "mailyte-storage"
-    metrics_path: /metrics
-    static_configs:
-      - targets: ["storage-usage:8087"]
-        labels:
-          service: "storage"
-          component: "worker"
-
-  - job_name: "mailyte-monitoring"
-    metrics_path: /metrics
-    static_configs:
-      - targets: ["monitoring:8088"]
-        labels:
-          service: "monitoring"
-          component: "worker"
-
-  - job_name: "mailyte-rag"
-    metrics_path: /metrics
-    static_configs:
-      - targets: ["rag:8089"]
-        labels:
-          service: "rag"
-          component: "worker"
-
-  # ==========================================================
-  # Mail Services
-  # ==========================================================
-
-  - job_name: "rspamd"
-    metrics_path: /metrics
-    scrape_interval: 30s
-    static_configs:
-      - targets: ["rspamd:11334"]
-        labels:
-          service: "rspamd"
-          component: "mail"
-
-  # Postfix metrics via postfix-exporter (if installed)
-  - job_name: "postfix"
-    metrics_path: /metrics
-    scrape_interval: 30s
-    static_configs:
-      - targets: ["postfix-exporter:9154"]
-        labels:
-          service: "postfix"
-          component: "mail"
-
-  # ==========================================================
-  # Data Stores
-  # ==========================================================
-
-  - job_name: "mysql"
-    metrics_path: /metrics
-    scrape_interval: 30s
-    static_configs:
-      - targets: ["mysql-exporter:9104"]
-        labels:
-          service: "mysql"
-          component: "database"
-
-  - job_name: "redis"
-    metrics_path: /metrics
-    scrape_interval: 15s
-    static_configs:
-      - targets: ["redis-exporter:9121"]
-        labels:
-          service: "redis"
-          component: "database"
-
-  # ==========================================================
-  # System
-  # ==========================================================
-
-  - job_name: "node"
-    metrics_path: /metrics
-    static_configs:
-      - targets: ["node-exporter:9100"]
-        labels:
-          service: "host"
-          component: "system"
-
-  # Prometheus self-monitoring
-  - job_name: "prometheus"
-    static_configs:
-      - targets: ["localhost:9090"]
 ```
 
-## Optional Exporters
+### Scrape Jobs
 
-To get metrics from MySQL and Redis, add these exporters:
+All worker jobs set `metrics_path: /metrics` and target the service's **container** port on the compose network (which often differs from the published host port):
 
-```yaml
-# docker-compose.monitoring.yml
-services:
-  mysql-exporter:
-    image: prom/mysqld-exporter:latest
-    container_name: mysql-exporter
-    environment:
-      DATA_SOURCE_NAME: "${DB_USER:-mailuser}:${DB_PASSWORD:-mailpassword}@tcp(mysql:3306)/${DB_NAME:-mailserver}"
-    ports:
-      - "9104:9104"
-    depends_on:
-      mysql:
-        condition: service_healthy
-    networks:
-      - mailserver_network
+| Job | Target | Status |
+|-----|--------|--------|
+| `prometheus` | `localhost:9090` | OK |
+| `rspamd` | `rspamd:11334` | OK |
+| `api` | `api:8080` | OK (host port 8083) |
+| `webhooks` | `webhooks:8081` | OK |
+| `rate_limiter` | `rate_limiter:8082` | OK |
+| `monitoring` | `monitoring:8085` | OK |
+| `tracking` | `tracking:8086` | OK |
+| `dashboard` | `dashboard:8088` | OK |
+| `archiver` | `archiver:8083` | OK (host port 8089) |
+| `encryption` | `encryption:8084` | OK (host port 8093) |
+| `queue_manager` | `queue_manager:8090` | OK |
+| `storage_usage` | `storage_usage:8092` | OK |
+| `delivery_optimizer` | `delivery_optimizer:8088` | OK (host port 8094) |
+| `jmap` / `migration` / `autoconfig` / `caldav` | `:8098` / `:8099` / `:8100` / `:8101` | OK |
+| `analytics` | `analytics:8085` | OK (host port 8087; target fixed 2026-08-30) |
+| `rag` | `rag:8090` | OK (host port 8091; target fixed 2026-08-30) |
+| `templates` | `templates:8089` | OK (host port 8095; job added 2026-08-30) |
+| `url_protection` | `url_protection:8090` | OK (host port 8096; job added 2026-08-30) |
+| `oauth` | `oauth:8091` | OK (host port 8097; job added 2026-08-30) |
+| `mysql` | `mysql-exporter:9104` | OK |
+| `redis` | `redis-exporter:9121` | OK |
 
-  redis-exporter:
-    image: oliver006/redis_exporter:latest
-    container_name: redis-exporter
-    environment:
-      REDIS_ADDR: "redis://redis:6379"
-    ports:
-      - "9121:9121"
-    networks:
-      - mailserver_network
+A `kafka` job exists but is commented out, as are the `postfix` (`postfix-exporter:9154`) and `dovecot` (`dovecot-exporter:9166`) jobs since 2026-08-30 — those exporter containers exist in no compose file, so the jobs only produced permanent `DOWN` noise. Uncomment them when the exporters are actually deployed.
 
-  postfix-exporter:
-    image: kumina/postfix-exporter:latest
-    container_name: postfix-exporter
-    ports:
-      - "9154:9154"
-    volumes:
-      - ./logs/mailer/postfix:/var/log/postfix:ro
-    command:
-      - '--postfix.logfile_path=/var/log/postfix/maillog'
-    networks:
-      - mailserver_network
-```
+### Metric sources
 
-## Recording Rules
+Most workers emit Prometheus text through the shared in-repo collector (`shared/metrics.py`) — you'll see `<service>_info`, `<service>_uptime_seconds`, and per-service counters/gauges (histograms are rendered as summaries). `queue_manager` is the one service instrumented with the real `prometheus_client` library (queue depth/worker gauges). The exporters provide the standard `mysql_*` and `redis_*` metric families. See [Prometheus Metrics](../reference/prometheus-metrics.md) for the metric inventory.
 
-Pre-compute expensive queries for faster dashboards:
-
-```yaml
-# monitoring/prometheus/recording_rules/mailyte.yml
-groups:
-  - name: mailyte_recording_rules
-    interval: 30s
-    rules:
-      # Email throughput per minute
-      - record: mailyte:emails_sent:rate5m
-        expr: rate(mailyte_emails_sent_total[5m]) * 60
-
-      - record: mailyte:emails_received:rate5m
-        expr: rate(mailyte_emails_received_total[5m]) * 60
-
-      # Bounce rate
-      - record: mailyte:bounce_rate:5m
-        expr: >
-          rate(mailyte_emails_bounced_total[5m])
-          / rate(mailyte_emails_sent_total[5m])
-
-      # API request rate
-      - record: mailyte:api_requests:rate5m
-        expr: rate(mailyte_api_requests_total[5m]) * 60
-
-      # API error rate
-      - record: mailyte:api_error_rate:5m
-        expr: >
-          rate(mailyte_api_requests_total{status=~"5.."}[5m])
-          / rate(mailyte_api_requests_total[5m])
-
-      # Average API latency
-      - record: mailyte:api_latency:avg5m
-        expr: >
-          rate(mailyte_api_request_duration_seconds_sum[5m])
-          / rate(mailyte_api_request_duration_seconds_count[5m])
-
-      # Queue depth trend
-      - record: mailyte:queue_depth:avg5m
-        expr: avg_over_time(mailyte_mail_queue_size[5m])
-```
+The mysql-exporter connects as `--mysqld.address=mysql:3306` with `MYSQLD_EXPORTER_PASSWORD=${DB_PASSWORD}` and deliberately passes `--no-collect.slave_status` (no replica exists, and the app user lacks `REPLICATION CLIENT`).
 
 ## Alert Rules
 
-```yaml
-# monitoring/prometheus/alerts/mailyte.yml
-groups:
-  - name: mailyte_service_alerts
-    rules:
-      - alert: MailyteServiceDown
-        expr: up{component="worker"} == 0
-        for: 1m
-        labels:
-          severity: critical
-        annotations:
-          summary: "Mailyte service {{ $labels.service }} is down"
-          description: "The {{ $labels.service }} service has been unreachable for more than 1 minute."
+Two rule files ship in `monitoring/prometheus/rules/`:
 
-      - alert: MailQueueBacklog
-        expr: mailyte_mail_queue_size > 500
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "Mail queue backlog: {{ $value }} messages"
+**`mail_alerts.yml`** — group `mail_server_alerts`, six active rules (rewritten 2026-08-30 so every live expression matches a real series):
 
-      - alert: MailQueueCritical
-        expr: mailyte_mail_queue_size > 5000
-        for: 2m
-        labels:
-          severity: critical
-        annotations:
-          summary: "Critical mail queue backlog: {{ $value }} messages"
+| Alert | Severity | For |
+|-------|----------|-----|
+| `ServiceDown` | critical | 2m |
+| `HighErrorRate` | warning | 5m |
+| `SpamSpike` | warning | 10m |
+| `DatabaseConnectionPoolExhausted`, `SlowQueries` | warning | 5m / 10m |
+| `RedisMemoryHigh` | warning | 10m |
 
-      - alert: HighBounceRate
-        expr: mailyte:bounce_rate:5m > 0.05
-        for: 15m
-        labels:
-          severity: critical
-        annotations:
-          summary: "Bounce rate is {{ $value | humanizePercentage }}"
+The rest of the group (`MailQueueBackup`/`MailQueueCritical`, `HighBounceRate`/`CriticalBounceRate`, `DiskSpaceWarning`/`DiskSpaceCritical`, `KafkaConsumerLag`) and the whole `security_alerts` group (`BruteForceDetected`, `DLPViolation`) are commented out with dated notes — their series have no producer (no postfix/node/kafka exporter, no auth-failure or DLP counter), so as written they could never fire.
 
-      - alert: APIHighLatency
-        expr: mailyte:api_latency:avg5m > 2
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "API average latency is {{ $value }}s"
+**`backup_alerts.yml`** — group `backup_alerts` (9 absence-first rules): `NoRecentFullBackup`, `NoRecentIncrementalBackup`, `BackupMonitoringGone`, `BackupLastRunFailed`, `BackupNeverRun`, `UnencryptedBackupsPresent`, `ArchiveSpoolNotDraining`, `ArchiveSpoolBacklogCritical`, `ArchiveStoreFailing`.
 
-      - alert: APIHighErrorRate
-        expr: mailyte:api_error_rate:5m > 0.05
-        for: 5m
-        labels:
-          severity: critical
-        annotations:
-          summary: "API error rate is {{ $value | humanizePercentage }}"
+### Editing rules
 
-  - name: mailyte_infrastructure_alerts
-    rules:
-      - alert: HighDiskUsage
-        expr: >
-          (1 - node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"}) > 0.85
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "Disk usage is {{ $value | humanizePercentage }}"
+1. Edit the files under `monitoring/prometheus/rules/`
+2. Reload without a restart:
 
-      - alert: HighMemoryUsage
-        expr: (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) > 0.9
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "Memory usage is {{ $value | humanizePercentage }}"
-
-      - alert: MySQLConnectionsHigh
-        expr: mysql_global_status_threads_connected / mysql_global_variables_max_connections > 0.8
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "MySQL connections at {{ $value | humanizePercentage }} of max"
-
-      - alert: RedisMemoryHigh
-        expr: redis_memory_used_bytes / redis_memory_max_bytes > 0.85
-        for: 5m
-        labels:
-          severity: warning
-        annotations:
-          summary: "Redis memory at {{ $value | humanizePercentage }} of max"
-
-      - alert: SSLCertExpiringSoon
-        expr: mailyte_ssl_cert_expiry_days < 14
-        for: 1h
-        labels:
-          severity: warning
-        annotations:
-          summary: "SSL cert for {{ $labels.domain }} expires in {{ $value }} days"
-
-      - alert: SSLCertExpiryCritical
-        expr: mailyte_ssl_cert_expiry_days < 3
-        for: 10m
-        labels:
-          severity: critical
-        annotations:
-          summary: "SSL cert for {{ $labels.domain }} expires in {{ $value }} days"
+```bash
+curl -X POST http://localhost:9090/-/reload
 ```
+
+3. Confirm they loaded:
+
+```bash
+curl -s http://localhost:9090/api/v1/rules | python3 -m json.tool | head -50
+```
+
+## Alertmanager
+
+`monitoring/alertmanager/alertmanager.yml` (mounted at `/etc/alertmanager/alertmanager.yml`) groups by `alertname`+`severity` and delivers **everything to the webhooks service** at `http://webhooks:8081/alertmanager` with `send_resolved: true` — the critical/warning split only changes timing (critical: 10s group wait, 1m interval, 1h repeat; warning: 30s/5m/4h). Two inhibit rules: critical suppresses same-name warnings, and `ServiceDown` suppresses everything else for that job. On the receiving side, the webhooks service's `POST /alertmanager` route (added 2026-08-30) forwards each alert through the global webhook dispatcher as a signed `system.alert.firing` / `system.alert.resolved` event to `WEBHOOK_URL`.
+
+To route to Slack/email/PagerDuty directly, add your own receivers and routes to this file and restart the `alertmanager` container.
 
 ## Storage and Retention
 
-### Disk Usage Estimation
-
-Prometheus uses about 1-2 bytes per sample. With the config above:
-
-- ~50 metrics per service x 10 services = 500 metrics
-- 15s scrape interval = 4 samples/minute per metric
-- 500 x 4 x 60 x 24 = ~2.9M samples/day
-- ~5-6 MB/day of storage
-
-At 30 days retention, you'll use about 150-180 MB.
-
-### Adjust Retention
+Retention is set on the container command in `docker-compose.yml`:
 
 ```yaml
-# In prometheus service command
 command:
-  - '--storage.tsdb.retention.time=30d'    # Keep 30 days
-  - '--storage.tsdb.retention.size=5GB'    # Or cap at 5GB
+  - '--config.file=/etc/prometheus/prometheus.yml'
+  - '--storage.tsdb.path=/prometheus'
+  - '--storage.tsdb.retention.time=30d'
+  - '--web.enable-lifecycle'
 ```
+
+Change `30d` (or add `--storage.tsdb.retention.size=5GB`) via a compose override, then recreate the container. Check current usage:
+
+```bash
+docker exec prometheus du -sh /prometheus/
+curl -s http://localhost:9090/api/v1/status/tsdb | python3 -m json.tool
+```
+
+## Extending the Setup
+
+The stack ships **without** node-exporter, cadvisor, or postfix/dovecot exporters. If you want host-level metrics, add an exporter as a compose override and a matching scrape job — for example:
+
+```yaml
+# docker-compose.override.yml
+services:
+  node-exporter:
+    image: prom/node-exporter:v1.8.0
+    container_name: node-exporter
+    ports:
+      - "127.0.0.1:9100:9100"
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - '--path.rootfs=/rootfs'
+    networks:
+      - mailserver_network
+```
+
+plus a job in `monitoring/prometheus/prometheus.yml`:
+
+```yaml
+  - job_name: node
+    static_configs:
+      - targets: ["node-exporter:9100"]
+```
+
+then `curl -X POST http://localhost:9090/-/reload`.
 
 ## Verifying the Setup
 
 ```bash
 # Check Prometheus targets
-curl -s http://localhost:9090/api/v1/targets | python3 -m json.tool | grep -E '"state"|"job"'
+curl -s http://localhost:9090/api/v1/targets | python3 -m json.tool | grep -E '"health"|"job"'
 
 # Check that metrics are flowing
-curl -s http://localhost:9090/api/v1/query?query=up | python3 -m json.tool
-
-# Check alert rules are loaded
-curl -s http://localhost:9090/api/v1/rules | python3 -m json.tool | head -50
+curl -s "http://localhost:9090/api/v1/query?query=up" | python3 -m json.tool
 ```
 
-All targets should show `state: "up"`. If any show `"down"`, check that the service is running and the port is accessible within the Docker network.
+All targets should show `"health": "up"` (the formerly permanently-DOWN postfix/dovecot exporter jobs are commented out since 2026-08-30). In production, run these through an SSH tunnel — Prometheus binds to loopback only.

@@ -41,7 +41,7 @@ Everything you need to build features, fix bugs, or extend Mailyte. Whether you'
 
     ---
 
-    Python style, naming conventions, file organization, and import ordering.
+    Ruff, mypy, the baseline ratchets, naming conventions, and file organization.
 
     [:octicons-arrow-right-24: Coding standards](coding-standards.md)
 
@@ -65,7 +65,7 @@ Everything you need to build features, fix bugs, or extend Mailyte. Whether you'
 
     ---
 
-    Extend Mailyte with plugins — hooks, event handlers, and custom integrations.
+    The supported extension points — webhooks, custom workers, and mail-pipeline hooks.
 
     [:octicons-arrow-right-24: Plugin development](plugin-development.md)
 
@@ -93,54 +93,46 @@ Everything you need to build features, fix bugs, or extend Mailyte. Whether you'
 
 ```
 mailyte-email-server/
-  alembic/              # Database migration scripts
+  alembic/              # Alembic migration scripts (alembic/versions/)
   config/               # Service configuration files
-    mailer/
-      postfix/          # Postfix overrides
-      dovecot/          # Dovecot overrides
-      rspamd/           # Rspamd overrides
   database/
-    migrations/sql/     # SQL bootstrap files
-  deployment/           # Kubernetes, production configs
-  docs/                 # This handbook (MkDocs)
+    migrations/sql/     # Frozen SQL bootstrap files (historical; CE first-boot)
+  deployment/           # Production deployment configs
+  docs/                 # This handbook (MkDocs Material; mkdocs.yml lives here)
   logs/                 # Service logs (git-ignored)
   mailer/               # Mail service Dockerfiles and configs
     postfix/
     dovecot/
     rspamd/
     cert_manager/
-  monitoring/           # Prometheus, Grafana configs
-  scripts/              # Utility scripts
-  security/             # Security-related configs
+    log_ingestor/       # Parses Postfix logs into mail_logs/delivery_events
+  monitoring/           # Prometheus, Grafana, Alertmanager configs
+  scripts/              # Utility + CI scripts (run_mypy.sh, run_migrations.py, ...)
+  secrets/              # Generated secret files (git-ignored)
+  security/             # Security services (DLP, TOTP, geo-blocking, ...)
   shared/               # Shared Python modules across workers
   storage/              # Mail data, certs, DKIM keys (git-ignored)
-  tests/                # Test suite
-  worker/               # Worker service modules
-    api/                # REST API (FastAPI)
-    tracking/           # Email tracking
-    webhooks/           # Webhook delivery
-    analytics/          # Analytics aggregation
-    rate_limiter/       # Rate limiting
-    queue_manager/      # Mail queue management
-    storage_usage/      # Storage monitoring
-    rag/                # AI-powered search
-    monitoring/         # Health checks and metrics
-    dashboard/          # Admin dashboard
-    templates/          # Email templates
-    encryption/         # Email encryption
-    archiver/           # Email archiving
-    activesync/         # ActiveSync protocol
-    cloud_sync/         # Cloud backup sync
-    delivery_optimizer/ # Delivery optimization
-  docker-compose.yml    # Main compose file
+  tests/                # Test suite (unit/, integration/, e2e/, load/)
+  worker/               # Worker service modules (one directory per service)
+    api/                # REST API gateway (FastAPI)
+    activesync/  analytics/  archiver/  autoconfig/  caldav/
+    dashboard/  delivery_optimizer/  encryption/  jmap/  migration/
+    monitoring/  oauth/  queue_manager/  rag/  rate_limiter/
+    storage_usage/  templates/  tracking/  url_protection/  webhooks/
+  docker-compose.yml    # Base compose file
+  docker-compose.dev.yml    # Dev override (hot reload)
+  docker-compose.prod.yml   # Production override
   main.py               # Application entry point
-  manage.py             # Management CLI
-  pyproject.toml        # Python project config
-  requirements.txt      # Python dependencies
+  manage.py             # Migration CLI (Laravel-style wrapper around Alembic)
+  pyproject.toml        # Python project config (ruff + mypy config)
+  pytest.ini            # Pytest config
+  requirements-test.txt # Test dependencies
+  ruff-baseline.txt / mypy-baseline.txt / coverage-baseline.txt /
+  openapi-untyped-baseline.txt   # CI ratchet baselines
 ```
 
 !!! info "Key directories"
-    Most of your time will be spent in `worker/` (business logic), `shared/` (common utilities), `tests/` (test suite), and `alembic/` (database migrations). The `mailer/` directory is for mail service configuration and rarely needs changes.
+    Most of your time will be spent in `worker/` (business logic), `shared/` (common utilities), `tests/` (test suite), and `alembic/` (database migrations). The `mailer/` directory is for mail service configuration and rarely needs changes. There is no repo-root `requirements.txt` — each service pins its own in `worker/<service>/requirements.txt`.
 
 ---
 
@@ -148,8 +140,8 @@ mailyte-email-server/
 
 | Component | Technology | Version |
 |-----------|-----------|---------|
-| **Language** | Python | 3.11+ |
-| **API framework** | FastAPI | Latest |
+| **Language** | Python | 3.11 (CI and containers; `requires-python >= 3.11`) |
+| **API framework** | FastAPI | Pinned per service (`worker/api/requirements.txt`) |
 | **Database** | MySQL | 8.0 |
 | **Cache** | Redis | 7 |
 | **Vector DB** | Qdrant | Latest |
@@ -157,10 +149,11 @@ mailyte-email-server/
 | **IMAP/POP3** | Dovecot | 2.3+ |
 | **Spam filter** | Rspamd | Latest |
 | **Containers** | Docker + Docker Compose | v2+ |
-| **Migrations** | Alembic | Latest |
-| **Testing** | pytest | Latest |
-| **Linting** | Black, isort, flake8 | Latest |
-| **Docs** | MkDocs Material | Latest |
+| **Migrations** | Alembic | via `manage.py` / `migrate` service |
+| **Testing** | pytest | 8.x (`requirements-test.txt`) |
+| **Lint/format** | Ruff | baseline-gated in CI |
+| **Type check** | mypy + mypy-baseline | baseline-gated in CI |
+| **Docs** | MkDocs Material | `docs/requirements.txt` |
 
 ---
 
@@ -170,7 +163,7 @@ Here's the typical flow for making a change:
 
 ```mermaid
 flowchart LR
-    A["Fork & branch"] --> B["Write code"]
+    A["Branch"] --> B["Write code"]
     B --> C["Write tests"]
     C --> D["Run linters"]
     D --> E["Run tests"]
@@ -184,6 +177,7 @@ flowchart LR
 === "1. Branch"
 
     ```bash
+    git checkout develop
     git checkout -b feature/my-new-feature
     ```
 
@@ -196,25 +190,27 @@ flowchart LR
 === "3. Test"
 
     ```bash
-    # Run all tests
-    pytest tests/
+    # Fast unit tests
+    pytest tests/unit/
 
-    # Run tests for a specific module
-    pytest tests/test_tracking.py
+    # A specific test file
+    pytest tests/unit/test_auth.py
 
-    # Run with coverage
-    pytest --cov=worker tests/
+    # With coverage (CI ratchets the repo total — see Testing)
+    pytest tests/unit/ --cov=shared --cov=worker
     ```
 
 === "4. Lint"
 
     ```bash
-    # Format code
-    black .
-    isort .
+    # Format
+    ruff format .
 
-    # Check for issues
-    flake8 .
+    # Lint (CI compares the count against ruff-baseline.txt)
+    ruff check .
+
+    # Type check (CI filters through mypy-baseline.txt)
+    bash scripts/run_mypy.sh | mypy-baseline filter
     ```
 
 === "5. PR"
@@ -227,13 +223,13 @@ flowchart LR
 
 | I want to... | How |
 |---|---|
-| Run the full stack locally | `docker compose up` -- see [Dev Setup](getting-started.md) |
-| Add a new API endpoint | Add a route in `worker/api/`, see [Adding Features](adding-features.md) |
-| Create a database migration | `alembic revision --autogenerate -m "description"` |
-| Build a new worker | Copy the worker template, see [Custom Workers](custom-workers.md) |
+| Run the full stack locally | `./start.sh dev` — see [Dev Setup](getting-started.md) |
+| Add a new API endpoint | Add a route in `worker/api/routes/`, see [Adding Features](adding-features.md) |
+| Create a database migration | `python manage.py migrate:create "description"` |
+| Build a new worker | Copy an existing worker's layout, see [Custom Workers](custom-workers.md) |
 | Add Prometheus metrics | See [Metrics Implementation](metrics-implementation.md) |
-| Write a plugin | See [Plugin Development](plugin-development.md) |
-| Run the docs locally | `mkdocs serve` from the repo root |
+| Extend Mailyte without forking | See [Plugin Development](plugin-development.md) |
+| Run the docs locally | `./start.sh dev` serves this handbook with live reload at `http://localhost:8000` (the `docs` service — `mkdocs.yml` lives in `docs/`, so a bare `mkdocs serve` from the repo root does not work) |
 | Ship a release | Follow the [Release Process](release-process.md) |
 
 ---
@@ -245,11 +241,11 @@ flowchart LR
 | [Getting Started](getting-started.md) | Dev environment setup, running locally |
 | [Adding Features](adding-features.md) | How to add a new feature end to end |
 | [Contributing](contributing.md) | PR process, branch naming, code review |
-| [Coding Standards](coding-standards.md) | Python style, naming, file organization |
+| [Coding Standards](coding-standards.md) | Ruff, mypy, baseline ratchets, naming |
 | [Testing](testing.md) | Running and writing tests |
 | [Custom Workers](custom-workers.md) | Building a new worker module |
-| [Plugin Development](plugin-development.md) | Extending with plugins |
-| [Monitoring Integration](monitoring-integration.md) | Adding Prometheus metrics |
+| [Plugin Development](plugin-development.md) | Extension points — webhooks, workers, pipeline hooks |
+| [Monitoring Integration](monitoring-integration.md) | Health checks and the shared metrics helper |
 | [Metrics Implementation](metrics-implementation.md) | Counters, gauges, histograms |
 | [Release Process](release-process.md) | Versioning, changelog, deployment |
 

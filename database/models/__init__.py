@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Mailyte Mail Server Community Edition - Database Models Package
+Enterprise Mail Server - Database Models Package
 
 This package contains all database models organized by functionality.
-This file serves as the main entry point.
+This file serves as the main entry point to maintain backward compatibility.
 """
 
 from sqlalchemy.ext.declarative import declarative_base
@@ -12,8 +12,20 @@ from sqlalchemy.ext.declarative import declarative_base
 Base = declarative_base()
 
 # Import all models to make them available
-from .authentication import APIKey, UserSession
+from .ai import AITransaction, MailboxAiConsent, MailboxAiConsentEvent
+from .alerts import Alert, UsageHistory
+from .analytics import AnalyticsData
+from .authentication import APIKey, User, UserSession, WebSession
 from .certificates import DKIMKey, SSLCertificate
+
+# Collaboration models (migration 003 + 004)
+from .collaboration import (
+    DistributionGroup,
+    DistributionGroupMember,
+    Quarantine,
+    SharedMailboxMember,
+    TransportRule,
+)
 from .core import Alias, Domain, EmailAccount, Organization, SmtpCredential, SmtpCredentialEvent
 from .enums import (
     AccountStatus,
@@ -24,12 +36,38 @@ from .enums import (
     MailStatus,
     WebhookDeliveryStatus,
 )
+
+# Infrastructure models (migration 005 + 006 + 008)
+from .infrastructure import (
+    ConsentRecord,
+    DataErasureRequest,
+    DataExportRequest,
+    JMAPState,
+    KafkaDeadLetter,
+    MigrationError,
+    MigrationJob,
+    OAuthClient,
+    OAuthGrant,
+)
 from .mail import MailLog, MailQueue
+from .reputation import DomainReputation, EmailSuppression, FeedbackLoop
+
+# Security models (migration 002 + 006)
+from .security import (
+    AuditLog,
+    DLPPolicy,
+    DLPViolation,
+    FailedAuthAttempt,
+    GeoPolicy,
+    IPAccessRule,
+    IPReputation,
+    TOTPSecret,
+)
 from .system import HealthCheck, ServiceMetrics, SystemConfig
 from .tracking import EmailTracking, TrackingStatistics
 from .webhooks import WebhookDeliveryLog, WebhookURL
 
-# Export all models
+# Export all models for backward compatibility
 __all__ = [
     "Base",
     # Core models
@@ -39,21 +77,36 @@ __all__ = [
     "Alias",
     "SmtpCredential",
     "SmtpCredentialEvent",
-    # Mail processing models
-    "MailQueue",
-    "MailLog",
     # Tracking models
     "EmailTracking",
     "TrackingStatistics",
-    # Webhook models
-    "WebhookURL",
-    "WebhookDeliveryLog",
-    # Certificate models
+    # Mail processing models
+    "MailQueue",
+    "MailLog",
+    # Security models
     "SSLCertificate",
     "DKIMKey",
     # Authentication models
     "APIKey",
     "UserSession",
+    "User",
+    "WebSession",
+    # Webhook models
+    "WebhookURL",
+    "WebhookDeliveryLog",
+    # Alert models
+    "Alert",
+    "UsageHistory",
+    # AI models
+    "AITransaction",
+    "MailboxAiConsent",
+    "MailboxAiConsentEvent",
+    # Reputation models
+    "EmailSuppression",
+    "DomainReputation",
+    "FeedbackLoop",
+    # Analytics models
+    "AnalyticsData",
     # System models
     "SystemConfig",
     "HealthCheck",
@@ -66,4 +119,29 @@ __all__ = [
     "WebhookDeliveryStatus",
     "AlertLevel",
     "LimitType",
+    # Security models
+    "IPAccessRule",
+    "AuditLog",
+    "FailedAuthAttempt",
+    "IPReputation",
+    "DLPPolicy",
+    "DLPViolation",
+    "TOTPSecret",
+    "GeoPolicy",
+    # Collaboration models
+    "SharedMailboxMember",
+    "DistributionGroup",
+    "DistributionGroupMember",
+    "TransportRule",
+    "Quarantine",
+    # Infrastructure models
+    "JMAPState",
+    "MigrationJob",
+    "MigrationError",
+    "KafkaDeadLetter",
+    "ConsentRecord",
+    "DataExportRequest",
+    "DataErasureRequest",
+    "OAuthClient",
+    "OAuthGrant",
 ]

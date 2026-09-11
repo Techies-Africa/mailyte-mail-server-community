@@ -1,0 +1,20 @@
+[Unit]
+Description=Mailyte Maildir sync to S3 (folder and flag state between backups)
+Documentation=file:///var/www/mailyte-email-server/current/docs/operations/disaster-recovery.md
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=devops
+Group=devops
+WorkingDirectory=/var/www/mailyte-email-server/current
+ExecStart=/bin/bash /var/www/mailyte-email-server/current/scripts/mail-sync.sh
+Nice=15
+IOSchedulingClass=idle
+TimeoutStartSec=20min
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mailyte-mail-sync
+
+[Install]
+WantedBy=multi-user.target

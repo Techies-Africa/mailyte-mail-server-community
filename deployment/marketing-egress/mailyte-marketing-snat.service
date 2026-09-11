@@ -1,0 +1,18 @@
+[Unit]
+Description=Mailyte marketing stream egress SNAT (bridge alias -> MARKETING_BIND_IP)
+# Needs the docker bridge to exist (the rule names it) and re-runs whenever
+# docker restarts, since a daemon restart rebuilds the nat table and can drop
+# or reorder rules inserted by hand.
+After=docker.service network-online.target
+Wants=network-online.target
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/mailyte-marketing-snat.sh
+# Docker can take a moment to (re)create the bridge after it reports started.
+ExecStartPre=/bin/sleep 5
+
+[Install]
+WantedBy=multi-user.target

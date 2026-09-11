@@ -1,0 +1,27 @@
+[Unit]
+Description=Mailyte web server hourly database backup
+Documentation=file:///var/www/html/mailyte/production/api/current/scripts/backup-web.sh
+After=network-online.target
+Wants=network-online.target
+Conflicts=mailyte-backup-web-full.service
+
+[Service]
+Type=oneshot
+User=devops
+Group=devops
+WorkingDirectory=/var/www/html/mailyte/production/api
+# "Incremental" here re-dumps the whole database: the app's MySQL user has no
+# REPLICATION CLIENT grant, so binlog shipping is unavailable without a
+# privilege change on a live database. At 16 MB gzipped / 3 s measured, an
+# hourly full dump meets the PRD's <= 1 h RPO target anyway. See the script
+# header for the upgrade path.
+ExecStart=/bin/bash /var/www/html/mailyte/production/api/current/scripts/backup-web.sh --incremental
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=45min
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mailyte-backup-web
+
+[Install]
+WantedBy=multi-user.target

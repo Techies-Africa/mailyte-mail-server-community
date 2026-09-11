@@ -226,8 +226,9 @@ DROP FUNCTION IF EXISTS generate_ulid_backfill;
 
 -- Update alembic version.
 -- version_num is the PRIMARY KEY, and the UPDATE chain is broken upstream (002 never
--- sets its version), so multiple rows accumulate and updating them all to the same
--- value trips a duplicate-key error. Reset to exactly one row instead.
+-- sets its version, so 003's WHERE never matches and 007 inserts a second row instead
+-- of updating). Updating every row to the same value therefore trips a duplicate-key
+-- error. Reset to exactly one row instead.
 DELETE FROM alembic_version;
 INSERT INTO alembic_version (version_num) VALUES ('009_ulid_primary_keys');
 

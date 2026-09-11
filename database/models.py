@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Mailyte Mail Server - Database Models Entry Point
+Enterprise Mail Server - Database Models Entry Point
 
 This file serves as the main entry point for all database models.
 All models are now organized in separate files within the models package
@@ -15,7 +15,7 @@ from .models import *
 
 # Add documentation string
 __doc__ = """
-Mailyte Mail Server - Centralized SQLAlchemy Models
+Enterprise Mail Server - Centralized SQLAlchemy Models
 
 This module provides all database models for the entire mail server system:
 - Organization and email account management

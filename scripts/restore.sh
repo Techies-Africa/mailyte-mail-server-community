@@ -12,6 +12,14 @@
 #   --latest                Restore from the latest backup
 #   --date YYYYMMDD_HHMMSS  Restore from a specific backup by ID
 #   --from-s3 BACKUP_ID     Download and restore from S3
+#   --identity FILE         age identity used to decrypt the backup. Required
+#                           for anything backup.sh produced after DR-1; the
+#                           escrowed copy is the one that proves the escrow
+#                           works, so drills should always pass it explicitly.
+#   --organization ORG_ID   Restore ONE organization without touching other
+#                           tenants (see scripts/lib/restore_organization.sh)
+#   --host HOST             Which host's backups to look for in S3 (default:
+#                           this machine's short hostname)
 #   --mysql-only            Restore MySQL database only
 #   --redis-only            Restore Redis data only
 #   --mail-only             Restore mail storage only
@@ -24,7 +32,7 @@
 #   --help                  Show this help message
 #
 # Environment variables (with defaults):
-#   BACKUP_DIR              /var/backups/mailyte
+#   BACKUP_DIR              <project_root>/storage/backups
 #   S3_BUCKET               (empty = no S3)
 #   S3_PREFIX               mailyte/backups
 #   DB_HOST                 mysql
@@ -43,18 +51,29 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-BACKUP_DIR="${BACKUP_DIR:-/var/backups/mailyte}"
+PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+# Matches backup.sh's default -- inside the project tree, not /var/backups/mailyte.
+BACKUP_DIR="${BACKUP_DIR:-${PROJECT_ROOT}/storage/backups}"
 S3_BUCKET="${S3_BUCKET:-}"
 S3_PREFIX="${S3_PREFIX:-mailyte/backups}"
+# Backups are keyed by producing host, since two machines write into one
+# bucket. Restoring onto a rebuilt server means naming the host whose data you
+# want, not the one you are standing on.
+BACKUP_HOST="${BACKUP_HOST:-$(hostname -s)}"
+AGE_IDENTITY="${DR_AGE_IDENTITY_FILE:-}"
+RESTORE_ORG=""
 MYSQL_HOST="${DB_HOST:-mysql}"
 MYSQL_PORT="${DB_PORT:-3306}"
 MYSQL_USER="${DB_USER:-mailyte}"
 MYSQL_PASSWORD="${DB_PASSWORD:-}"
 MYSQL_DATABASE="${DB_NAME:-mailyte_mail}"
+# Matches backup.sh's default -- this script runs on the host, where
+# neither the "mysql" client binary nor the "mysql" service hostname is
+# reachable; the container name IS resolvable via the Docker socket.
+MYSQL_CONTAINER="${MYSQL_CONTAINER:-mysql}"
 REDIS_HOST="${REDIS_HOST:-redis}"
 REDIS_PORT="${REDIS_PORT:-6379}"
 MAIL_DATA_DIR="${MAIL_DATA_DIR:-/var/mail/vhosts}"
-PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.yml}"
 
 DATE=$(date +%Y%m%d_%H%M%S)
@@ -144,6 +163,90 @@ file_size_human() {
 }
 
 # ---------------------------------------------------------------------------
+# Shared DR primitives (age, S3 helpers)
+# ---------------------------------------------------------------------------
+RESTORE_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=lib/dr_common.sh
+source "${RESTORE_SCRIPT_DIR}/lib/dr_common.sh"
+
+# ---------------------------------------------------------------------------
+# Decryption
+# ---------------------------------------------------------------------------
+# Everything backup.sh writes after DR-1 is age-encrypted, so the restore has
+# to decrypt before any component function can read an archive. Runs on a COPY
+# of the backup directory: decrypting in place would leave plaintext DKIM keys
+# and a full .env sitting next to the ciphertext for as long as the directory
+# survives, which defeats the encryption for anyone with disk access.
+#
+# The identity is passed in, never read from this host. That is the whole point
+# of the escrow: if the identity were sitting here, a compromised server could
+# read every backup it has ever written.
+decrypt_backup() {
+    local src_dir="$1"
+    local encrypted_count
+    encrypted_count=$(find "$src_dir" -name '*.age' 2>/dev/null | wc -l | tr -d ' ')
+
+    if [[ "$encrypted_count" -eq 0 ]]; then
+        log_info "Backup contains no encrypted artefacts (pre-DR-1 plaintext backup)"
+        printf '%s' "$src_dir"
+        return 0
+    fi
+
+    if [[ -z "$AGE_IDENTITY" ]]; then
+        log_error "Backup is encrypted (${encrypted_count} artefacts) but no --identity was given."
+        log_error "Fetch the escrowed identity; it is deliberately not on this host."
+        return 1
+    fi
+    if [[ ! -f "$AGE_IDENTITY" ]]; then
+        log_error "age identity not found: ${AGE_IDENTITY}"
+        return 1
+    fi
+    if ! command -v age &>/dev/null; then
+        log_error "age is not installed; cannot decrypt this backup"
+        return 1
+    fi
+
+    local work_dir="${src_dir}.decrypted"
+    log_header "Decrypting Backup"
+    log_info "${encrypted_count} encrypted artefact(s) -> ${work_dir}"
+
+    rm -rf "$work_dir"
+    mkdir -p "$work_dir"
+    chmod 700 "$work_dir"
+    # Preserve the layout the component functions expect.
+    (cd "$src_dir" && find . -type d -exec mkdir -p "${work_dir}/{}" \;) 2>/dev/null
+
+    local failed=0 done_count=0
+    while IFS= read -r -d '' enc; do
+        local rel out
+        rel="${enc#"${src_dir}"/}"
+        out="${work_dir}/${rel%.age}"
+        mkdir -p "$(dirname "$out")"
+        if age --decrypt --identity "$AGE_IDENTITY" --output "$out" "$enc" 2>/dev/null; then
+            done_count=$((done_count + 1))
+        else
+            log_error "Failed to decrypt: ${rel}"
+            failed=$((failed + 1))
+        fi
+    done < <(find "$src_dir" -name '*.age' -print0)
+
+    # Plaintext members (MANIFEST.json, logs) come across as-is.
+    while IFS= read -r -d '' plain; do
+        local rel="${plain#"${src_dir}"/}"
+        mkdir -p "$(dirname "${work_dir}/${rel}")"
+        cp -p "$plain" "${work_dir}/${rel}"
+    done < <(find "$src_dir" -type f ! -name '*.age' -print0)
+
+    if [[ $failed -gt 0 ]]; then
+        log_error "${failed} artefact(s) failed to decrypt -- wrong identity?"
+        return 1
+    fi
+
+    log_success "Decrypted ${done_count} artefact(s)"
+    printf '%s' "$work_dir"
+}
+
+# ---------------------------------------------------------------------------
 # Parse arguments
 # ---------------------------------------------------------------------------
 parse_args() {
@@ -195,6 +298,21 @@ parse_args() {
                 RESTORE_DKIM=false; RESTORE_SSL=false; RESTORE_CONFIG=true
                 shift
                 ;;
+            --identity)
+                AGE_IDENTITY="$2"
+                shift 2
+                ;;
+            --organization|--organization=*)
+                if [[ "$1" == --organization=* ]]; then
+                    RESTORE_ORG="${1#*=}"; shift
+                else
+                    RESTORE_ORG="$2"; shift 2
+                fi
+                ;;
+            --host)
+                BACKUP_HOST="$2"
+                shift 2
+                ;;
             --dry-run)
                 DRY_RUN=true
                 shift
@@ -208,7 +326,7 @@ parse_args() {
                 shift
                 ;;
             --help)
-                head -38 "$0" | tail -n +2 | sed 's/^# \?//'
+                head -48 "$0" | tail -n +2 | sed 's/^# \?//'
                 exit 0
                 ;;
             *)
@@ -362,18 +480,31 @@ download_from_s3() {
     local local_dir="${BACKUP_DIR}/${s3_backup_id}"
     mkdir -p "$local_dir"
 
-    # Try to find the backup in S3 - it could be under a date prefix
+    # Candidate layouts, newest first. backup.sh writes
+    # <prefix>/mail/<host>/<backup_id>/ so one bucket can hold both servers;
+    # the two older shapes are kept so a backup taken before DR-1 is still
+    # restorable -- a restore script that cannot read last month's backup is
+    # not a restore script.
     local s3_path=""
     local date_prefix
     date_prefix=$(echo "$s3_backup_id" | cut -c1-8)
 
-    # Try direct path first
-    if aws s3 ls "s3://${S3_BUCKET}/${S3_PREFIX}/${s3_backup_id}/" &>/dev/null; then
-        s3_path="s3://${S3_BUCKET}/${S3_PREFIX}/${s3_backup_id}"
-    elif aws s3 ls "s3://${S3_BUCKET}/${S3_PREFIX}/${date_prefix}/${s3_backup_id}/" &>/dev/null; then
-        s3_path="s3://${S3_BUCKET}/${S3_PREFIX}/${date_prefix}/${s3_backup_id}"
-    else
-        log_error "Backup not found in S3: ${s3_backup_id}"
+    local candidates=(
+        "${S3_PREFIX}/mail/${BACKUP_HOST}/${s3_backup_id}"
+        "${S3_PREFIX}/web/${BACKUP_HOST}/${s3_backup_id}"
+        "${S3_PREFIX}/${s3_backup_id}"
+        "${S3_PREFIX}/${date_prefix}/${s3_backup_id}"
+    )
+    for candidate in "${candidates[@]}"; do
+        if dr_aws s3 ls "s3://${S3_BUCKET}/${candidate}/" &>/dev/null; then
+            s3_path="s3://${S3_BUCKET}/${candidate}"
+            break
+        fi
+    done
+
+    if [[ -z "$s3_path" ]]; then
+        log_error "Backup not found in S3: ${s3_backup_id} (host=${BACKUP_HOST})"
+        log_error "Tried: ${candidates[*]}"
         exit 1
     fi
 
@@ -384,7 +515,7 @@ download_from_s3() {
         return
     fi
 
-    aws s3 cp "$s3_path" "$local_dir" --recursive --only-show-errors
+    dr_aws s3 cp "$s3_path" "$local_dir" --recursive --only-show-errors
     log_success "Downloaded backup from S3"
 }
 
@@ -520,10 +651,10 @@ restore_mysql() {
     fi
 
     # Restore
+    # Exec into the mysql container itself (see MYSQL_CONTAINER above) --
+    # -i keeps stdin open so the piped dump reaches the client's stdin.
     log_info "Restoring MySQL database '${MYSQL_DATABASE}'..."
-    if zcat "$dump_file" | mysql \
-        --host="$MYSQL_HOST" \
-        --port="$MYSQL_PORT" \
+    if zcat "$dump_file" | docker exec -i "$MYSQL_CONTAINER" mysql \
         --user="$MYSQL_USER" \
         --password="$MYSQL_PASSWORD" \
         2>/tmp/mailyte_restore_mysql.tmp; then
@@ -544,9 +675,7 @@ restore_mysql() {
         log_info "Applying incremental binary log backups..."
         while IFS= read -r binlog; do
             log_info "Applying: $(basename "$binlog")"
-            if zcat "$binlog" | mysql \
-                --host="$MYSQL_HOST" \
-                --port="$MYSQL_PORT" \
+            if zcat "$binlog" | docker exec -i "$MYSQL_CONTAINER" mysql \
                 --user="$MYSQL_USER" \
                 --password="$MYSQL_PASSWORD" \
                 2>/dev/null; then
@@ -861,9 +990,7 @@ verify_restore() {
     if [[ " ${COMPONENTS_RESTORED[*]} " =~ " mysql " ]]; then
         log_info "Verifying MySQL..."
         local table_count
-        table_count=$(mysql \
-            --host="$MYSQL_HOST" \
-            --port="$MYSQL_PORT" \
+        table_count=$(docker exec "$MYSQL_CONTAINER" mysql \
             --user="$MYSQL_USER" \
             --password="$MYSQL_PASSWORD" \
             --database="$MYSQL_DATABASE" \
@@ -960,6 +1087,18 @@ print_summary() {
 # ---------------------------------------------------------------------------
 main() {
     parse_args "$@"
+    dr_load_config
+
+    # Single-tenant restore is a different operation from a platform restore:
+    # surgical, no service restart, and it must not touch other tenants. It
+    # lives in its own module rather than threading an org filter through every
+    # component function here.
+    if [[ -n "$RESTORE_ORG" ]]; then
+        # shellcheck source=lib/restore_organization.sh
+        source "${RESTORE_SCRIPT_DIR}/lib/restore_organization.sh"
+        restore_organization "$RESTORE_ORG"
+        exit $?
+    fi
 
     # Ensure log directory exists
     mkdir -p "${BACKUP_DIR}/logs" 2>/dev/null || true
@@ -981,6 +1120,15 @@ main() {
     log_info "Backup path: ${backup_path}"
     log_info "Dry run: ${DRY_RUN}"
     echo ""
+
+    # Decrypt before anything tries to read an archive. Returns the path to
+    # work from -- a decrypted copy, or the original when there is nothing to
+    # decrypt.
+    local decrypted_path
+    if ! decrypted_path=$(decrypt_backup "$backup_path"); then
+        log_error "Cannot proceed: backup could not be decrypted"
+        exit 1
+    fi
 
     # Show manifest if available
     local manifest="${backup_path}/MANIFEST.json"
@@ -1010,27 +1158,27 @@ main() {
 
     # Restore each component
     if [[ "$RESTORE_MYSQL" == true ]]; then
-        restore_mysql "$backup_path" || true
+        restore_mysql "$decrypted_path" || true
     fi
 
     if [[ "$RESTORE_REDIS" == true ]]; then
-        restore_redis "$backup_path" || true
+        restore_redis "$decrypted_path" || true
     fi
 
     if [[ "$RESTORE_MAIL" == true ]]; then
-        restore_mail "$backup_path" || true
+        restore_mail "$decrypted_path" || true
     fi
 
     if [[ "$RESTORE_DKIM" == true ]]; then
-        restore_dkim "$backup_path" || true
+        restore_dkim "$decrypted_path" || true
     fi
 
     if [[ "$RESTORE_SSL" == true ]]; then
-        restore_ssl "$backup_path" || true
+        restore_ssl "$decrypted_path" || true
     fi
 
     if [[ "$RESTORE_CONFIG" == true ]]; then
-        restore_config "$backup_path" || true
+        restore_config "$decrypted_path" || true
     fi
 
     # Verify restoration
@@ -1042,6 +1190,14 @@ main() {
     elif [[ "$DRY_RUN" != true ]]; then
         # Still restart services even if nothing was restored
         start_services
+    fi
+
+    # The decrypted copy holds plaintext DKIM keys and a full .env. Leaving it
+    # on disk would undo the encryption for anyone who can read the filesystem,
+    # so it goes as soon as the restore has consumed it.
+    if [[ -n "${decrypted_path:-}" && "$decrypted_path" != "$backup_path" && -d "$decrypted_path" ]]; then
+        log_info "Removing decrypted working copy: ${decrypted_path}"
+        rm -rf "$decrypted_path"
     fi
 
     # Print summary

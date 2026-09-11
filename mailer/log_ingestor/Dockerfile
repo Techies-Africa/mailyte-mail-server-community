@@ -5,9 +5,12 @@ WORKDIR /app
 COPY mailer/log_ingestor/requirements.txt .
 RUN pip install --no-cache-dir --timeout 120 --retries 10 -r requirements.txt
 
-# CE's shared/ carries no requirements.txt of its own -- its imports here
-# (webhook_dispatcher: requests + mysql-connector) are already covered by
-# this service's list above.
+# shared/ ships its own package list. Installing it separately is what keeps a
+# service from crash-looping when shared/ gains a dependency the service's own
+# list never heard about -- see the note in shared/requirements.txt.
+COPY shared/requirements.txt ./shared-requirements.txt
+RUN pip install --no-cache-dir --timeout 120 --retries 10 -r shared-requirements.txt
+
 COPY mailer/log_ingestor/ .
 COPY shared/ ./shared/
 

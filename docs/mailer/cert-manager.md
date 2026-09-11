@@ -42,11 +42,14 @@ sequenceDiagram
 
 ## ACME Challenge Flow
 
-### HTTP-01 (Default)
+### HTTP-01 (Default, via webroot)
 
-The cert manager listens on port 80 to serve ACME challenge files. Let's Encrypt makes an HTTP request to `http://yourdomain.com/.well-known/acme-challenge/{token}`, and the cert manager responds with the proof.
+The cert manager does **not** bind port 80 -- Traefik owns port 80 permanently as the reverse proxy, and only one process can bind it. Instead, certbot runs in `--webroot` mode, writing challenge files into the shared `ACME_WEBROOT_PATH` (`./storage/acme_challenge`). A tiny nginx container (`acme_webroot`) serves that directory, and Traefik routes `/.well-known/acme-challenge/*` to it for **any** hostname, at high priority so the HTTPS redirect never swallows a challenge.
 
-For this to work, port 80 must be open to the internet and DNS must point to your server.
+For this to work, port 80 must be open to the internet (on Traefik) and DNS must point the hostname at this server. `CERT_SERVER_IPS` tells cert_manager this server's public address(es) so it can skip SAN candidates that point elsewhere -- it cannot resolve its own hostname from inside the container (Docker answers with the private 172.x address), and one wrong SAN fails the whole certbot order.
+
+!!! warning "Traefik's built-in ACME stays off"
+    Every Traefik router uses `tls=true` with **no certResolver**. Configuring one makes Traefik intercept `/.well-known/acme-challenge/` on that entrypoint, which swallowed cert_manager's challenges in production once already. One ACME client (this one) issues everything; Traefik reads the results through its file provider (`traefik_certs.yml`, written by cert_manager into `storage/sni_config/`).
 
 ### DNS-01 (For Wildcards)
 
@@ -105,9 +108,14 @@ The cert manager round-robins through accounts for each certificate request.
 | `USE_WILDCARD_CERTS` | `false` | Enable wildcard certificate strategy |
 | `WILDCARD_DOMAIN` | (empty) | Base domain for wildcard cert |
 | `DNS_PROVIDER` | (empty) | DNS provider for DNS-01 challenges |
-| `DOCKER_RELOAD_ENABLED` | `false` | Send SIGHUP to Postfix/Dovecot containers |
-| `POSTFIX_CONTAINER` | `postfix` | Postfix container name for SIGHUP |
-| `DOVECOT_CONTAINER` | `dovecot` | Dovecot container name for SIGHUP |
+| `DOCKER_RELOAD_ENABLED` | `false` in code, `true` in compose | Reload Postfix/Dovecot after cert changes |
+| `DOCKER_PROXY_URL` | `http://docker-proxy:2375` | Scoped Docker API used for those reloads -- there is no socket mount |
+| `POSTFIX_CONTAINER` / `DOVECOT_CONTAINER` | `postfix` / `dovecot` | Container names to reload |
+| `CERT_SERVER_IPS` | (empty) | This server's public IP(s) -- must be set explicitly; self-resolution answers with the container's private address |
+| `TRAEFIK_ADMIN_SUBDOMAINS` | `api,autoconfig,jmap,caldav,docs,grafana,traefik,console` | Which `<sub>.${DOMAIN}` names get Traefik-facing certs. Must be passed through compose -- setting it only in `.env` does nothing |
+| `TRAEFIK_EXTRA_HOSTNAMES` | (empty) | Fully-qualified extra hostnames not under `${DOMAIN}` (e.g. the webmail's public name); same compose-passthrough caveat |
+| `ACME_WEBROOT_PATH` | `/var/www/acme-challenge` | HTTP-01 webroot shared with the `acme_webroot` container |
+| `MAIL_HOSTNAME` | (empty) | Customer-facing mail hostname to certify, distinct from `HOSTNAME` |
 | `WEBHOOK_URLS` | (empty) | Comma-separated webhook URLs for cert events |
 | `WEBHOOK_SECRET` | (empty) | HMAC secret for webhook signing |
 | `DB_HOST` | `mysql` | MySQL host |
@@ -148,13 +156,13 @@ Your domain's DNS is not pointing to this server. Verify with:
 dig +short A mail.yourdomain.com
 ```
 
-### "Challenge failed: Connection refused"
+### "Challenge failed: Connection refused" / 404 on the challenge
 
-Port 80 is not reachable from the internet. Common causes:
+Port 80 must reach Traefik, and Traefik must route `/.well-known/acme-challenge/*` to the `acme_webroot` container. Common causes:
 
 - Firewall blocking port 80
-- Another service already listening on port 80
-- Docker port mapping not configured
+- The `acme_webroot` container not running
+- The hostname resolving to a different server (see `CERT_SERVER_IPS`)
 
 ### "Certificate not being picked up"
 
@@ -170,17 +178,32 @@ After issuance, the cert must be on the shared volume and the mail services must
 cert_manager:
   build: ./mailer/cert_manager
   container_name: cert_manager
-  ports:
-    - "80:80"
+  # No port 80 binding -- Traefik owns 80; challenges go through acme_webroot
   volumes:
-    - ssl_certs:/etc/ssl
-    - /var/run/docker.sock:/var/run/docker.sock  # For SIGHUP
+    - ./storage/ssl_certs:/etc/ssl/certs
+    - ./storage/ssl_private:/etc/ssl/private
+    - ./storage/sni_config:/etc/ssl/sni
+    - letsencrypt_data:/etc/letsencrypt
+    - ./storage/acme_challenge:/var/www/acme-challenge
+  networks:
+    - mailserver_network
+    - internal_only          # to reach docker-proxy
   depends_on:
     - mysql
+    - migrate
+    - docker-proxy
+
+acme_webroot:
+  image: nginx:alpine
+  volumes:
+    - ./storage/acme_challenge:/usr/share/nginx/html:ro
 ```
 
-!!! warning "Docker Socket Access"
-    Mounting the Docker socket (`/var/run/docker.sock`) gives the cert manager the ability to send signals to other containers. This is a privileged operation -- only enable `DOCKER_RELOAD_ENABLED` if you trust the cert manager container.
+!!! note "No Docker socket"
+    Service reloads go through the **docker-proxy** container (scoped to list/inspect/restart), not a socket mount -- a `:ro` socket mount doesn't actually restrict anything, which is why it was removed. See `reload_dependent_services()` in `cert_manager.py`.
+
+!!! warning "acme_webroot mount depth"
+    certbot's webroot plugin appends `.well-known/acme-challenge/{token}` itself, so the shared host directory is mounted straight onto nginx's docroot. Pre-suffixing the mount path doubles the suffix and 404s every real challenge (confirmed live).
 
 !!! tip "Start with Staging"
-    Always start with `ACME_STAGING=true`. Staging certs are not trusted by browsers but have much higher rate limits for testing. Switch to `false` only when everything works.
+    Always start with `ACME_STAGING=true`. Staging certs are not trusted by browsers but have much higher rate limits for testing. Switch to `false` only when everything works (`docker-compose.prod.yml` forces `ACME_STAGING=false`).

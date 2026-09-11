@@ -25,14 +25,13 @@ Enforcement notes:
 
 import logging
 import os
+from typing import Literal
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-
-from database.models.core import Domain, SmtpCredential
 from utils.auth import create_api_response, hash_password, require_api_key
 from utils.smtp_credentials import (
     fetch_scoped_credential,
@@ -45,20 +44,35 @@ from utils.smtp_credentials import (
     validate_allowlist,
 )
 
+from database.models.core import Domain, SmtpCredential
+
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 # One pooled engine for the module -- the previous per-request
 # create_engine() built a fresh pool for every call.
-_engine = create_engine(
-    f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}"
-    f"@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}",
-    pool_pre_ping=True,
-)
-_Session = sessionmaker(bind=_engine)
+#
+# Created lazily on FIRST USE, never at import: app.py imports route modules
+# inside try/except and registers only the survivors, so an import-time
+# create_engine() with incomplete DB_* env (CI's openapi generation sets only
+# DB_PASSWORD; a misconfigured deploy could do the same) made this whole
+# router silently vanish from the app -- the spec lost every
+# /smtp-credentials path and prod would 404 instead of erroring. Lazy
+# creation keeps the single-pool win while a genuinely broken DB config now
+# fails loudly on the first request instead of dropping the routes at import.
+_engine = None
+_Session = None
 
 
 def get_db_session():
+    global _engine, _Session
+    if _Session is None:
+        _engine = create_engine(
+            f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}"
+            f"@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}",
+            pool_pre_ping=True,
+        )
+        _Session = sessionmaker(bind=_engine)
     return _Session()
 
 
@@ -76,6 +90,14 @@ class SmtpCredentialCreate(BaseModel):
         default=None, description="IPs / CIDR networks the key may authenticate from"
     )
     ip_allowlist_enabled: bool = Field(default=False)
+    tracking_enabled: bool = Field(
+        default=True,
+        description="Inject open/click tracking into mail sent with this credential",
+    )
+    stream: Literal["transactional", "marketing"] = Field(
+        default="transactional",
+        description="'marketing' egresses this credential's mail via the marketing IP",
+    )
     expires_at: str | None = Field(default=None, description="ISO-8601; key stops working after")
     hourly_limit: int | None = Field(default=None, ge=1)
     daily_limit: int | None = Field(default=None, ge=1)
@@ -88,6 +110,8 @@ class SmtpCredentialUpdate(BaseModel):
     name: str | None = None
     allowed_ips: list[str] | None = None
     ip_allowlist_enabled: bool | None = None
+    tracking_enabled: bool | None = None
+    stream: Literal["transactional", "marketing"] | None = None
     # Empty string clears the expiry; absent leaves it unchanged.
     expires_at: str | None = None
     hourly_limit: int | None = Field(default=None, ge=1)
@@ -125,9 +149,7 @@ async def list_smtp_credentials(request: Request):
         limit = min(int(request.query_params.get("limit", 100)), 500)
         offset = max(int(request.query_params.get("offset", 0)), 0)
         total = query.count()
-        rows = (
-            query.order_by(SmtpCredential.created_at.desc()).limit(limit).offset(offset).all()
-        )
+        rows = query.order_by(SmtpCredential.created_at.desc()).limit(limit).offset(offset).all()
         return JSONResponse(
             content=create_api_response(
                 "success",
@@ -213,6 +235,8 @@ async def create_smtp_credential(request: Request):
             created_by=payload.created_by or None,
             allowed_ips=payload.allowed_ips or [],
             ip_allowlist_enabled=payload.ip_allowlist_enabled,
+            tracking_enabled=payload.tracking_enabled,
+            stream=payload.stream,
             expires_at=expires_at,
             hourly_limit=payload.hourly_limit,
             daily_limit=payload.daily_limit,
@@ -293,9 +317,7 @@ async def update_smtp_credential(credential_id: str, request: Request):
             changed["name"] = payload.name
 
         effective_ips = data.get("allowed_ips", credential.allowed_ips)
-        effective_enabled = data.get(
-            "ip_allowlist_enabled", credential.ip_allowlist_enabled
-        )
+        effective_enabled = data.get("ip_allowlist_enabled", credential.ip_allowlist_enabled)
         if "allowed_ips" in data or "ip_allowlist_enabled" in data:
             err = _allowlist_error(effective_ips, bool(effective_enabled))
             if err:
@@ -306,6 +328,12 @@ async def update_smtp_credential(credential_id: str, request: Request):
         if "ip_allowlist_enabled" in data:
             credential.ip_allowlist_enabled = bool(payload.ip_allowlist_enabled)
             changed["ip_allowlist_enabled"] = credential.ip_allowlist_enabled
+        if "tracking_enabled" in data:
+            credential.tracking_enabled = bool(payload.tracking_enabled)
+            changed["tracking_enabled"] = credential.tracking_enabled
+        if "stream" in data and payload.stream is not None:
+            credential.stream = payload.stream
+            changed["stream"] = credential.stream
 
         if "expires_at" in data:
             expires_at, err = parse_expires_at(payload.expires_at)

@@ -4,8 +4,18 @@ connect = host=${DB_HOST} port=${DB_PORT} dbname=${DB_NAME} user=${DB_USER} pass
 
 default_pass_scheme = BLF-CRYPT
 
-# Authenticate user: look up password from email_accounts table
-password_query = SELECT email as user, password FROM email_accounts WHERE email='%u' AND status = 'active'
+# Authenticate user: look up password from email_accounts table.
+#
+# `'%s' != 'smtp'` (%s = the requesting service) means mailbox passwords
+# authenticate IMAP/POP but deliberately NOT SMTP submission: sending on
+# 587/465 requires an SMTP API credential (the protocol smtp passdb in
+# dovecot.conf, checked first), which is metered, revocable, rate-limited
+# and review-gated -- a mailbox password was a backdoor around all of that.
+# Webmail sending is unaffected: it submits through the mailbox API over the
+# trusted network, no SASL involved. What this DOES turn off is sending from
+# desktop/phone mail apps with the mailbox password; receiving (IMAP) in
+# those apps keeps working.
+password_query = SELECT email as user, password FROM email_accounts WHERE email='%u' AND status = 'active' AND '%s' != 'smtp'
 
 # Get user mailbox location, UID/GID, and per-user quota
 # If storage_quota is NULL or 0, returns NULL so Dovecot uses the default (5GB)

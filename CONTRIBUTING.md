@@ -2,6 +2,30 @@
 
 Thanks for your interest in contributing to Mailyte. This guide covers the process for contributing to the Community Edition.
 
+## Read this first — how changes reach this repository
+
+Application code here is **generated** from the Mailyte Email Server source and
+replaced wholesale on each release. A change committed directly to an
+application file in this repository is overwritten the next time it is
+regenerated.
+
+That does **not** mean your pull request is unwelcome — it means we apply it
+upstream and it comes back down here on the next release, with your commit
+credited. Open the PR as normal; a maintainer will tell you where it landed.
+
+Maintained directly in this repository, and safe to change here:
+
+- `README.md`, `CONTRIBUTING.md`, `SECURITY.md`
+- `docs/api/examples/`, `docs/operations/backups.md`, `docs/worker/cloud-sync.md`
+- `alembic/versions/` — this edition's own migration chain
+- `.github/workflows/ci.yml`
+
+Everything else — `worker/`, `shared/`, `database/`, `mailer/`, `config/`,
+`scripts/`, `docker-compose*.yml` — is generated.
+
+Bug reports, reproductions and documentation fixes are always the fastest way to
+help, and none of them are affected by any of the above.
+
 ## Getting Started
 
 1. Fork the repository

@@ -1,0 +1,44 @@
+# Local S3-compatible endpoint for disaster-recovery development and drills.
+#
+# This is NOT production infrastructure. It exists so the whole DR pipeline —
+# backup upload, archive puts, restore pulls, the rebuild drill — can be built
+# and verified end to end against a real S3 API before (or without) an AWS
+# account. Swapping to AWS is two values in secrets/dr.env: clear
+# S3_ENDPOINT_URL and set the real credentials; no code changes.
+#
+#   docker compose -f deployment/dr-local/docker-compose.yml up -d
+#   ./deployment/dr-local/setup-buckets.sh
+#
+# Ports deliberately avoid the reserved set in plans/00-foundation/02-conventions.md §7.
+name: mailyte-dr-local
+
+services:
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    container_name: mailyte-dr-minio
+    command: server /data --console-address ":9101"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-mailyte-dr-root}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-mailyte-dr-root-secret}
+      # Object Lock retention is evaluated against wall-clock time; keep the
+      # container on UTC so governance windows match what the runbook claims.
+      TZ: UTC
+    ports:
+      # 9190/9191 rather than MinIO's usual 9000/9001: those, and 9100, are
+      # routinely taken by other dev servers on a workstation. Change here and
+      # in setup-buckets.sh's MINIO_ENDPOINT default together.
+      - "127.0.0.1:9190:9000"   # S3 API
+      - "127.0.0.1:9191:9101"   # web console
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "mc ready local || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
+    restart: unless-stopped
+
+volumes:
+  minio_data:
+    name: mailyte_dr_minio_data

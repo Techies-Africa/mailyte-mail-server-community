@@ -1,135 +1,104 @@
 # Storage Usage Worker
 
-> **Enterprise Edition** — This feature is available in [Mailyte Enterprise](https://mailyte.com). The Community Edition does not include this functionality.
+The storage usage worker tracks storage consumption per mailbox, domain, and organization, enforces quota thresholds, and fires webhook alerts when limits are approached or crossed. It is a FastAPI service with Redis caching and a modular internal service architecture.
 
+## How Usage Is Measured
 
-The storage usage worker tracks real disk usage per mailbox, enforces storage quotas, and sends alerts when users approach their limits. It works alongside Dovecot's built-in quota plugin but provides a more comprehensive view with organization-level rollups and API access.
+Mailbox usage is read from **Dovecot over IMAP QUOTA (RFC 2087)**, not by walking the maildirs. This service runs unprivileged (uid 10001) while maildirs are owned by `vmail`, so a filesystem walk could not traverse them -- in production that approach measured 105 of 107 mailboxes as 0 bytes against 3 GB of real mail. QUOTA asks Dovecot for the figure it already maintains for enforcement, needs no filesystem access, and cannot drift. The connection uses `IMAP_HOST`/`IMAP_PORT` (dovecot:993) with the IMAP master credentials.
+
+A filesystem scanning service still exists for the explicit `/storage/filesystem/scan` endpoint (the mail and attachment mounts are read-only for it), but it is not how quota accounting works.
 
 ## What It Does
 
-- Calculates real disk usage per mailbox by scanning `/var/mail/vhosts/`
-- Enforces quotas at the mailbox, domain, and organization level
-- Sends alerts via webhooks when storage thresholds are crossed (75%, 80%, 95%)
-- Caches usage data in Redis for fast API responses
-- Provides storage analytics and reporting
-- Exposes an API for querying usage and managing quotas
+- Per-entity usage queries with hierarchy rollups (organization > domain > mailbox)
+- Quota threshold alerts (warning / critical) dispatched as `storage.quota.warning` / `storage.quota.exceeded` webhook events via `shared.webhook_dispatcher`
+- Usage increments and recalculation on demand
+- Per-entity storage configuration (quotas, thresholds)
+- Redis caching of usage stats; MySQL persistence
+- Prometheus metrics at `/metrics`
+
+Internal services: `StorageConfigService`, `StorageCacheService` (Redis), `StorageDatabaseService` (MySQL), `StorageUsageService` (IMAP QUOTA reads), `StorageAlertService`, `StorageWebhookService`, `FilesystemService` -- see `worker/storage_usage/services/`.
 
 ## How It Works
 
 ```mermaid
 flowchart LR
     subgraph Worker["Storage Usage Worker :8092"]
-        Scanner["Filesystem\nScanner"]
-        Cache["Redis\nCache"]
-        AlertSvc["Alert\nService"]
-        API["Flask API"]
+        API["FastAPI app"]
+        UsageSvc["Usage Service"]
+        Cache["Redis Cache"]
+        AlertSvc["Alert Service"]
     end
 
-    MailDir["/var/mail/vhosts/"] --> Scanner
-    Scanner --> Cache
-    Scanner --> MySQL[(MySQL)]
-    Scanner --> AlertSvc
-    AlertSvc --> Webhooks["Webhook\nDispatcher"]
-    Cache --> API
-    MySQL --> API
+    UsageSvc -->|"IMAP QUOTA :993\n(master user)"| Dovecot["Dovecot"]
+    UsageSvc --> Cache
+    UsageSvc --> MySQL[(MySQL)]
+    AlertSvc -->|"storage.quota.*"| Dispatcher["shared.webhook_dispatcher"]
+    APIGateway["API Gateway\n/api/v1/storage"] --> API
 ```
-
-The scanner runs periodically (configurable interval), walks the Maildir tree, sums up file sizes per mailbox, and updates both the cache and database.
 
 ## API Endpoints
 
-```
-GET  /api/storage/usage/{email}          -- Usage for a specific mailbox
-GET  /api/storage/usage/domain/{domain}  -- Usage for all mailboxes in a domain
-GET  /api/storage/usage/org/{org_id}     -- Usage for all mailboxes in an org
-GET  /api/storage/quota/{email}          -- Quota settings for a mailbox
-PUT  /api/storage/quota/{email}          -- Update quota for a mailbox
-GET  /api/storage/alerts                  -- Recent quota alerts
-GET  /health                              -- Health check
-GET  /metrics                             -- Prometheus metrics
-```
+Copied from the route decorators in `worker/storage_usage/app.py`:
 
-### Example Response
-
-```json
-{
-  "email": "user@example.com",
-  "usage_bytes": 2147483648,
-  "usage_human": "2.0 GB",
-  "quota_bytes": 5368709120,
-  "quota_human": "5.0 GB",
-  "usage_percent": 40.0,
-  "last_updated": "2025-01-15T10:30:00Z"
-}
+```
+GET  /storage/usage/{entity_type}/{identifier}            -- Usage for one entity
+GET  /storage/usage/{entity_type}/{identifier}/hierarchy  -- Usage with child rollups
+POST /storage/increment                                   -- Record a usage delta
+POST /storage/calculate/{entity_type}/{identifier}        -- Recalculate from Dovecot
+GET  /storage/quota-check                                 -- Quota check (delivery-time gate)
+POST /storage/alerts/{entity_type}/{identifier}           -- Trigger alert evaluation
+GET  /storage/config/{entity_type}/{identifier}           -- Get storage config
+PUT  /storage/config/{entity_type}/{identifier}           -- Update storage config
+POST /storage/cleanup                                     -- Cleanup task
+GET  /storage/stats                                       -- Service statistics
+POST /storage/webhook/test                                -- Fire a test storage webhook
+POST /storage/filesystem/scan                             -- Explicit filesystem scan
+GET  /health                                              -- Health check
+GET  /metrics                                             -- Prometheus metrics
 ```
 
-## Alert Thresholds
-
-| Threshold | Action |
-|-----------|--------|
-| 75% | Warning webhook + log entry |
-| 80% | Warning webhook + user notification email |
-| 95% | Critical webhook + user notification email |
-| 100% | Dovecot rejects new mail delivery |
-
-Alerts are dispatched via the shared `webhook_dispatcher` module.
-
-## Services Architecture
-
-The worker uses a modular service architecture:
-
-| Service | Purpose |
-|---------|---------|
-| `StorageConfigService` | Manages configuration and quota defaults |
-| `StorageCacheService` | Redis caching layer for usage data |
-| `StorageDatabaseService` | MySQL operations for persistent storage |
-| `StorageUsageService` | Core usage calculation logic |
-| `StorageAlertService` | Threshold monitoring and alert dispatch |
-| `StorageWebhookService` | Webhook delivery for storage events |
-| `FilesystemService` | Maildir scanning and size calculation |
-
-## Database Tables
-
-| Table | Purpose |
-|-------|---------|
-| `email_accounts` | Quota settings per mailbox (`quota` column) |
-| `storage_usage` | Historical usage records |
-| `storage_alerts` | Alert history |
+The API gateway proxies tenant-facing storage routes under `/api/v1/storage/*` using `STORAGE_SERVICE_URL` (default `http://storage_usage:8092`).
 
 ## Configuration
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DB_HOST` | `mysql` | MySQL host |
-| `DB_NAME` | `mailserver` | Database name |
-| `REDIS_HOST` | `redis` | Redis host for caching |
-| `MAIL_STORAGE_PATH` | `/var/mail/vhosts` | Path to Maildir storage |
-| `SCAN_INTERVAL` | `3600` | Seconds between full storage scans |
-| `DEFAULT_QUOTA` | `5368709120` | Default quota in bytes (5 GB) |
-| `ALERT_THRESHOLDS` | `75,80,95` | Comma-separated alert thresholds (%) |
+| `IMAP_HOST` / `IMAP_PORT` | `dovecot` / `993` | Where QUOTA is read from |
+| `IMAP_MASTER_USER` / `IMAP_MASTER_PASSWORD` | -- | Master credentials for impersonation |
+| `DB_HOST` / `DB_PORT` / `DB_NAME` / `DB_USER` / `DB_PASSWORD` | `mysql` / `3306` / `mailserver` / -- / -- | MySQL connection |
+| `REDIS_HOST` / `REDIS_PORT` / `REDIS_DB` | `redis` / `6379` / -- | Cache |
+| `WEBHOOK_URL` | (mapped from `WEBHOOK_URLS` in compose) | Read by `shared.webhook_dispatcher` -- without this mapping, quota events silently no-op |
+| `MAIL_DATA_PATH` | `/var/mail/vhosts` | Read-only mount for the explicit scan endpoint |
+| `ATTACHMENT_PATH` | `/var/attachments` | Read-only attachment mount |
+| `STORAGE_WARNING_THRESHOLD` / `STORAGE_CRITICAL_THRESHOLD` | -- | Alert thresholds (%) |
+| `STORAGE_CALC_INTERVAL` / `STORAGE_CLEANUP_INTERVAL` | -- | Background intervals |
+
+Note: the service reads `MAIL_DATA_PATH` / `ATTACHMENT_PATH` -- not `STORAGE_DATA_PATH` / `STORAGE_ATTACHMENT_PATH`, which were once set in `.env` but never read by any code.
 
 ## Docker Configuration
 
 ```yaml
 storage_usage:
-  build: ./worker/storage_usage
+  build:
+    context: .
+    dockerfile: ./worker/storage_usage/Dockerfile
   container_name: storage_usage
   ports:
     - "8092:8092"
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
   volumes:
-    - mail_data:/var/mail/vhosts:ro   # Read-only access to mail storage
-  depends_on:
-    - mysql
-    - redis
+    - ./storage/mail_data:/var/mail/vhosts:ro
+    - ./storage/attachments:/var/attachments:ro
 ```
+
+In production (`docker-compose.prod.yml`) the host port is bound to `127.0.0.1` only.
 
 ## Gotchas
 
-!!! warning "Scan Performance"
-    Scanning millions of small Maildir files is I/O intensive. On large deployments, a full scan can take minutes. The Redis cache ensures API responses are fast between scans.
+!!! warning "Do not revert to filesystem walking"
+    The read-only maildir mount looks like an invitation to `rglob` mailbox sizes. It does not work: the container's uid cannot traverse `vmail`-owned maildirs, and the result silently reads as zero. IMAP QUOTA is the supported path.
 
-!!! warning "Read-Only Mount"
-    The storage worker should mount mail storage as **read-only** (`:ro`). It only needs to read file sizes, never modify mail data.
-
-!!! tip "Quota vs. Usage"
-    Dovecot enforces quotas at delivery time (it rejects mail if the mailbox is over quota). This worker provides reporting and alerting, not enforcement. They complement each other.
+!!! tip "Quota vs. enforcement"
+    Dovecot enforces quotas at delivery time. This worker reports, alerts, and manages configuration -- the two complement each other and read the same underlying figure.

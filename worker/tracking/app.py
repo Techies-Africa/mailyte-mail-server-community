@@ -14,10 +14,11 @@ through environment variables managed by the config system.
 """
 
 import sys
+import time
 from pathlib import Path
 
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 # Add shared directory and database models to path
 project_root = Path(__file__).parent.parent.parent
@@ -25,17 +26,20 @@ sys.path.append(str(project_root / "shared"))
 
 from api.health_api import health_api
 from api.stats_api import stats_api
+from api.suppression_api import suppression_api
 
 # Import API routers
 from api.tracking_api import tracking_api
 from services.database_service import DatabaseService
 from services.rate_limiter import RateLimiter
+from services.suppression_service import SuppressionService
 from services.tracking_service import TrackingService
 from services.webhook_service import EnterpriseWebhookService as WebhookService
 
 # Import our modular services
 from config import config_manager
 from shared.logging_config import LogTimer, get_performance_logger
+from shared.metrics import get_metrics
 
 # Configure service-specific logging
 logger, log_performance = get_performance_logger("tracking")
@@ -100,6 +104,14 @@ def create_app():
                 app.rate_limiter = RateLimiter()
                 logger.info("Rate limiter initialized successfully")
 
+                # Suppression service (bounce/complaint/unsubscribe list) --
+                # was never instantiated or attached to `app` at all; every
+                # bounce/complaint handler's request.app.suppression_service
+                # call was hitting AttributeError on a real bounce/complaint.
+                logger.info("Initializing suppression service...")
+                app.suppression_service = SuppressionService()
+                logger.info("Suppression service initialized successfully")
+
             except Exception as e:
                 logger.error(f"Service initialization failed: {e}")
                 raise
@@ -112,6 +124,9 @@ def create_app():
 
             # Tracking endpoints (pixel and click tracking)
             app.include_router(tracking_api)
+
+            # Suppression list + unsubscribe endpoints
+            app.include_router(suppression_api)
 
             # Stats and analytics API
             app.include_router(stats_api, prefix="/api")
@@ -139,6 +154,30 @@ def create_app():
 
 # Create the FastAPI application using factory pattern
 app = create_app()
+
+# Initialize metrics
+metrics = get_metrics("tracking")
+
+
+@app.middleware("http")
+async def metrics_middleware(request: Request, call_next):
+    start_time = time.time()
+    response = await call_next(request)
+    duration = time.time() - start_time
+    metrics.record_request(
+        method=request.method,
+        path=request.url.path,
+        status_code=response.status_code,
+        duration=duration,
+    )
+    return response
+
+
+@app.get("/metrics")
+async def prometheus_metrics():
+    """Prometheus metrics endpoint"""
+    metrics_data = metrics.get_prometheus_metrics()
+    return PlainTextResponse(metrics_data)
 
 
 # Global exception handlers for better error reporting

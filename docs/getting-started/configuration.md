@@ -5,11 +5,11 @@ description: Understand the environment variables that control how your Mailyte 
 
 # Configuration
 
-This page walks you through the environment variables in your `.env` file, grouped by what they control. You do not need to set every single one right now -- the defaults are reasonable for development -- but you should understand what is available.
+This page walks you through the environment variables in your `.env` file, grouped by what they control. You do not need to set every single one right now -- `scripts/generate-secrets.sh` plus a handful of edits is enough for development -- but you should understand what is available.
 
 ## How configuration works
 
-Mailyte reads all its settings from environment variables. These are defined in the `.env` file at the root of the project, and Docker Compose passes them into each container automatically.
+Mailyte reads all its settings from environment variables. These are defined in the `.env` file at the root of the project, and Docker Compose passes them into each container.
 
 ```
 ┌──────────┐     ┌──────────────────┐     ┌────────────┐
@@ -17,180 +17,187 @@ Mailyte reads all its settings from environment variables. These are defined in 
 └──────────┘     └──────────────────┘     └────────────┘
 ```
 
-After changing a variable, restart the affected service (or the whole stack):
+After changing a variable, **recreate** the affected service (or the whole stack):
 
 ```bash
-# Restart everything
+# Recreate whatever changed
 docker compose up -d
 
-# Restart just the API
-docker compose restart api
+# Recreate just the API
+docker compose up -d api
 ```
 
-!!! tip "No rebuild needed"
-    Environment variable changes do not require rebuilding images. A restart is enough.
+!!! warning "`restart` is not enough"
+    `docker compose restart` restarts the existing container **without re-reading `.env`**. To pick up an environment change you must `docker compose up -d`, which recreates the container with the new values. No image rebuild is needed either way.
+
+!!! note "Compose only injects variables it is told about"
+    A variable set in `.env` reaches a container only if that service's `environment:` block in `docker-compose.yml` names it. Setting a new variable in `.env` alone does nothing for a service that does not pass it through.
+
+---
+
+## Project name
+
+| Variable | Description | Default |
+|---|---|---|
+| `COMPOSE_PROJECT_NAME` | Pins the Compose project name so every invocation -- `start.sh`, `deployment/deploy.sh`, plain `docker compose` -- resolves to the same project and the same named volumes. Without it, Compose derives the project from the current directory name, which orphans volumes on hosts that deploy into timestamped release directories. | `mailyte-prod` |
 
 ---
 
 ## Database
 
-These variables tell the API and workers how to connect to MySQL.
+These variables tell every service how to connect to MySQL.
 
 | Variable | Description | Default |
 |---|---|---|
-| `DB_HOST` | Hostname of the MySQL server. Inside Docker Compose this is usually the service name, like `db`. | `db` |
-| `DB_USER` | MySQL user the application connects as. | `mailyte` |
-| `DB_PASSWORD` | Password for the MySQL user. **Change this before first run.** | `changeme` |
+| `DB_HOST` | Hostname of the MySQL server. Inside Docker Compose this is the service name `mysql`. | `mysql` |
+| `DB_PORT` | MySQL port. | `3306` |
+| `DB_NAME` | Database name. | `mailserver` |
+| `DB_USER` | MySQL user the application connects as. | `mailuser` |
+| `DB_PASSWORD` | Password for the application user. **Required** -- the stack refuses to start with a weak or missing value. | _(none)_ |
+| `DB_ROOT_PASSWORD` | MySQL root password. Mirrored into `secrets/db_root_password` by `scripts/generate-secrets.sh`; MySQL itself boots from that file, not the env var. | _(none)_ |
 
-!!! warning "Set a real password"
-    The default `DB_PASSWORD` exists so the stack can start without errors. It is not secure. Set a strong password in `.env` before you run `docker compose up` for the first time. Changing it later means you also need to update the password inside the running MySQL container or recreate the volume.
+!!! warning "Set real passwords -- the stack enforces it"
+    The `secrets-check` container aborts startup if `DB_PASSWORD` (or any of the other required secrets) is missing, under 16 characters, or a known-weak placeholder. The `rag`, `oauth`, `url_protection`, and `jmap` containers additionally refuse to start on their own if their secret is missing -- they no longer fall back to built-in defaults, so a container run outside the compose stack fails closed too. Run `./scripts/generate-secrets.sh` instead of inventing values by hand. Changing `DB_PASSWORD` after the database volume exists also means updating the user inside MySQL (or recreating the volume).
 
 **Example:**
 
 ```dotenv
-DB_HOST=db
-DB_USER=mailyte
-DB_PASSWORD=Kj8#mPq!2xVnL9
+DB_HOST=mysql
+DB_NAME=mailserver
+DB_USER=mailuser
+DB_PASSWORD=Kj8#mPq!2xVnL9aQ
 ```
 
 ---
 
-## Mail server
+## Mail server identity
 
-These variables control Postfix and Dovecot -- the services that actually send and receive email.
+These variables control Postfix, Dovecot, and the DNS records the API generates for customers.
 
 | Variable | Description | Default |
 |---|---|---|
-| `HOSTNAME` | The fully-qualified domain name of the mail server itself, e.g. `mail.example.com`. This appears in SMTP banners and HELO/EHLO. | `mail.localhost` |
-| `DOMAIN` | The primary mail domain, e.g. `example.com`. Used as the default domain for new accounts. | `localhost` |
-| `POSTFIX_MESSAGE_SIZE_LIMIT` | Maximum size of a single email message in bytes. `25000000` is roughly 25 MB. | `25000000` |
+| `HOSTNAME` | The fully-qualified name of the mail server itself, e.g. `mail.example.com`. Appears in SMTP banners, HELO/EHLO, and generated DNS records. | `mail.example.com` |
+| `DOMAIN` | The server's base domain, e.g. `example.com`. Also the default domain for admin subdomains (`api.`, `grafana.`, ...) in production. | `example.com` |
+| `ADMIN_EMAIL` | Operator contact address; also the default sender for alert and report mail. | _(unset)_ |
+| `MAIL_HOSTNAME` | The **customer-facing** mail hostname handed to email clients and used as the MX in generated records -- distinct from `HOSTNAME` when the server's PTR identity differs from the brand name. | _(unset, falls back to `HOSTNAME`)_ |
+| `MAIL_SPF_HOST` | The host customers `include:` in their SPF records. Kept separate from `MAIL_HOSTNAME` on purpose, so renaming the mail host does not silently repoint every customer's SPF. | _(unset)_ |
+| `POSTFIX_MESSAGE_SIZE_LIMIT` | Maximum size of a single message in bytes. `52428800` is 50 MB. | `52428800` |
 
-!!! note "HOSTNAME vs DOMAIN"
-    Think of `DOMAIN` as the part after the `@` in an email address (`user@example.com`). `HOSTNAME` is the name of the server that handles mail for that domain (`mail.example.com`). They are related but not the same thing.
+!!! note "HOSTNAME vs DOMAIN vs MAIL_HOSTNAME"
+    `DOMAIN` is the part after the `@`. `HOSTNAME` is this server's own identity (matches its PTR record). `MAIL_HOSTNAME` is what customers type into their mail clients. On a single-domain setup, `MAIL_HOSTNAME` can stay unset.
 
-**Example:**
+---
 
-```dotenv
-HOSTNAME=mail.example.com
-DOMAIN=example.com
-POSTFIX_MESSAGE_SIZE_LIMIT=25000000
+## Security secrets
+
+Eight secrets are required before the stack will boot at all (see [Installation](installation.md)). The ones you will interact with most:
+
+| Variable | Description |
+|---|---|
+| `WEBHOOK_SECRET` | Signs outgoing webhook payloads (HMAC). Consumers verify the signature. |
+| `ADMIN_TOKEN_SECRET` | Admin token secret for platform-level API access. The `jmap` container requires it at startup (wired through compose since 2026-08-30 -- before that it silently ran on a built-in default). |
+| `ADMIN_PASSWORD` | Legacy alias -- keep in sync with `ADMIN_TOKEN_SECRET`. |
+| `OAUTH_TOKEN_SECRET` | Signing secret for the OAuth 2.0 / XOAUTH2 service. |
+| `URL_HMAC_SECRET` | Signs Safe-Links URLs in the url_protection service. |
+| `GRAFANA_ADMIN_PASSWORD` | Grafana admin login (user: `GRAFANA_ADMIN_USER`, default `admin`). |
+| `DOVEADM_API_KEY` | Optional but recommended: authenticates the internal doveadm HTTP listener so revoking an SMTP credential flushes Dovecot's auth cache immediately instead of after up to an hour. Generate with `openssl rand -hex 24`. |
+
+Generate a random secret when you need one by hand:
+
+```bash
+openssl rand -base64 32
 ```
 
 ---
 
-## Security and SSL
+## TLS certificates
 
-These variables handle TLS certificates and secrets used for authentication.
+In development, `start.sh` generates a self-signed certificate into `storage/ssl_certs/server.crt` and `storage/ssl_private/server.key` on first run. Postfix and Dovecot mount those directories.
+
+In production, the `cert_manager` service obtains and renews Let's Encrypt certificates automatically (webroot HTTP-01 via Traefik) and reloads Postfix/Dovecot when they change. It is driven by:
 
 | Variable | Description | Default |
 |---|---|---|
-| `SSL_CERT_PATH` | Path to the directory containing your TLS certificate and private key. Inside the container, this is where Postfix and Dovecot look for `fullchain.pem` and `privkey.pem`. | `/etc/ssl/certs/mailyte` |
-| `WEBHOOK_SECRET` | A shared secret used to sign outgoing webhook payloads. Consumers verify this signature to confirm the payload came from your server. | _(empty)_ |
+| `ACME_EMAIL` | Email for Let's Encrypt expiry notices. | `admin@example.com` |
+| `ACME_STAGING` | Use the Let's Encrypt staging CA. `true` in the base file; `docker-compose.prod.yml` forces `false`. | `true` |
+| `CERT_SERVER_IPS` | This server's public IP(s), so cert_manager can skip SAN candidates whose DNS points elsewhere. Must be set explicitly in production. | _(unset)_ |
+| `CERT_RENEWAL_DAYS` | Renew when fewer than this many days remain. | `30` |
 
-!!! warning "Always set WEBHOOK_SECRET in production"
-    Without a webhook secret, anyone who discovers your webhook consumer endpoints could forge events. Generate a random string of at least 32 characters:
-
-    ```bash
-    openssl rand -hex 32
-    ```
-
-**Example:**
-
-```dotenv
-SSL_CERT_PATH=/etc/ssl/certs/mailyte
-WEBHOOK_SECRET=a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2
-```
-
-### Mounting certificates
-
-Your TLS files need to be accessible inside the containers. The `docker-compose.yml` mounts the host path into the container at `SSL_CERT_PATH`. Place your certificate files on the host:
-
-```
-/etc/mailyte/ssl/
-  fullchain.pem
-  privkey.pem
-```
-
-!!! tip "Let's Encrypt works great"
-    If you use Certbot or another ACME client, point `SSL_CERT_PATH` at the directory where it writes the live certificate. Set up a cron job to reload Postfix and Dovecot after renewal:
-
-    ```bash
-    certbot renew --post-hook "docker compose restart postfix dovecot"
-    ```
+There is no host-side certbot to configure -- do not set up your own certbot cron on the host, it will collide with cert_manager's locks.
 
 ---
 
 ## Redis
 
-Redis provides caching and message brokering for the worker services.
+Redis provides caching, rate limiting, queues, and the Rspamd backend.
 
 | Variable | Description | Default |
 |---|---|---|
-| `REDIS_HOST` | Hostname of the Redis server. Inside Docker Compose, this is the service name. | `redis` |
+| `REDIS_HOST` | Hostname of the Redis server -- the service name inside Compose. | `redis` |
 | `REDIS_PORT` | Port Redis listens on. | `6379` |
+| `REDIS_PASSWORD` | Optional. When set, the Redis container starts with `--requirepass`. | _(empty)_ |
 
-Unless you are running Redis externally, you probably never need to change these.
-
-**Example:**
-
-```dotenv
-REDIS_HOST=redis
-REDIS_PORT=6379
-```
+Unless you are running Redis externally (see `docker-compose.cloud.yml`), you probably never need to change these.
 
 ---
 
 ## Feature flags
 
-These variables turn optional features on or off.
-
 | Variable | Description | Default |
 |---|---|---|
-| `TRACKING_ENABLED` | Set to `true` to enable open and click tracking for outgoing emails. When enabled, the tracking worker rewrites links and injects tracking pixels. | `false` |
-| `CLOUD_PROVIDER` | Which cloud storage provider to use for backups and cloud sync. Supported values: `aws`, `gcp`, `azure`, `none`. | `none` |
-
-**Example:**
-
-```dotenv
-TRACKING_ENABLED=true
-CLOUD_PROVIDER=aws
-```
+| `TRACKING_ENABLED` | Open and click tracking for outgoing mail. The tracking injector rewrites links and adds a pixel on the submission path. | `true` |
+| `ARCHIVE_OUTBOUND_ENABLED` | Archive every outbound message to the archiver service. | `true` |
+| `TRANSPORT_RULES_ENABLED` | Enforce transport rules in Rspamd. Off by default -- read your rules before turning every draft rule into policy at once. | `false` |
+| `AUTO_SUSPEND_ENABLED` | Automatic suspension of abusive SMTP API keys by the log ingestor. | `false` |
+| `COMPOSE_PROFILES` | Optional webmail clients: `roundcube`, `sogo`, or both (comma-separated). The bundled `webmail` and `console` services are behind the `webmail` / `console` profiles, which `start.sh` and `deployment/deploy.sh` pass automatically. | _(unset)_ |
 
 !!! info "Tracking and privacy"
-    Email tracking inserts a tiny invisible image and rewrites links to pass through the tracking service. This is standard practice for transactional and marketing email, but be aware of privacy regulations (GDPR, CAN-SPAM) in your jurisdiction. You can always leave it off.
+    Email tracking inserts a tiny invisible image and rewrites links to pass through the tracking service. This is standard practice for transactional and marketing email, but be aware of privacy regulations (GDPR, CAN-SPAM) in your jurisdiction. Set `TRACKING_ENABLED=false` to turn it off.
 
 ---
 
 ## All variables at a glance
 
-For quick reference, here is every variable covered on this page in one block:
+For quick reference, the variables you are most likely to touch during initial setup:
 
 ```dotenv
-# Database
-DB_HOST=db
-DB_USER=mailyte
-DB_PASSWORD=your-strong-password
+# Project
+COMPOSE_PROJECT_NAME=mailyte-prod
 
-# Mail server
+# Database
+DB_HOST=mysql
+DB_NAME=mailserver
+DB_USER=mailuser
+DB_PASSWORD=<generated>
+DB_ROOT_PASSWORD=<generated>
+
+# Mail server identity
 HOSTNAME=mail.example.com
 DOMAIN=example.com
-POSTFIX_MESSAGE_SIZE_LIMIT=25000000
+ADMIN_EMAIL=admin@example.com
 
-# Security
-SSL_CERT_PATH=/etc/ssl/certs/mailyte
-WEBHOOK_SECRET=your-random-secret
+# Secrets (generated by scripts/generate-secrets.sh)
+WEBHOOK_SECRET=<generated>
+OAUTH_TOKEN_SECRET=<generated>
+URL_HMAC_SECRET=<generated>
+ADMIN_PASSWORD=<generated>
+ADMIN_TOKEN_SECRET=<generated>
+GRAFANA_ADMIN_PASSWORD=<generated>
+
+# TLS (production)
+ACME_EMAIL=admin@example.com
+ACME_STAGING=false
 
 # Redis
 REDIS_HOST=redis
 REDIS_PORT=6379
 
 # Features
-TRACKING_ENABLED=false
-CLOUD_PROVIDER=none
+TRACKING_ENABLED=true
 ```
 
 !!! note "This is not every variable"
-    Mailyte has more configuration options than what is covered here. The [Configuration Reference](../reference/configuration-reference.md) page in the Reference section has the exhaustive list. This page focuses on the ones you need to understand during initial setup.
+    `.env.example` documents the exhaustive list, section by section, and the [Configuration Reference](../reference/configuration-reference.md) covers the rest. This page focuses on the ones you need to understand during initial setup.
 
 ## Next step
 

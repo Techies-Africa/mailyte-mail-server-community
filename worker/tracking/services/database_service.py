@@ -110,6 +110,32 @@ class DatabaseService:
         finally:
             session.close()
 
+    def execute_query(self, query: str, params: tuple = (), fetch_results: bool = True):
+        """Raw %s-placeholder SQL passthrough for services (SuppressionService)
+        that build their own queries directly against the schema instead of
+        through this class's SQLAlchemy ORM models. This method didn't exist
+        at all before -- every caller was hitting AttributeError, silently
+        swallowed by their own broad try/except. Uses the engine's raw
+        pymysql connection (not a SQLAlchemy Session) so those existing
+        %s-style queries work completely unchanged -- SQLAlchemy's own
+        text() expects :name-style bound params, a different paramstyle.
+        """
+        import pymysql
+
+        conn = self.engine.raw_connection()
+        try:
+            cursor = conn.cursor(pymysql.cursors.DictCursor)
+            cursor.execute(query, params)
+            if fetch_results:
+                results = cursor.fetchall()
+            else:
+                results = cursor.rowcount
+                conn.commit()
+            cursor.close()
+            return results
+        finally:
+            conn.close()
+
     def test_connection(self) -> bool:
         """
         Test database connectivity.
@@ -219,7 +245,13 @@ class DatabaseService:
                 tracking_event = EmailTracking(
                     email_id=tracking_data["email_id"],
                     recipient=tracking_data["recipient"],
-                    tenant_id=tracking_data["tenant_id"],  # Maps to organization_id internally
+                    # The model's real column is organization_id -- this was
+                    # passing the literal kwarg name `tenant_id`, which
+                    # EmailTracking's constructor doesn't have, throwing on
+                    # every single call (confirmed live: silently swallowed
+                    # by this method's own except below, so it looked like
+                    # tracking was working while nothing was ever written).
+                    organization_id=tracking_data["tenant_id"],
                     domain_id=tracking_data["domain_id"],  # References domains table
                     event_type=event_type,
                     timestamp=request_info["timestamp"],
@@ -442,7 +474,11 @@ class DatabaseService:
                     )
                     .filter(
                         and_(
-                            EmailTracking.tenant_id == tenant_id,
+                            # Same tenant_id/organization_id mismatch as
+                            # _log_tracking_event_sync -- the model has no
+                            # tenant_id attribute at all, so this always
+                            # threw before a single row was ever queried.
+                            EmailTracking.organization_id == tenant_id,
                             EmailTracking.timestamp >= start_date,
                             EmailTracking.timestamp <= end_date,
                         )
@@ -469,4 +505,67 @@ class DatabaseService:
 
         except Exception as e:
             logger.error(f"Failed to get tenant stats for {tenant_id}: {e}")
+            return {}
+
+    def get_domain_stats(self, domain_id: str, days: int = 30) -> dict[str, Any]:
+        """
+        Get tracking statistics for a specific domain. Mirrors
+        get_tenant_stats exactly, filtered by domain_id instead of
+        organization_id -- this method didn't exist at all before; the
+        gateway's domain-stats route had nothing real to proxy to.
+
+        Args:
+            domain_id: Domain identifier (the domains table's id, not its
+                       name -- name-to-id resolution happens at the caller)
+            days: Number of days to include in statistics
+
+        Returns:
+            Dict[str, Any]: Domain tracking statistics
+        """
+        try:
+            with self.get_session() as session:
+                end_date = datetime.utcnow()
+                start_date = end_date - timedelta(days=days)
+
+                events_query = (
+                    session.query(
+                        EmailTracking.event_type,
+                        func.count(EmailTracking.id).label("total"),
+                        func.count(func.distinct(EmailTracking.email_id)).label("unique_emails"),
+                        func.count(func.distinct(EmailTracking.recipient)).label(
+                            "unique_recipients"
+                        ),
+                    )
+                    .filter(
+                        and_(
+                            EmailTracking.domain_id == domain_id,
+                            EmailTracking.timestamp >= start_date,
+                            EmailTracking.timestamp <= end_date,
+                        )
+                    )
+                    .group_by(EmailTracking.event_type)
+                )
+
+                event_stats = {}
+                for row in events_query.all():
+                    event_stats[row.event_type] = {
+                        "total": row.total,
+                        "unique_emails": row.unique_emails,
+                        "unique_recipients": row.unique_recipients,
+                    }
+
+                return {
+                    "domain_id": domain_id,
+                    "period_days": days,
+                    "start_date": start_date.isoformat(),
+                    "end_date": end_date.isoformat(),
+                    "event_statistics": event_stats,
+                    "total_sent": event_stats.get("delivered", {}).get("total", 0),
+                    "total_opens": event_stats.get("opened", {}).get("total", 0),
+                    "total_clicks": event_stats.get("clicked", {}).get("total", 0),
+                    "generated_at": datetime.utcnow().isoformat() + "Z",
+                }
+
+        except Exception as e:
+            logger.error(f"Failed to get domain stats for {domain_id}: {e}")
             return {}

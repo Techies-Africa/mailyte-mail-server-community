@@ -2,132 +2,104 @@
 
 When things go really wrong — database corruption, server failure, or accidental deletion — here's how to get back up.
 
-## Recovery Time Objectives
+!!! info "The operational runbook is the authority"
+    This page explains the mechanics. During a real incident, use the operational runbook at `docs/operations/disaster-recovery.md` in the repository — it is drilled, reviewed, and lists the exact escrow/backup locations for the production deployment. The design rationale lives in `plans/06-operations/00-PRD-disaster-recovery.md`.
 
-Know your targets before disaster strikes:
+## Before You Restore Anything
 
-| Scenario | Target Recovery Time | Data Loss Tolerance |
-|----------|---------------------|-------------------|
-| Single service crash | < 5 minutes (auto-healing) | None |
-| Database corruption | < 1 hour | Up to 24 hours |
-| Full server failure | < 4 hours | Up to 24 hours |
-| Data center outage | < 8 hours | Up to 24 hours |
-| Accidental data deletion | < 2 hours | Depends on backup frequency |
-
-## Quick Assessment
-
-When something breaks, figure out what you're dealing with:
+**Do not start restoring until you know what actually broke.** A restore over healthy data is worse than the outage. Senders retry for 48-72 hours against a dead MX — a mail server that is down is not losing mail; a mail server restored badly is.
 
 ```bash
 # What's running?
-docker compose ps
+docker compose ps -a
 
-# Can you reach the server?
-ssh user@your-server
+# Is mail flowing? Empty queue + recent log lines = mail is fine,
+# your problem is somewhere else.
+docker compose exec postfix postqueue -p | tail -3
+tail -5 logs/mailer/postfix/mail.log
 
-# Is Docker running?
-systemctl status docker
-
-# Check disk space
+# Disk, Docker, system
 df -h
-
-# Check system logs
+systemctl status docker
 journalctl --since "1 hour ago" | tail -50
 ```
 
-## Scenario 1: Database Restore
+## What Exists, and Where
 
-MySQL database is corrupted or lost.
+| Thing | Where | Restored by |
+|-------|-------|-------------|
+| MySQL, Redis, mail storage, DKIM, SSL, config, secrets | `storage/backups/<backup_id>/` locally, mirrored to S3 (age-encrypted) | `scripts/restore.sh` |
+| The unrecoverable secrets (age identity, `encryption_kek`, mail_crypt keys, `.env`) | The escrow bundle written by `scripts/escrow-secrets.sh` | Manual unpack, then `restore.sh` |
+| Maildir folder/flag state, at most 15 minutes old | S3 mail-state sync (`mailyte-mail-sync.timer`) | `scripts/mail-sync.sh` tooling |
+| Per-message raw archive | The archiver's S3 bucket | `GET /api/v1/.../archive` or bulk copy |
 
-### From mysqldump
+## The Restore Tool
+
+Every scenario below goes through `scripts/restore.sh`:
 
 ```bash
-# 1. Stop services that depend on MySQL
-docker compose stop api worker postfix dovecot
+./scripts/restore.sh --list                      # what backups exist
+./scripts/restore.sh --latest --dry-run          # rehearse, touch nothing
+./scripts/restore.sh --latest                    # full restore, latest set
+./scripts/restore.sh --date 20260829_023000      # a specific set
+./scripts/restore.sh --from-s3 <BACKUP_ID> --identity /path/to/age-identity
+                                                 # download + decrypt + restore
+# Component restores:
+./scripts/restore.sh --latest --mysql-only       # also: --redis-only, --mail-only,
+                                                 # --dkim-only, --ssl-only, --config-only
+# Tenant-scoped restore:
+./scripts/restore.sh --latest --organization <ORG_ID>
+```
 
-# 2. Find the latest backup
-ls -lt /opt/mailyte/backups/mysql/ | head -5
+Restoring from S3 needs the **age identity** — the private key that never lives on the server. It comes from escrow. If you cannot locate the escrow bundle, stop and find it before doing anything else.
 
-# 3. Drop and recreate the database
-docker compose exec mysql mysql -u root -p"${MYSQL_ROOT_PASSWORD}" -e "
-  DROP DATABASE IF EXISTS mailyte;
-  CREATE DATABASE mailyte;
-"
+## Scenario 1: Database Corruption or Loss
 
-# 4. Restore from backup
-zcat /opt/mailyte/backups/mysql/mailyte_20260325_020000.sql.gz \
-  | docker compose exec -T mysql mysql -u root -p"${MYSQL_ROOT_PASSWORD}" mailyte
+```bash
+# 1. Rehearse
+./scripts/restore.sh --latest --mysql-only --dry-run
 
-# 5. Verify the restore
-docker compose exec mysql mysql -u root -p"${MYSQL_ROOT_PASSWORD}" mailyte -e "
-  SELECT COUNT(*) AS users FROM users;
-  SELECT COUNT(*) AS domains FROM domains;
-  SELECT COUNT(*) AS emails FROM emails;
-"
+# 2. Restore (the script stops/starts dependent services around the import)
+./scripts/restore.sh --latest --mysql-only
 
-# 6. Restart services
+# 3. Verify
+docker compose exec -T mysql sh -c \
+  'mysql -u root -p"$(cat /run/secrets/db_root_password)" "${MYSQL_DATABASE:-mailserver}"' <<'SQL'
+SELECT COUNT(*) AS organizations FROM organizations;
+SELECT COUNT(*) AS domains FROM domains;
+SELECT COUNT(*) AS accounts FROM email_accounts;
+SQL
+
+# 4. Bring the stack back to full health
 docker compose up -d
 ```
 
-### From Remote Backup (S3)
-
-```bash
-# Download the backup
-aws s3 cp s3://your-bucket/mailyte-backups/mysql/mailyte_20260325_020000.sql.gz \
-  /tmp/restore.sql.gz
-
-# Then follow steps 1-6 above using /tmp/restore.sql.gz
-```
+An incremental chain (hourly binlogs) narrows data loss to at most an hour beyond the last full dump.
 
 ## Scenario 2: Mail Data Recovery
 
-Mail storage volume is damaged or deleted.
+Mail lives in the bind-mounted `storage/mail_data/` directory (not a Docker named volume).
 
 ```bash
-# 1. Stop mail services
+# 1. Stop mail services so nothing writes mid-restore
 docker compose stop postfix dovecot
 
-# 2. Check if the volume still exists
-docker volume inspect mailyte_mail-data
+# 2. Restore the Maildirs
+./scripts/restore.sh --latest --mail-only
 
-# 3a. If volume exists but data is corrupt — restore from backup
-MAIL_VOLUME=$(docker volume inspect mailyte_mail-data --format '{{ .Mountpoint }}')
-rsync -av --delete /opt/mailyte/backups/mail/latest/ "$MAIL_VOLUME/"
-
-# 3b. If volume is gone — recreate it and restore
-docker volume create mailyte_mail-data
-MAIL_VOLUME=$(docker volume inspect mailyte_mail-data --format '{{ .Mountpoint }}')
-rsync -av /opt/mailyte/backups/mail/latest/ "$MAIL_VOLUME/"
-
-# 4. Fix permissions
-docker compose run --rm postfix chown -R vmail:vmail /var/mail
-
-# 5. Restart mail services
+# 3. Restart and verify a known mailbox
 docker compose up -d postfix dovecot
-
-# 6. Verify — check a known mailbox
-docker compose exec dovecot doveadm mailbox list -u testuser@yourdomain.com
+docker compose exec dovecot doveadm mailbox list -u someone@yourdomain.com
 ```
 
-## Scenario 3: Full System Rebuild
+For folder/flag state newer than the last backup, the 15-minute S3 mail-state sync (`mailyte-mail-sync.timer`) has a fresher copy.
+
+!!! warning "Encrypted mailboxes"
+    Mailboxes migrated from a mail_crypt-encrypted source need the mail_crypt keys (in `secrets/mail_crypt`, escrowed) or every message FETCH fails while SEARCH still counts them — mailboxes look full and read empty. Restore the keys before concluding the mail data is bad.
+
+## Scenario 3: Full Server Rebuild
 
 The entire server is gone. Starting from a new machine.
-
-```mermaid
-graph TD
-    A[New Server] --> B[Install Docker]
-    B --> C[Clone Repository]
-    C --> D[Restore .env]
-    D --> E[Restore Configs]
-    E --> F[Start Containers]
-    F --> G[Restore MySQL]
-    G --> H[Restore Mail Data]
-    H --> I[Update DNS]
-    I --> J[Verify Everything]
-    J --> K[Re-enable Monitoring]
-```
-
-### Step by Step
 
 ```bash
 # 1. Set up the new server
@@ -136,104 +108,54 @@ curl -fsSL https://get.docker.com | sh
 sudo usermod -aG docker $USER
 
 # 2. Clone the repository
-git clone https://github.com/TechiesAfrica/mailyte-email-server.git
+git clone https://github.com/Techies-Africa/mailyte-email-server.git
 cd mailyte-email-server
 
-# 3. Restore configuration from backup
-# Download from S3/remote server
-aws s3 cp s3://your-bucket/mailyte-backups/config/config_latest.tar.gz /tmp/
-tar xzf /tmp/config_latest.tar.gz -C .
+# 3. Recover the escrow bundle (from your escrow location, NOT from this
+#    server's backups) and unpack it: .env, secrets/encryption_kek,
+#    secrets/mail_crypt, the age identity, secrets/dr.env
 
-# Restore .env (encrypted with GPG)
-aws s3 cp s3://your-bucket/mailyte-backups/config/env_latest.gpg /tmp/
-gpg --decrypt /tmp/env_latest.gpg > .env
+# 4. Restore everything from S3
+./scripts/restore.sh --from-s3 <BACKUP_ID> --identity /path/to/age-identity
 
-# 4. Update .env with new server IP (if changed)
-sed -i 's/OLD_SERVER_IP/NEW_SERVER_IP/' .env
+# 5. Start the stack
+docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
 
-# 5. Get TLS certificates
-sudo certbot certonly --standalone \
-  -d mail.yourdomain.com \
-  --email admin@yourdomain.com \
-  --agree-tos
+# 6. Update DNS if the IP changed (A record + PTR), and CERT_SERVER_IPS in .env
 
-# 6. Start the infrastructure services first
-docker compose up -d mysql redis
-sleep 30  # Wait for MySQL to initialize
-
-# 7. Restore the database
-aws s3 cp s3://your-bucket/mailyte-backups/mysql/mailyte_latest.sql.gz /tmp/
-zcat /tmp/restore.sql.gz \
-  | docker compose exec -T mysql mysql -u root -p"${MYSQL_ROOT_PASSWORD}"
-
-# 8. Start remaining services
-docker compose up -d
-
-# 9. Restore mail data
-aws s3 sync s3://your-bucket/mailyte-backups/mail/latest/ /tmp/mail-restore/
-MAIL_VOLUME=$(docker volume inspect mailyte_mail-data --format '{{ .Mountpoint }}')
-sudo rsync -av /tmp/mail-restore/ "$MAIL_VOLUME/"
-docker compose exec postfix chown -R vmail:vmail /var/mail
-
-# 10. Restart to pick up restored data
-docker compose restart
-
-# 11. Update DNS if the IP changed
-echo "Update your DNS A record for mail.yourdomain.com to point to the new IP"
-
-# 12. Verify
-curl -s http://localhost:8080/health | python3 -m json.tool
-echo "EHLO test" | nc -w 3 localhost 25
+# 7. Reinstall the backup timers -- a restored server with no backups is
+#    one incident away from an unrecoverable one
+sudo ./deployment/systemd/install-timers.sh
 ```
 
-## Scenario 4: Corrupted Docker Environment
+## Scenario 4: Single Organization Restore
 
-Docker itself is broken but the server is fine.
+Someone deleted a tenant's data, and every other tenant is fine. Do **not** roll the whole database back:
 
 ```bash
-# 1. Stop everything
-docker compose down
-
-# 2. Back up volumes before touching Docker
-sudo cp -a /var/lib/docker/volumes/mailyte_mysql-data /tmp/mysql-backup
-sudo cp -a /var/lib/docker/volumes/mailyte_mail-data /tmp/mail-backup
-
-# 3. Reinstall Docker
-sudo apt remove -y docker-ce docker-ce-cli containerd.io
-sudo apt install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
-
-# 4. Restore volumes
-sudo cp -a /tmp/mysql-backup /var/lib/docker/volumes/mailyte_mysql-data
-sudo cp -a /tmp/mail-backup /var/lib/docker/volumes/mailyte_mail-data
-
-# 5. Restart
-docker compose up -d
+./scripts/restore.sh --latest --organization <ORG_ID> --dry-run
+./scripts/restore.sh --latest --organization <ORG_ID>
 ```
 
 ## Post-Recovery Checklist
 
-After any recovery, verify everything:
-
-- [ ] All containers running: `docker compose ps`
-- [ ] Health check passes: `curl http://localhost:8080/health`
-- [ ] Database queries work: `docker compose exec mysql mysql -u root -p -e "SELECT 1"`
-- [ ] Can send email: test via API
-- [ ] Can receive email: send from external address
-- [ ] Can read email: test IMAP login
-- [ ] Monitoring is working: check Grafana
-- [ ] Backups are running: verify cron jobs are set
-- [ ] DNS is correct: `dig mail.yourdomain.com`
+- [ ] All containers running: `docker compose ps` (`secrets-check`/`migrate` exited 0)
+- [ ] API healthy: `curl -s https://api.yourdomain.com/health`
+- [ ] Database queries work (see Scenario 1 verification)
+- [ ] Can send email: authenticated submission on 587
+- [ ] Can receive email: send from an external address
+- [ ] Can read email: IMAP login, and message *content* opens (not just counts — catches missing mail_crypt keys)
+- [ ] Monitoring is working: Grafana + Prometheus targets
+- [ ] Backup timers re-enabled: `systemctl list-timers 'mailyte-backup-*'`
+- [ ] DNS is correct: `dig mail.yourdomain.com` and `dig -x <IP>`
 - [ ] TLS certificates valid: `openssl s_client -connect mail.yourdomain.com:993`
 
 ## Prevention
 
-The best disaster recovery is prevention:
+1. **Test backups monthly** — `./scripts/restore.sh --latest --dry-run`, and a full `./scripts/dr-drill.sh` periodically
+2. **Keep the escrow current** — re-run `./scripts/escrow-secrets.sh` whenever a secret changes
+3. **Monitor backup freshness** — `backup_alerts.yml` fires when backups go stale; make sure someone receives it
+4. **Watch disk space** — alert at 80%
+5. **Keep the runbook reachable when the server is not** — `docs/operations/disaster-recovery.md` printed, or in a shared doc
 
-1. **Test backups monthly** — restore to a test environment
-2. **Monitor disk space** — set alerts at 80% usage
-3. **Use remote backup storage** — not just local disk
-4. **Document your setup** — you might not be the one doing the recovery
-5. **Keep the .env backup current** — update it every time you change passwords
-6. **Set up monitoring alerts** — catch problems before they become disasters
-
-> **Tip:** Write down your recovery steps specific to your environment and keep them somewhere accessible even if your server is down (printed copy, shared doc, password manager note).
+> **Tip:** The single most dangerous asset is `secrets/encryption_kek` and the mail_crypt keys — no quantity of backups compensates for losing them. Verify the escrow bundle exists *today*.

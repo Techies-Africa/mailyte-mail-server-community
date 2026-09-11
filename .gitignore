@@ -14,8 +14,13 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+# Anchored to the repo root: these are Python build artefacts (setuptools
+# writes ./lib and ./lib64), and unanchored they match ANY nested directory
+# called lib -- which silently excluded scripts/lib/, the shared shell library
+# backup.sh and restore.sh source at runtime. A deploy would have shipped
+# scripts that immediately fail on a missing source file.
+/lib/
+/lib64/
 parts/
 sdist/
 var/
@@ -123,10 +128,8 @@ celerybeat.pid
 .env
 .venv
 
-# Generated secrets -- the envelope-encryption KEK (phase-07 C2) that
-# scripts/generate_dkim_kek.sh writes. Never committed; each environment
-# generates its own. This repo is public: a committed KEK next to a leaked
-# database dump is the same as never having encrypted the keys at all.
+# Generated secrets -- KEK files (phase-07 C2), anything scripts/generate-secrets.sh
+# writes here. Never committed; each environment generates its own.
 /secrets/
 env/
 venv/
@@ -149,8 +152,11 @@ venv.bak/
 .dmypy.json
 dmypy.json
 
-# ruff — CI runs it (.github/workflows/ci.yml) and so does anyone checking
-# the lint ratchet locally; its cache was never ignored.
+# ruff -- CI runs it and so does anyone checking the lint ratchet locally, so
+# its cache appears in every working tree. Carried up from the Community
+# Edition's own .gitignore, which had this and this repo did not: CE is
+# generated from here now, so a rule that lives only downstream is a rule that
+# gets overwritten at the next release.
 .ruff_cache/
 
 # Pyre type checker
@@ -185,6 +191,12 @@ storage/mail_data/
 # Attachments
 storage/attachments/
 
+# ACME HTTP-01 challenge files (transient, written by cert_manager)
+storage/acme_challenge/
+
+# api service's writable /app/data (bootstrap token, runtime state)
+storage/api_data/
+
 # Backups
 storage/backups/*.sql
 storage/backups/*.tar.gz
@@ -204,12 +216,15 @@ storage/qdrant_data/
 *.swp
 *.swo
 
-# Credentials that must never reach this repo -- it is public.
-# `.api-key` was previously glued onto the end of the `*.swo` line by a
-# missing newline, which meant it matched nothing at all.
 .api-key
+setup-first-user.sh
 
-# The api service's writable /app/data. docker-compose.yml bind-mounts
-# ./worker/api to /app, so the single-use operator bootstrap token app.py
-# writes at startup (0600, ADR-004) lands here on the host.
+# Local dev overrides — port remaps depend on what else is running on the
+# host (e.g. XAMPP on 80/443/3306). Commit docker-compose.override.yml.example
+# instead; each developer copies it and adjusts for their own machine.
+docker-compose.override.yml
+
+# Bootstrap token (phase-02 task 2.4) -- single-use credential, never committed.
 worker/api/data/
+
+mailyte_dns_records.txt

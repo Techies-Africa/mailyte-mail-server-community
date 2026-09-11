@@ -1,11 +1,11 @@
 
 # Deployment Guide
 
-This guide covers all aspects of deploying the Mailyte Mail Server, from development environments to production-scale deployments with high availability and monitoring.
+This guide covers all aspects of deploying the Enterprise Mail Server, from development environments to production-scale deployments with high availability and monitoring.
 
 ## Deployment Overview
 
-The Mailyte Mail Server supports multiple deployment strategies:
+The Enterprise Mail Server supports multiple deployment strategies:
 
 1. **Development Deployment**: Single-node setup for development and testing
 2. **Production Deployment**: Multi-node setup with load balancing and redundancy
@@ -723,4 +723,4 @@ find /var/mail -name "*.eml" -exec file {} \; | grep -v "text" | wc -l
 curl http://localhost:8080/health
 ```
 
-This comprehensive deployment guide provides all the information needed to successfully deploy the Mailyte Mail Server in various environments, from development to enterprise-scale production deployments.
+This comprehensive deployment guide provides all the information needed to successfully deploy the Enterprise Mail Server in various environments, from development to enterprise-scale production deployments.

@@ -1,314 +1,148 @@
 ---
 title: Scaling to Millions
-description: Architecture changes and optimizations to handle millions of emails per day — queue tuning, multiple Postfix instances, database sharding, and more.
+description: What you can tune in today's Mailyte to handle higher volume — Postfix, MySQL, Redis, worker replicas — and which scaling patterns are architecture work, not configuration.
 ---
 
 # Scaling to Millions
 
-> **Enterprise Edition** — This feature is available in [Mailyte Enterprise](https://mailyte.com). The Community Edition does not include this functionality.
-
-
-The default Mailyte setup handles tens of thousands of emails per day comfortably. To push into the millions, you need some architecture changes. This guide covers what to change and when.
+The default Mailyte setup handles tens of thousands of emails per day comfortably. This guide separates what you can do **today with configuration** from what would be **architecture work** — several patterns often suggested for mail-at-scale (multiple MTA instances, read replicas, sharding) are not built into Mailyte as of 2026-08-30, and pretending otherwise wastes your incident hours.
 
 ## When to Start Scaling
 
-| Daily Volume | Architecture |
+| Daily Volume | Approach |
 |-------------|--------------|
 | < 50,000 | Default single-server setup |
-| 50,000 - 500,000 | Optimize queues, tune databases, add monitoring |
-| 500,000 - 2,000,000 | Multiple Postfix instances, read replicas |
-| 2,000,000+ | Full horizontal scaling, database sharding |
+| 50,000 - 500,000 | Tune Postfix/MySQL/Redis, scale worker replicas, watch the queue |
+| 500,000+ | Plan architecture work (below) — and talk to your capacity numbers first |
 
-## Phase 1: Optimize the Single Server (up to 500K/day)
+**Queue depth is your early-warning signal.** Watch it via the API — `GET /api/v1/queue/queue/status` and `GET /api/v1/queue/mail-queue/deferred` — or directly with `docker exec postfix postqueue -p`. A queue that keeps growing means you need more delivery capacity or receivers are throttling you.
 
-### Postfix Queue Tuning
+## Tuning the Single Server
 
-The default Postfix config is conservative. For higher throughput:
+### Postfix Tuning
 
-```bash
-# config/mailer/postfix/custom/main.cf
+!!! warning "Postfix config is baked into the image"
+    `main.cf` lives at `mailer/postfix/config/main.cf` and is **copied into the image at build time** — there is no mounted `custom/main.cf`, and `postconf -e` inside the container vanishes on the next recreate. To change Postfix settings: edit `mailer/postfix/config/main.cf`, rebuild (`docker compose build postfix`), and recreate the container.
 
-# Increase concurrent deliveries
+Settings worth reviewing for throughput (standard Postfix knobs — set them in `mailer/postfix/config/main.cf`):
+
+```
+# Concurrent deliveries per destination
 default_destination_concurrency_limit = 20
 smtp_destination_concurrency_limit = 20
-local_destination_concurrency_limit = 5
 
-# Increase process limits
+# Process limits
 default_process_limit = 200
 
-# Reduce queue scan interval
-queue_run_delay = 60s
+# Retry pacing
 minimal_backoff_time = 60s
 maximal_backoff_time = 600s
 
-# Increase connection cache
+# Connection reuse to big receivers
 smtp_connection_cache_on_demand = yes
-smtp_connection_cache_time_limit = 30s
 smtp_connection_reuse_time_limit = 300s
 ```
 
 !!! warning "Per-destination limits"
     Gmail and Microsoft rate-limit incoming SMTP connections. Don't set `smtp_destination_concurrency_limit` above 20 for external delivery or you'll get temporary blocks.
 
+Also note the spool: `/var/spool/postfix` is a named volume (`postfix_spool`) shared with queue_manager — accepted-but-undelivered mail survives container recreation. Never delete that volume while mail is queued.
+
 ### MySQL Tuning
 
-Edit your MySQL config or pass environment variables:
+The base compose file runs `mysql:8.0.35` with **no tuning flags**. Add them via `docker-compose.override.yml` (dev) or a prod override so they survive updates:
 
 ```yaml
-# docker-compose.yml - mysql service
-command: >
-  --innodb-buffer-pool-size=2G
-  --innodb-log-file-size=512M
-  --innodb-flush-log-at-trx-commit=2
-  --max-connections=500
-  --query-cache-type=0
-  --innodb-io-capacity=2000
-  --innodb-io-capacity-max=4000
-  --innodb-read-io-threads=8
-  --innodb-write-io-threads=8
+services:
+  mysql:
+    command: >
+      --innodb-buffer-pool-size=2G
+      --innodb-redo-log-capacity=1G
+      --innodb-flush-log-at-trx-commit=2
+      --max-connections=500
+      --innodb-io-capacity=2000
 ```
 
 Key settings:
 
-- **`innodb-buffer-pool-size`** — set to 50-70% of available RAM
-- **`innodb-flush-log-at-trx-commit=2`** — trades durability for speed (safe for email)
-- **`max-connections`** — enough for all workers + API + Postfix + Dovecot
+- **`innodb-buffer-pool-size`** — set to 50-70% of the RAM you can dedicate to MySQL (production caps the container at 2G by default — raise the compose memory limit together with the pool size)
+- **`innodb-flush-log-at-trx-commit=2`** — trades a second of durability for a large write-throughput win
+- **`max-connections`** — enough for ~20 worker services plus Postfix/Dovecot lookups
 
 ### Redis Tuning
 
 ```yaml
-# docker-compose.yml - redis service
-command: >
-  redis-server
-  --appendonly yes
-  --maxmemory 1gb
-  --maxmemory-policy allkeys-lru
-  --tcp-backlog 511
-  --timeout 0
-  --tcp-keepalive 300
-```
-
-### Worker Concurrency
-
-Increase worker thread counts:
-
-```bash
-# Environment variables for workers
-TRACKING_WORKERS=4
-WEBHOOK_WORKERS=8
-ANALYTICS_WORKERS=4
-QUEUE_MANAGER_WORKERS=8
-```
-
-## Phase 2: Multiple Postfix Instances (up to 2M/day)
-
-At this scale, a single Postfix instance becomes the bottleneck. Split inbound and outbound processing.
-
-### Architecture
-
-```mermaid
-graph TB
-    subgraph "Inbound"
-        MX[MX Record] --> PF_IN[Postfix Inbound<br/>Port 25]
-        PF_IN --> RSPAMD[Rspamd]
-        RSPAMD --> DOVECOT[Dovecot]
-    end
-
-    subgraph "Outbound"
-        API[API / Queue] --> PF_OUT1[Postfix Outbound 1<br/>Port 10025]
-        API --> PF_OUT2[Postfix Outbound 2<br/>Port 10026]
-        API --> PF_OUT3[Postfix Outbound 3<br/>Port 10027]
-    end
-
-    subgraph "Data"
-        MYSQL[(MySQL Primary)]
-        MYSQL_R[(MySQL Replica)]
-        REDIS[(Redis)]
-    end
-
-    PF_IN --> MYSQL
-    PF_OUT1 --> MYSQL
-    PF_OUT2 --> MYSQL
-    PF_OUT3 --> MYSQL
-    DOVECOT --> MYSQL_R
-    API --> MYSQL_R
-```
-
-### Docker Compose for Multiple Outbound Instances
-
-```yaml
-# docker-compose.override.yml
 services:
-  postfix-outbound-1:
-    build: ./mailer/postfix
-    container_name: postfix-outbound-1
-    environment:
-      - INSTANCE_TYPE=outbound
-      - INSTANCE_ID=1
-      - DB_HOST=mysql
-      - REDIS_HOST=redis
-    ports:
-      - "10025:25"
-    networks:
-      - mailserver_network
-
-  postfix-outbound-2:
-    build: ./mailer/postfix
-    container_name: postfix-outbound-2
-    environment:
-      - INSTANCE_TYPE=outbound
-      - INSTANCE_ID=2
-      - DB_HOST=mysql
-      - REDIS_HOST=redis
-    ports:
-      - "10026:25"
-    networks:
-      - mailserver_network
-
-  postfix-outbound-3:
-    build: ./mailer/postfix
-    container_name: postfix-outbound-3
-    environment:
-      - INSTANCE_TYPE=outbound
-      - INSTANCE_ID=3
-      - DB_HOST=mysql
-      - REDIS_HOST=redis
-    ports:
-      - "10027:25"
-    networks:
-      - mailserver_network
+  redis:
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 1gb
+      --maxmemory-policy allkeys-lru
 ```
 
-### Queue Manager Load Balancing
+### Worker Replicas
 
-The queue manager worker distributes outbound emails across Postfix instances:
-
-```python
-# Round-robin across outbound instances
-OUTBOUND_INSTANCES = [
-    "postfix-outbound-1:25",
-    "postfix-outbound-2:25",
-    "postfix-outbound-3:25",
-]
-```
-
-### MySQL Read Replicas
-
-Move read-heavy queries (mailbox lookups, auth checks, stats) to a replica:
+Production already runs the hot stateless services at two replicas (`docker-compose.prod.yml`: `api`, `webhooks`, `tracking` have `deploy: replicas: 2`, reachable through Traefik / the compose network's DNS round-robin). Raising a count is a one-line change in the prod override:
 
 ```yaml
-mysql-replica:
-  image: mysql:8.0
-  container_name: mysql-replica
-  environment:
-    - MYSQL_ROOT_PASSWORD=${DB_ROOT_PASSWORD}
-  command: >
-    --server-id=2
-    --read-only=ON
-    --super-read-only=ON
-    --replicate-do-db=${DB_NAME:-mailserver}
-  volumes:
-    - mysql_replica_data:/var/lib/mysql
-  networks:
-    - mailserver_network
-```
-
-Configure the API and workers to use the replica for reads:
-
-```bash
-DB_READ_HOST=mysql-replica
-DB_WRITE_HOST=mysql
-```
-
-## Phase 3: Full Horizontal Scaling (2M+/day)
-
-### Database Sharding
-
-Shard by organization ID. Each shard holds a subset of organizations and all their associated data.
-
-```mermaid
-graph LR
-    API[API Layer] --> ROUTER[Shard Router]
-    ROUTER --> S1[(Shard 1<br/>Orgs A-H)]
-    ROUTER --> S2[(Shard 2<br/>Orgs I-P)]
-    ROUTER --> S3[(Shard 3<br/>Orgs Q-Z)]
-```
-
-The shard router maps `organization_id` to a database connection:
-
-```python
-def get_shard(org_id: str) -> str:
-    """Return the shard database host for this org."""
-    shard_index = hash(org_id) % NUM_SHARDS
-    return SHARD_HOSTS[shard_index]
-```
-
-### Multiple API Instances Behind a Load Balancer
-
-```yaml
-# Use Docker Compose scaling
 services:
   api:
-    build: ./worker/api
     deploy:
       replicas: 4
-    # ... rest of config
 ```
 
-Put Nginx or HAProxy in front:
+This works only for services without a fixed host-port binding — which is exactly why the prod file removes those bindings for the replicated services.
 
-```nginx
-upstream mailyte_api {
-    least_conn;
-    server api-1:8080;
-    server api-2:8080;
-    server api-3:8080;
-    server api-4:8080;
-}
+### Worker Concurrency Env Vars
 
-server {
-    listen 443 ssl;
-    location /api/ {
-        proxy_pass http://mailyte_api;
-    }
-}
-```
+The knobs that exist in code today:
 
-### Dedicated Queue Database
+| Variable | Service | Default |
+|----------|---------|---------|
+| `WEBHOOK_WORKERS` | webhooks | 5 |
+| `STORAGE_API_WORKERS` | storage_usage | 4 |
+| `RAG_WORKERS` | rag | 1 |
+| `INDEXING_MAX_WORKERS` | rag indexing | 4 |
 
-At very high volumes, the `mail_queue` table gets hammered. Move it to a dedicated MySQL instance or switch to Redis Streams:
+Set them in the service's `environment:` block. (There are no `TRACKING_WORKERS` / `ANALYTICS_WORKERS` variables — scaling those services means more replicas, not a thread knob.)
 
-```bash
-QUEUE_DB_HOST=mysql-queue
-QUEUE_DB_NAME=mailyte_queue
-```
+### Rate Limits as a Throughput Tool
 
-### Monitoring at Scale
+Per-domain and per-mailbox sending limits (`/api/v1/rate-limiter/rate-limits/...`) and SMTP-credential `hourly_limit`/`daily_limit` let you shape which tenants consume delivery capacity — often the cheapest fix when one sender's burst is starving everyone else's queue.
 
-At this volume, monitoring is not optional. You need:
+## What is NOT Built In (Architecture Work)
 
-- **Prometheus + Grafana** for real-time metrics
-- **Alerting** on queue depth, bounce rates, latency
-- **Per-instance dashboards** to spot bottlenecks
+Be clear-eyed about these — none of them is a configuration option today:
 
-See [Monitoring Setup](monitoring-setup.md) and [Prometheus Configuration](prometheus-configuration.md).
+- **Multiple Postfix instances / inbound-outbound split.** There is one `postfix` service. The image has no `INSTANCE_TYPE` concept, and queue_manager does not load-balance across MTA instances. Running a second Postfix means designing spool ownership, SASL, and rspamd wiring yourself.
+- **MySQL read replicas.** Every service reads and writes a single `DB_HOST`. There is no `DB_READ_HOST`/`DB_WRITE_HOST` split in any worker's code.
+- **Database sharding by organization.** All tenants share one schema; nothing routes by org to different databases.
+- **A separate queue database.** The Postfix spool plus the shared MySQL/Redis are the only queue stores.
 
-## Performance Benchmarks
+If your volume genuinely demands these, treat them as engineering projects with the usual design/review cycle — and measure first: most deployments that think they need sharding actually need the Phase-1 tuning above plus list hygiene.
 
-Measured on a 8-core, 32GB RAM server with NVMe storage:
+## Vertical Scaling Checklist
 
-| Configuration | Throughput | Latency (p95) |
-|--------------|------------|----------------|
-| Default single instance | ~2,000/hour | 1.2s |
-| Tuned single instance | ~15,000/hour | 0.8s |
-| 3 outbound instances | ~40,000/hour | 0.5s |
-| 3 outbound + read replica | ~60,000/hour | 0.3s |
-| Full horizontal (4 servers) | ~200,000/hour | 0.2s |
+Before any architecture work:
+
+1. **NVMe storage** — Maildir and InnoDB are IOPS-hungry; disk is the usual first wall
+2. **RAM for the buffer pool** — raise MySQL's compose memory limit and `innodb-buffer-pool-size` together
+3. **CPU for Rspamd** — spam scanning is the per-message CPU cost on the inbound path
+4. **Watch the right metrics** — queue depth, deferral rate, MySQL `Threads_connected`, disk latency
+
+## Monitoring at Scale
+
+At higher volume, monitoring is not optional. The built-in stack covers it:
+
+- **Prometheus + Grafana** run in the base compose file — see [Monitoring Setup](monitoring-setup.md)
+- **Alerting** on queue depth (`MailQueueBackup`/`MailQueueCritical`), bounce rate, disk, and DB connection pressure ships in `monitoring/prometheus/rules/mail_alerts.yml`
+- **Queue visibility** via `GET /api/v1/queue/queue/status`, `GET /api/v1/queue/queue/domain/{domain}`, and `POST /api/v1/queue/mail-queue/flush` for retrying deferred mail
 
 ## Key Takeaways
 
-1. **Tune before you scale** — most setups never need more than Phase 1
-2. **Queue depth is your early warning** — if it keeps growing, you need more capacity
-3. **Separate inbound and outbound** — they have different bottlenecks
-4. **Read replicas give the most bang for the buck** — Dovecot and the API are read-heavy
+1. **Tune before you scale** — most setups never need more than the single-server tuning
+2. **Queue depth is your early warning** — if it keeps growing, find out whether it's your capacity or receiver throttling
+3. **Replicas are the supported horizontal axis** — stateless workers scale with `deploy.replicas`; the MTA and databases do not
+4. **Shape traffic with rate limits** — per-tenant limits protect the queue from any one sender
 5. **Monitor everything** — you can't optimize what you can't measure

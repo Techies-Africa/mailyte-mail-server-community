@@ -1,7 +1,7 @@
 
 # Features Overview
 
-The Mailyte Mail Server provides a comprehensive suite of features designed for modern email infrastructure needs, from basic email handling to advanced AI-powered analytics and enterprise-grade security.
+The Enterprise Mail Server provides a comprehensive suite of features designed for modern email infrastructure needs, from basic email handling to advanced AI-powered analytics and enterprise-grade security.
 
 ## Core Email Features
 

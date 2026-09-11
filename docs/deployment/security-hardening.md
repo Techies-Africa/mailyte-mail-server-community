@@ -17,18 +17,19 @@ sudo ufw allow 22/tcp
 # Allow mail services
 sudo ufw allow 25/tcp     # SMTP
 sudo ufw allow 587/tcp    # Submission
+sudo ufw allow 465/tcp    # SMTPS
+sudo ufw allow 143/tcp    # IMAP (drop if unused)
 sudo ufw allow 993/tcp    # IMAPS
-sudo ufw allow 443/tcp    # HTTPS (API reverse proxy)
-sudo ufw allow 80/tcp     # HTTP (Let's Encrypt)
-
-# DO NOT allow these from outside
-# 3306 (MySQL), 6379 (Redis), 3000 (Grafana),
-# 9090 (Prometheus), 8080 (Health Monitor), 5000 (API direct)
+sudo ufw allow 995/tcp    # POP3S (drop if unused)
+sudo ufw allow 443/tcp    # HTTPS (Traefik)
+sudo ufw allow 80/tcp     # HTTP (ACME + redirect)
 
 # Enable
 sudo ufw enable
 sudo ufw status numbered
 ```
+
+> **Warning:** Docker publishes ports past ufw by writing its own iptables rules, so a host firewall is **not** what protects the internal services (MySQL, Redis, Grafana 3000, Prometheus 9090, the workers on 8081-8104). The protection is `docker-compose.prod.yml`, which binds every one of them to `127.0.0.1` (hardening applied in production 2026-08-22). Verify with `ss -tlnp | grep -v 127.0.0.1` — only the mail ports and 80/443 should show.
 
 ### iptables (Manual)
 
@@ -53,7 +54,10 @@ sudo iptables -A INPUT -p tcp --dport 22 -j ACCEPT
 # Allow mail
 sudo iptables -A INPUT -p tcp --dport 25 -j ACCEPT
 sudo iptables -A INPUT -p tcp --dport 587 -j ACCEPT
+sudo iptables -A INPUT -p tcp --dport 465 -j ACCEPT
+sudo iptables -A INPUT -p tcp --dport 143 -j ACCEPT
 sudo iptables -A INPUT -p tcp --dport 993 -j ACCEPT
+sudo iptables -A INPUT -p tcp --dport 995 -j ACCEPT
 
 # Allow HTTP/HTTPS
 sudo iptables -A INPUT -p tcp --dport 80 -j ACCEPT
@@ -80,18 +84,22 @@ sudo systemctl enable fail2ban
 
 ### Postfix Jail
 
+Postfix logs to a real file on the host (`logs/mailer/postfix/mail.log`, bind-mounted), not to Docker's json logs — point fail2ban there:
+
 ```ini
 # /etc/fail2ban/jail.d/mailyte-postfix.conf
 [postfix]
 enabled  = true
 port     = smtp,submission,465
 filter   = postfix
-logpath  = /var/lib/docker/containers/*mailyte-postfix*/*-json.log
+logpath  = /opt/mailyte/mailyte-email-server/logs/mailer/postfix/mail.log
 maxretry = 5
 findtime = 600
 bantime  = 3600
 action   = iptables-multiport[name=postfix, port="25,587,465"]
 ```
+
+(Adjust the path to your checkout; on deploy-pipeline hosts, `logs/` is a symlink to the shared root — use the resolved path.)
 
 ### Postfix Filter
 
@@ -107,39 +115,24 @@ ignoreregex =
 
 ### Dovecot Jail
 
+Dovecot's logs are likewise bind-mounted to `logs/mailer/dovecot/` on the host:
+
 ```ini
 # /etc/fail2ban/jail.d/mailyte-dovecot.conf
 [dovecot]
 enabled  = true
 port     = imap,imaps,pop3,pop3s
 filter   = dovecot
-logpath  = /var/lib/docker/containers/*mailyte-dovecot*/*-json.log
+logpath  = /opt/mailyte/mailyte-email-server/logs/mailer/dovecot/*.log
 maxretry = 5
 findtime = 600
 bantime  = 3600
 action   = iptables-multiport[name=dovecot, port="143,993,110,995"]
 ```
 
-### API Rate Limiting Jail
+### API Brute-Force Protection Is Built In
 
-```ini
-# /etc/fail2ban/jail.d/mailyte-api.conf
-[mailyte-api]
-enabled  = true
-port     = 5000,443
-filter   = mailyte-api
-logpath  = /var/lib/docker/containers/*mailyte-api*/*-json.log
-maxretry = 20
-findtime = 60
-bantime  = 600
-```
-
-```ini
-# /etc/fail2ban/filter.d/mailyte-api.conf
-[Definition]
-failregex = "status_code":\s*(?:401|403).+"client":\s*"<HOST>"
-ignoreregex =
-```
+Do not build a fail2ban jail for the API. The api service tracks failed authentication attempts in the database (`failed_auth_attempts`) and locks out offending client IPs itself — for both API-key and login attempts — and geo-blocking is available as its own service. Traefik terminates all HTTP at the edge, so the API port is not directly reachable in production anyway.
 
 ### Check Fail2ban Status
 
@@ -158,8 +151,10 @@ sudo fail2ban-client set postfix unbanip 203.0.113.50
 
 ### Postfix TLS Settings
 
+Postfix's `main.cf` is baked into the image at build time (`mailer/postfix/`) — a live `postconf -e` inside the container vanishes on the next recreate. Make changes in the build context and rebuild (`docker compose build postfix && docker compose up -d postfix`). The settings worth enforcing:
+
 ```ini
-# config/postfix/main.cf additions
+# mailer/postfix config -- baked into the image, rebuild to apply
 
 # Enforce TLS for submission
 smtpd_tls_security_level = may
@@ -180,8 +175,10 @@ smtp_tls_session_cache_database = btree:${data_directory}/smtp_scache
 
 ### Dovecot TLS Settings
 
+Dovecot reads overrides from the bind-mounted `config/mailer/dovecot/` directory (mounted at `/etc/dovecot/custom`):
+
 ```ini
-# config/dovecot/10-ssl.conf
+# config/mailer/dovecot/ overrides
 ssl = required
 ssl_min_protocol = TLSv1.2
 ssl_prefer_server_ciphers = yes
@@ -201,92 +198,54 @@ nmap --script ssl-enum-ciphers -p 993 mail.yourdomain.com
 
 ## Disable Unused Ports
 
-If you don't need certain protocols, don't expose them:
+If you don't need certain protocols, don't expose them. Put the change in a `docker-compose.override.yml` (copy the shipped `.example`) rather than editing the base file — and use `!override`, because Compose otherwise *appends* port lists, leaving the original binding in place:
 
 ```yaml
-# docker-compose.yml — only expose what you use
+# docker-compose.override.yml
 services:
-  postfix:
-    ports:
-      - "25:25"
-      - "587:587"
-      # - "465:465"   # Uncomment only if needed
-
   dovecot:
-    ports:
+    ports: !override
+      - "143:143"
       - "993:993"
-      # - "143:143"   # Don't expose unencrypted IMAP
-      # - "995:995"   # POP3S — only if you have POP3 users
-      # - "110:110"   # Never expose unencrypted POP3
+      # 110/995 (POP3) and 4190 (ManageSieve) dropped
 ```
 
 ## Docker Security
 
-### Bind Internal Ports to Localhost
+Most of this is already built into the compose files — the list below is what to *verify*, not what to add:
 
-```yaml
-services:
-  api:
-    ports:
-      - "127.0.0.1:5000:5000"    # Not "5000:5000"
+### Internal Ports Bound to Localhost
 
-  mysql:
-    # Don't expose the port at all — other containers
-    # reach it via the Docker network
-    # ports:
-    #   - "3306:3306"  # NEVER do this
+`docker-compose.prod.yml` rebinds every internal service to `127.0.0.1` with the `!override` tag (applied in production 2026-08-22, after ~30 services were found publicly reachable). MySQL and Redis publish no host port at all, in any file. If you add a new service, follow the same pattern.
 
-  redis:
-    # Same — no external port mapping
-    # ports:
-    #   - "6379:6379"  # NEVER do this
-```
+### Docker Socket Access Is Scoped
 
-### Limit Docker Socket Access
+Nothing in the stack mounts `/var/run/docker.sock` writable except the `docker-proxy` container (`tecnativa/docker-socket-proxy`), which exposes exactly list/inspect/restart to the two services that need it (`monitoring` for auto-healing restarts, `cert_manager` for post-renewal reloads) — no exec, no image pulls, no volume or network access. It lives on its own `internal_only` network that the rest of the stack cannot reach. Traefik mounts the socket read-only for service discovery.
 
-Only the health monitor needs the Docker socket (for auto-healing):
+A `:ro` socket mount is **not** a real restriction on its own — the Docker API is an HTTP socket, and read-only mounting doesn't stop POST requests. The proxy's capability scoping is what does.
 
-```yaml
-health-monitor:
-  volumes:
-    - /var/run/docker.sock:/var/run/docker.sock:ro  # Read-only
-```
+### Non-Root, Least Capability
 
-### Run Containers as Non-Root
+- Worker images run as the unprivileged uid 10001 (`mailyte` user).
+- `postfix`, `dovecot`, `rspamd`, `activesync`, and `docs` run with `cap_drop: ["ALL"]` plus only the specific capabilities their privilege-separation models need, and `no-new-privileges:true`.
+- The `webmail` container runs with a read-only root filesystem and tmpfs mounts; `console` runs as uid 1001 with all capabilities dropped.
 
-```yaml
-services:
-  api:
-    user: "1000:1000"   # Run as non-root user
+### Secrets as Files, Not Env Vars
 
-  worker:
-    user: "1000:1000"
-```
-
-### Read-Only Filesystems
-
-```yaml
-services:
-  api:
-    read_only: true
-    tmpfs:
-      - /tmp
-      - /app/__pycache__
-```
+The MySQL root password, the encryption KEK, and the archive identity are mounted files (`secrets/`), not environment variables — an env var on a running container is readable by anything with Docker API access for the container's entire lifetime; a 0400 file is not.
 
 ## Environment File Security
 
 ```bash
-# Set restrictive permissions
+# Restrictive permissions (generate-secrets.sh sets this already)
 chmod 600 .env
-chown root:root .env
 
-# Never commit .env to git
-echo ".env" >> .gitignore
-
-# Use Docker secrets for sensitive values (Swarm mode)
-echo "my-secret-password" | docker secret create mysql_password -
+# Keep the secrets directory tight
+chmod 700 secrets
+ls -la secrets/
 ```
+
+`.env` is already gitignored. Keep it owned by the deploy user (scripts and `start.sh` need to read it) — and remember it is one of the things `scripts/escrow-secrets.sh` bundles off-server, so re-run the escrow after changing secrets.
 
 ## SSH Hardening
 
@@ -320,16 +279,16 @@ cat /var/log/unattended-upgrades/unattended-upgrades.log
 Run through this periodically:
 
 - [ ] Firewall active with minimal open ports
-- [ ] Fail2ban running for SMTP, IMAP, and API
+- [ ] `ss -tlnp | grep -v 127.0.0.1` shows only mail ports + 80/443 (the prod override is in effect)
+- [ ] Fail2ban running for SMTP and IMAP
 - [ ] TLS 1.2+ only (no SSLv3, TLS 1.0, TLS 1.1)
 - [ ] MySQL and Redis not exposed externally
-- [ ] Monitoring ports behind authentication
-- [ ] `.env` file permissions are `600`
+- [ ] Console reachable only from `CONSOLE_ALLOWED_IPS`; Traefik dashboard behind basic auth
+- [ ] `.env` permissions `600`, `secrets/` at `700`, escrow bundle current
 - [ ] SSH uses key-only authentication
 - [ ] Automatic security updates enabled
-- [ ] Docker containers run as non-root where possible
 - [ ] DKIM, SPF, and DMARC configured
-- [ ] No default passwords in use
-- [ ] Certificates are valid and auto-renewing
+- [ ] No default passwords in use (`secrets-check` enforces the required set at startup; `rag`, `oauth`, `url_protection`, and `jmap` also fail closed individually on a missing or known-weak secret instead of falling back to built-in defaults)
+- [ ] Certificates are valid and cert_manager is renewing them
 
 > **Tip:** Run a security scan with tools like `lynis` (for the OS) and `testssl.sh` (for TLS configuration) to find issues you might have missed.

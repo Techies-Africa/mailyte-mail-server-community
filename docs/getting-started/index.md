@@ -33,7 +33,7 @@ flowchart LR
 
     ---
 
-    Clone the repo, configure `.env`, run `docker compose up`, and verify every container is healthy.
+    Clone the repo, generate secrets, configure `.env`, start the stack, and verify every container is healthy.
 
     [:octicons-arrow-right-24: Installation guide](installation.md)
 
@@ -49,7 +49,7 @@ flowchart LR
 
     ---
 
-    Create an organization, add a domain, provision a mailbox, and send a test email through the API.
+    Bootstrap your first organization, domain, mailbox, and API key, then send a test email.
 
     [:octicons-arrow-right-24: First steps walkthrough](first-steps.md)
 
@@ -69,7 +69,7 @@ flowchart LR
 
 Use this as a high-level roadmap. Each step links to its own page with full details.
 
-- [ ] **[Install the server](installation.md)** -- clone the repo, configure `.env`, run `docker compose up`.
+- [ ] **[Install the server](installation.md)** -- clone the repo, generate secrets, configure `.env`, run `./start.sh` or `docker compose up`.
 - [ ] **[Review configuration](configuration.md)** -- understand the environment variables that control database, mail routing, security, and feature flags.
 - [ ] **[Take your first steps](first-steps.md)** -- create an organization, add a domain, create a mailbox, send a test email.
 - [ ] **[Know how to troubleshoot](troubleshooting.md)** -- learn the diagnostic commands that save you hours when something goes wrong.
@@ -92,12 +92,12 @@ After completing this section you will have:
 | Requirement | Minimum | Recommended |
 |---|---|---|
 | **OS** | Linux (Ubuntu 20.04+ or similar) | Ubuntu 22.04 LTS |
-| **Docker** | 20.10+ | Latest stable |
-| **Docker Compose** | v2.0+ | v2.20+ |
+| **Docker** | 24.0+ | Latest stable |
+| **Docker Compose** | v2.24+ | Latest v2 |
 | **RAM** | 4 GB | 8 GB+ |
 | **Disk** | 50 GB | 100 GB+ SSD |
 | **Domain** | One domain with DNS control | -- |
-| **Ports open** | 25, 143, 465, 587, 993 | All mail + API ports |
+| **Ports open** | 25, 143, 465, 587, 993 | All mail ports + 80/443 |
 
 !!! warning "Port 25 matters"
     Many cloud providers block outbound port 25 by default. Check with your hosting provider **before** you start — you may need to request that the block be lifted. Without port 25, your server can receive email but cannot deliver it to other servers.
@@ -116,7 +116,7 @@ Mailyte is made up of three layers:
 
 === "API & Workers"
 
-    A FastAPI application on port 5000 is the control plane. Worker services handle tracking, webhooks, rate limiting, analytics, RAG/AI search, queue management, storage, backup, and cloud sync.
+    A FastAPI application (host port 8083 in development) is the control plane. Worker services handle tracking, webhooks, rate limiting, analytics, RAG/AI search, queue management, storage usage, archiving, and monitoring.
 
 === "Data Stores"
 
@@ -133,13 +133,13 @@ Mailyte is made up of three layers:
 |---|---|
 | **Send & receive email** | Full SMTP, IMAP, and POP3 support via Postfix and Dovecot |
 | **REST API** | Manage everything programmatically — orgs, domains, mailboxes, aliases |
-| **Spam filtering** | ML-based spam detection, Bayesian filtering, ClamAV antivirus |
+| **Spam filtering** | Rspamd spam detection with Bayesian filtering (optional ClamAV integration, not deployed by default) |
 | **Multi-tenant** | Host multiple organizations with fully isolated data and quotas |
 | **Email tracking** | Open tracking, click tracking, bounce and complaint logging |
 | **Webhooks** | Real-time event delivery with retry and HMAC signing |
 | **AI search** | Semantic search over email content with Qdrant vector DB |
-| **Auto-healing** | Health monitor detects failed services and restarts them |
-| **Backups** | Automated database and filesystem backups with S3/Azure sync |
+| **Auto-healing** | Monitoring service detects failed containers and restarts them |
+| **Backups** | Automated, age-encrypted database and filesystem backups with S3 upload |
 
 ---
 

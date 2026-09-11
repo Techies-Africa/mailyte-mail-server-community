@@ -188,6 +188,8 @@ autoconfig.theircompany.com.               CNAME autoconfig.mailyte.com.
 autodiscover.theircompany.com.             CNAME autodiscover.mailyte.com.
 ```
 
+**Auto-configuration is live for every customer domain** (since 2026-08-27): the `autoconfig` service serves Thunderbird autoconfig (`/mail/config-v1.1.xml`), Outlook autodiscover (POX and JSON v2), and MTA-STS policies, and Traefik routes it with a wildcard `HostRegexp` rule matching `autoconfig.*`, `autodiscover.*`, and `mta-sts.*` — so the CNAMEs above work for any domain in the database, not just the server's own.
+
 ---
 
 ## How Postfix Handles 500K Domains
@@ -265,7 +267,7 @@ Rspamd signs outbound email with per-domain DKIM keys:
 └─────────────────────────────────────────────┘
 ```
 
-**Key storage:** Keys are stored in the `dkim_keys` MySQL table and optionally cached on disk. At 500K domains, that's ~500K RSA key pairs (~2KB each = ~1GB total). This fits comfortably in memory.
+**Key storage:** Keys live in the `dkim_keys` MySQL table — **envelope-encrypted** with the KEK mounted at `/run/secrets/encryption_kek`, so a database dump alone doesn't expose signing keys — and as key files under `/var/lib/rspamd/dkim` (a mounted volume) where Rspamd reads them. At 500K domains, that's ~500K RSA key pairs (~2KB each = ~1GB total). This fits comfortably on disk and in cache.
 
 ---
 

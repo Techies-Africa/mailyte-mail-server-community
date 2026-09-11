@@ -1,0 +1,21 @@
+# Per-message egress stream selection (SMTP-Send, added 2026-09-08).
+#
+# Consulted ONLY by cleanup_stream, the cleanup service behind the
+# 127.0.0.1:10026 tracking re-injection listener -- so only mail that entered
+# through an authenticated submission port and passed the tracking filter can
+# ever match. Port 25 uses the default cleanup and never sees this file: an
+# outside sender spoofing the header cannot reroute inbound mail (a FILTER on
+# an inbound message would try to SMTP-relay a local delivery -- the
+# transport_cutover loop-bounce, again).
+#
+# Why per-message at all: the org-profile sender_dependent transport map keys
+# on sender DOMAIN, which cannot split a 'both'-profile org's campaigns from
+# its transactional app mail -- found live 2026-09-08 when a campaign left on
+# the transactional IP. Campaign sends (and any API caller passing
+# stream=marketing) carry this header; everything else falls through to
+# default_transport on the primary IP.
+#
+# Why this must NOT match on the first pass (submission's own cleanup): a
+# header_checks FILTER overrides content_filter, which would silently skip
+# tracking/List-Unsubscribe injection for exactly the mail that needs it most.
+/^X-Mailyte-Stream:\s*marketing\s*$/i FILTER marketing:

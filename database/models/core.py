@@ -24,7 +24,7 @@ from sqlalchemy.sql import func
 from shared.ulid_utils import generate_ulid
 
 from . import Base
-from .enums import AccountStatus
+from .enums import AccountStatus, enum_values
 
 
 # Core Organization Management
@@ -40,6 +40,15 @@ class Organization(Base):
     name = Column(String(255), nullable=False)
     description = Column(Text, nullable=True)
     active = Column(Boolean, nullable=False, default=True)
+
+    # Outbound stream class (SMTP-Send phase-01): transactional|marketing|both.
+    # Postfix's sender-dependent transport map routes 'marketing' orgs out the
+    # marketing source IP; 'both' deliberately routes as transactional until
+    # per-credential stream classing exists (phase-04). Laravel becomes the
+    # writer of record in phase-04.
+    sending_profile = Column(
+        String(20), nullable=False, default="transactional", index=True
+    )
 
     # Contact information
     admin_email = Column(String(255), nullable=True)
@@ -57,6 +66,42 @@ class Organization(Base):
     # Webhooks
     webhook_urls = Column(JSON, nullable=True)  # Organization webhook endpoints
     webhook_secret = Column(String(255), nullable=True)
+
+    # Quota override (migration 0009, console phase-02 SS2.6 decision (a)).
+    # Set when a human operator edits quotas through the console; Laravel's
+    # automated plan sync refuses to overwrite an overridden org unless it
+    # passes force=true. quota_override_by is the operator's EMAIL, kept
+    # denormalised for the same reason operator_audit.operator_email is --
+    # "who set this, and when" has to stay readable after the operator row
+    # is renamed or removed.
+    quota_override = Column(Boolean, nullable=False, default=False)
+    quota_override_at = Column(DateTime, nullable=True)
+    quota_override_by = Column(String(255), nullable=True)
+
+    # Maya (mailbox AI assistant) -- mobile v1 section 13, migration 0022.
+    # Entitlement (ai_entitled/ai_plan/ai_monthly_quota) is a commercial fact
+    # written by Laravel or staff via PUT /organizations/{id}/ai-settings;
+    # ai_org_policy is the organisation's own decision layered on top:
+    # 'unset' (treated as blocked), 'allowed', 'blocked' (hard veto that
+    # revokes standing individual consents), or 'accepted_for_all' (skips the
+    # individual ask). ai_policy_updated_by is a denormalised identity string
+    # for the same reason quota_override_by is.
+    ai_entitled = Column(Boolean, nullable=False, default=False)
+    ai_plan = Column(String(64), nullable=True)
+    ai_org_policy = Column(
+        SQLEnum(
+            "unset",
+            "allowed",
+            "blocked",
+            "accepted_for_all",
+            name="organizations_ai_org_policy",
+        ),
+        nullable=False,
+        default="unset",
+    )
+    ai_monthly_quota = Column(Integer, nullable=True)  # NULL -> deployment default
+    ai_policy_updated_at = Column(DateTime, nullable=True)
+    ai_policy_updated_by = Column(String(255), nullable=True)
 
     # Timestamps
     created_at = Column(DateTime, nullable=False, default=func.now())
@@ -88,6 +133,20 @@ class Organization(Base):
             "rate_limits": self.rate_limits,
             "storage_quotas": self.storage_quotas,
             "webhook_urls": self.webhook_urls,
+            "sending_profile": self.sending_profile,
+            "quota_override": bool(self.quota_override),
+            "quota_override_at": self.quota_override_at.isoformat()
+            if self.quota_override_at
+            else None,
+            "quota_override_by": self.quota_override_by,
+            "ai_entitled": bool(self.ai_entitled),
+            "ai_plan": self.ai_plan,
+            "ai_org_policy": self.ai_org_policy or "unset",
+            "ai_monthly_quota": self.ai_monthly_quota,
+            "ai_policy_updated_at": self.ai_policy_updated_at.isoformat()
+            if self.ai_policy_updated_at
+            else None,
+            "ai_policy_updated_by": self.ai_policy_updated_by,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
@@ -223,11 +282,33 @@ class EmailAccount(Base):
 
     # Authentication
     password = Column(String(255), nullable=False)
+    # Forced change (0021_mailbox_password_policy): while must_change_password
+    # is set, the holder's webmail session is refused everywhere except the
+    # password endpoint and sign-out. password_change_reason is one of
+    # temporary | expired | admin_reset (enforced in code, not a DB enum).
+    must_change_password = Column(Boolean, nullable=False, default=False)
+    password_change_reason = Column(String(20), nullable=True)
+    password_changed_at = Column(DateTime, nullable=True)
+    # When /api/v1/mailbox/security/2fa/confirm last succeeded. totp_secrets
+    # has no confirmation timestamp of its own (see the 0021 docstring).
+    two_factor_confirmed_at = Column(DateTime, nullable=True)
 
     # Account details
     name = Column(String(255), nullable=True)
+    # values_callable is required here: SQLAlchemy's default Enum column
+    # stores/validates against the Python member NAME ("ACTIVE"), but every
+    # raw-SQL write path in this codebase (mailboxes.py's legacy endpoints,
+    # setup-first-user.sh, bootstrap.py) writes the lowercase MySQL enum
+    # value ("active") directly, matching the DB column's real
+    # enum('active','inactive','suspended') definition. Without this, any
+    # ORM read of a row written that way raises "'active' is not among the
+    # defined enum values" -- e.g. every mailbox list/detail endpoint,
+    # for every account in the normal 'active' state.
     status = Column(
-        SQLEnum(AccountStatus), nullable=False, default=AccountStatus.ACTIVE, index=True
+        SQLEnum(AccountStatus, values_callable=enum_values),
+        nullable=False,
+        default=AccountStatus.ACTIVE,
+        index=True,
     )
 
     # Storage configuration and usage
@@ -253,6 +334,12 @@ class EmailAccount(Base):
     forward_destination = Column(String(255), nullable=True)
     vacation_enabled = Column(Boolean, nullable=False, default=False)
     vacation_message = Column(Text, nullable=True)
+
+    # Billing (migration 0024). Laravel owns these values; the mail server
+    # stores and enforces them. NULL quota means "use the organization's
+    # ai_monthly_quota", which is every mailbox billing has never touched.
+    ai_monthly_quota = Column(Integer, nullable=True)
+    billing_tier = Column(String(16), nullable=True)
 
     # Activity tracking
     last_login = Column(DateTime, nullable=True)
@@ -309,6 +396,13 @@ class EmailAccount(Base):
             "forward_destination": self.forward_destination,
             "vacation_enabled": self.vacation_enabled,
             "vacation_message": self.vacation_message,
+            "ai_monthly_quota": self.ai_monthly_quota,
+            "billing_tier": self.billing_tier,
+            "must_change_password": bool(self.must_change_password),
+            "password_change_reason": self.password_change_reason,
+            "password_changed_at": self.password_changed_at.isoformat()
+            if self.password_changed_at
+            else None,
             "last_login": self.last_login.isoformat() if self.last_login else None,
             "last_activity": self.last_activity.isoformat() if self.last_activity else None,
             "last_storage_calculation": self.last_storage_calculation.isoformat()
@@ -349,7 +443,7 @@ class SmtpCredential(Base):
     password. Checked by a protocol-scoped Dovecot passdb that falls
     through to email_accounts when a username isn't found here, so
     mailbox-based SMTP auth is unaffected. See
-    02-mailyte-community/phase-05-smtp-credential-auth-parity.md."""
+    01-mailyte-email-server/phase-10-smtp-credential-auth.md."""
 
     __tablename__ = "smtp_credentials"
 
@@ -359,11 +453,22 @@ class SmtpCredential(Base):
     username = Column(String(255), nullable=False, unique=True, index=True)
     password = Column(String(255), nullable=False)  # bcrypt-hashed, same as EmailAccount.password
     name = Column(String(255), nullable=True)
-    prefix = Column(String(16), nullable=True)  # secret's first chars, for display after the one-time reveal
+    prefix = Column(
+        String(16), nullable=True
+    )  # secret's first chars, for display after the one-time reveal
     created_by = Column(String(255), nullable=True)
     allowed_ips = Column(JSON, nullable=True)
     # Gate separate from the list itself, so IPs can be staged before enforcement is turned on.
     ip_allowlist_enabled = Column(Boolean, nullable=False, default=False)
+    # 0 = the tracking injector skips pixel/link/List-Unsubscribe injection
+    # for mail authenticated as this credential (campaign tools that do their
+    # own tracking would otherwise get double-wrapped links). Suppression,
+    # pacing and rate limits are unaffected.
+    tracking_enabled = Column(Boolean, nullable=False, default=True)
+    # 'marketing' = the tracking injector stamps X-Mailyte-Stream so this
+    # credential's mail egresses the marketing IP (alembic 0027); read by the
+    # injector's cached sasl_username lookup alongside tracking_enabled.
+    stream = Column(String(16), nullable=False, default="transactional")
     # Enforced inside the Dovecot passdb query -- not by any scheduler.
     expires_at = Column(DateTime, nullable=True)
     # Per-key outbound caps; NULL inherits the org's limits (K2 rate limiter).
@@ -386,6 +491,8 @@ class SmtpCredential(Base):
             "created_by": self.created_by,
             "allowed_ips": self.allowed_ips,
             "ip_allowlist_enabled": self.ip_allowlist_enabled,
+            "tracking_enabled": self.tracking_enabled,
+            "stream": self.stream,
             "expires_at": self.expires_at.isoformat() if self.expires_at else None,
             "hourly_limit": self.hourly_limit,
             "daily_limit": self.daily_limit,
@@ -408,10 +515,11 @@ class SmtpCredentialEvent(Base):
 
     id = Column(String(26), primary_key=True, default=generate_ulid)
     credential_id = Column(String(26), nullable=False, index=True)
-    # String(100): CE organization ids are VARCHAR(100), not ULIDs.
-    organization_id = Column(String(100), nullable=False, index=True)
+    organization_id = Column(String(26), nullable=False, index=True)
     username = Column(String(255), nullable=False)
-    event = Column(String(32), nullable=False)  # created/rotated/revoked/enabled/updated/deleted/suspended
+    event = Column(
+        String(32), nullable=False
+    )  # created/rotated/revoked/enabled/updated/deleted/suspended
     actor = Column(String(255), nullable=True)
     source_ip = Column(String(45), nullable=True)
     detail = Column(JSON, nullable=True)

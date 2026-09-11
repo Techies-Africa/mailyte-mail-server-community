@@ -1,0 +1,22 @@
+[Unit]
+Description=Mailyte web server full backup (Laravel database + app files) to S3
+Documentation=file:///var/www/html/mailyte/production/api/current/scripts/backup-web.sh
+After=network-online.target mariadb.service mysqld.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=devops
+Group=devops
+WorkingDirectory=/var/www/html/mailyte/production/api
+ExecStart=/bin/bash /var/www/html/mailyte/production/api/current/scripts/backup-web.sh --full
+Nice=10
+IOSchedulingClass=idle
+# Measured: 3 s to dump, ~30 s to upload 17 MB. The ceiling is for a bad link.
+TimeoutStartSec=2h
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mailyte-backup-web
+
+[Install]
+WantedBy=multi-user.target

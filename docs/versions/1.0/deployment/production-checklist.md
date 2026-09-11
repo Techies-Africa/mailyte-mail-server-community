@@ -1,7 +1,7 @@
 
 # Production Deployment Checklist
 
-This checklist ensures your Mailyte Mail Server deployment is production-ready with all security, performance, and reliability measures in place.
+This checklist ensures your Enterprise Mail Server deployment is production-ready with all security, performance, and reliability measures in place.
 
 ## 🔧 **Pre-Deployment Infrastructure**
 

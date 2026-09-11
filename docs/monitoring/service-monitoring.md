@@ -11,6 +11,11 @@ docker compose ps --format "table {{.Name}}\t{{.Status}}\t{{.Ports}}"
 
 If everything says "Up" and "healthy," you're good. If not, read on.
 
+```bash
+# Or ask the monitoring service, which runs real protocol probes
+curl -s http://localhost:8085/heartbeat | python3 -m json.tool
+```
+
 ## Postfix (SMTP)
 
 Postfix handles all email delivery. If it's down, no email goes in or out.
@@ -19,9 +24,6 @@ Postfix handles all email delivery. If it's down, no email goes in or out.
 
 ```bash
 # Test SMTP connection
-telnet localhost 25
-
-# Or without telnet installed
 echo "EHLO test" | nc -w 3 localhost 25
 
 # Check the mail queue
@@ -34,7 +36,7 @@ docker compose exec postfix postqueue -p | tail -1
 **What healthy looks like:**
 
 ```
-220 mail.yourdomain.com ESMTP Postfix
+220 mail.yourdomain.com ESMTP
 ```
 
 **Key things to watch:**
@@ -44,17 +46,19 @@ docker compose exec postfix postqueue -p | tail -1
 | Queue size | < 100 | > 500 |
 | Delivery delay | < 30s | > 5min |
 | Bounce rate | < 3% | > 5% |
-| Active connections | < 50 | > 100 |
 
 **Common problems:**
 
-- Queue growing: Check DNS resolution, recipient server availability
-- High bounces: Check sender reputation, SPF/DKIM records
-- Connection refused: Postfix service crashed, check logs
+- Queue growing: check DNS resolution, recipient server availability
+- High bounces: check sender reputation, SPF/DKIM records
+- Connection refused: Postfix crashed — check logs
+- Queue empty but nothing arriving: check `transport_maps` — a stale transport cutover file loop-bounced all inbound for 13 domains in production (fixed 2026-08-27); "healthy" containers do not prove mail is routing
 
 ```bash
 docker compose logs --tail=50 postfix
 ```
+
+Per-message history (accepted, delivered, bounced, deferred) lives in the `mail_logs` and `delivery_events` tables, produced by the `log_ingestor` service since 2026-08-22, and is queryable via `/api/v1/analytics` and the message-trace endpoints.
 
 ## Dovecot (IMAP/POP3)
 
@@ -63,8 +67,8 @@ Dovecot handles mailbox access. If it's down, users can't read email.
 **Quick check:**
 
 ```bash
-# Test IMAP
-echo "a1 LOGIN testuser testpass" | nc -w 3 localhost 143
+# Test IMAP greeting
+nc -w 3 localhost 143 < /dev/null
 
 # Check active connections
 docker compose exec dovecot doveadm who
@@ -84,176 +88,112 @@ docker compose exec dovecot doveadm mailbox list -u user@domain.com
 | Metric | Healthy | Investigate |
 |--------|---------|-------------|
 | Active connections | Stable | Sudden drop or spike |
-| Auth failures | < 10/min | > 50/min (possible brute force) |
+| Auth failures (`failed_auth_attempts` table) | < 10/min | > 50/min (possible brute force) |
 | Mailbox size | Within quota | Near quota limit |
 
-## Rspamd (Spam Filter)
+!!! note "Auth cache"
+    Dovecot caches successful auth for up to 1 hour (`auth_cache_ttl`). A disabled/suspended mailbox or a changed password keeps authenticating from cache until the TTL expires or you flush it: `docker compose exec dovecot doveadm auth cache flush <user@domain>`. SMTP-credential mutations flush this automatically via the doveadm HTTP API; mailbox-level changes currently do not.
 
-Rspamd scans incoming email for spam. If it's down, you'll either reject all mail or let everything through (depending on your Postfix config).
+## Rspamd (Spam Filter)
 
 **Quick check:**
 
 ```bash
-# Ping Rspamd
+# Ping Rspamd (no credentials needed)
 curl http://localhost:11334/ping
-
-# Get statistics
-curl http://localhost:11334/stat
-
-# Check Rspamd status
-curl http://localhost:11334/stat | python3 -m json.tool
 ```
 
-**What healthy looks like:**
+**What healthy looks like:** `pong`
 
-```
-pong
-```
-
-**Key things to watch:**
+!!! warning "/stat requires the controller password"
+    `GET /stat` answers `403` without the controller password — a healthy Rspamd looks broken if you probe `/stat` unauthenticated. This exact mistake once made the monitoring service report Rspamd as permanently degraded and repeatedly auto-restart a healthy container; its probe now uses `/ping`. This build's controller serves no `/metrics` either (verified 2026-08-31) — Prometheus's rspamd scrape job is commented out, and there are no `rspamd_*` series.
 
 | Metric | Healthy | Investigate |
 |--------|---------|-------------|
 | Scan time | < 500ms | > 2s |
-| Spam rate | 10-40% | > 60% or < 5% |
+| Reject rate | 10-40% of scanned | > 60% or < 5% |
 | Memory usage | < 500MB | > 1GB |
 
 ## MySQL
 
-MySQL stores user accounts, domains, aliases, and configuration. If it's down, the API can't function.
+MySQL stores organizations, domains, mailboxes, credentials, logs, and configuration. If it's down, the API can't function.
 
 **Quick check:**
 
 ```bash
-# Test connection
 docker compose exec mysql mysqladmin -u root -p ping
-
-# Check status
 docker compose exec mysql mysqladmin -u root -p status
-
-# Check process list
 docker compose exec mysql mysql -u root -p -e "SHOW PROCESSLIST;"
-
-# Check table sizes
-docker compose exec mysql mysql -u root -p -e "
-SELECT table_name,
-       ROUND(data_length/1024/1024, 2) AS 'Size (MB)'
-FROM information_schema.tables
-WHERE table_schema = 'mailyte'
-ORDER BY data_length DESC;"
 ```
 
-**What healthy looks like:**
-
-```
-mysqld is alive
-```
-
-**Key things to watch:**
+**Key things to watch (via `mysql-exporter` on :9104):**
 
 | Metric | Healthy | Investigate |
 |--------|---------|-------------|
-| Connections | < 80% of max | > 80% of max |
-| Slow queries | 0 | Any |
-| Replication lag | 0s | > 5s |
-| Buffer pool hit rate | > 99% | < 95% |
+| `mysql_global_status_threads_connected / mysql_global_variables_max_connections` | < 80% | > 80% (the `DatabaseConnectionPoolExhausted` alert) |
+| `rate(mysql_global_status_slow_queries[5m])` | ~0 | > 10/s (the `SlowQueries` alert) |
 
 ## Redis
 
-Redis handles caching, session storage, and worker job queues. If it's down, the API slows down and workers stop processing.
+Redis handles caching, rate-limit counters, auth-policy state, and geo/DLP policy caches.
 
 **Quick check:**
 
 ```bash
-# Ping Redis
 docker compose exec redis redis-cli ping
-
-# Check memory usage
 docker compose exec redis redis-cli info memory | grep used_memory_human
-
-# Check connected clients
 docker compose exec redis redis-cli info clients | grep connected_clients
-
-# Check queue lengths
-docker compose exec redis redis-cli llen email_queue
-docker compose exec redis redis-cli llen retry_queue
 ```
 
-**What healthy looks like:**
-
-```
-PONG
-```
-
-**Key things to watch:**
+**Key things to watch (via `redis-exporter` on :9121):**
 
 | Metric | Healthy | Investigate |
 |--------|---------|-------------|
-| Memory usage | < 80% of max | > 85% |
+| `redis_memory_used_bytes / redis_memory_max_bytes` | < 80% | > 80% (the `RedisMemoryHigh` alert) |
 | Connected clients | Stable | Climbing fast |
 | Hit rate | > 90% | < 80% |
-| Queue length | < 100 | > 1000 |
 
-## FastAPI (API Server)
+## API Gateway
 
-The API on port `5000` is how external systems interact with Mailyte.
+The FastAPI gateway listens on **8080 inside the container** (host-mapped to **8083** in dev; in production it has no host port and is reached through Traefik on 443).
 
 **Quick check:**
 
 ```bash
-# Health endpoint
-curl http://localhost:5000/health
+# From the host (dev)
+curl http://localhost:8083/health
 
 # Check response time
-curl -w "Total time: %{time_total}s\n" -o /dev/null -s http://localhost:5000/health
-
-# API docs (confirms the app is running)
-curl -s http://localhost:5000/docs | head -5
+curl -w "Total time: %{time_total}s\n" -o /dev/null -s http://localhost:8083/health
 ```
 
-**What healthy looks like:**
-
-```json
-{"status": "ok", "version": "1.0.0"}
-```
-
-**Key things to watch:**
+**Key things to watch (Prometheus, `api_*` series):**
 
 | Metric | Healthy | Investigate |
 |--------|---------|-------------|
-| Response time (p95) | < 200ms | > 500ms |
-| Error rate | < 1% | > 5% |
-| Active requests | < 50 | > 100 |
+| `api_http_request_duration_seconds{quantile="0.95"}` | < 0.5s | > 2s |
+| Error ratio (`api_http_errors_total` / `api_http_requests_total`) | < 1% | > 5% |
 
-## Workers
+!!! warning "Blocking endpoints"
+    Many API routes are declared `async def` but perform blocking database I/O — one slow query can stall the whole event loop and make *every* endpoint slow simultaneously. If the API goes globally slow, check the currently running MySQL queries before blaming load.
 
-Workers process background jobs — sending emails, retrying deliveries, cleaning up.
+## Worker Services
+
+Each worker (tracking, webhooks, rate_limiter, archiver, queue_manager, rag, …) exposes `/health` and `/metrics` on its own container port — the compose file maps them to host ports 8081-8104 in dev, all loopback-only in production.
 
 **Quick check:**
 
 ```bash
-# Check worker status
-docker compose ps worker
+# Any worker, by container name and internal port
+docker compose exec tracking curl -s http://localhost:8086/health
 
-# View recent worker logs
-docker compose logs --tail=20 worker
-
-# Check job queue depth
-docker compose exec redis redis-cli llen email_queue
+# Postfix queue via the queue_manager (through the API gateway)
+curl -s -H "X-API-Key: $KEY" https://<api-host>/api/v1/queue/queue/status
 ```
-
-**Key things to watch:**
-
-| Metric | Healthy | Investigate |
-|--------|---------|-------------|
-| Queue depth | Stable or decreasing | Growing steadily |
-| Job failure rate | < 1% | > 5% |
-| Processing time | < 5s per job | > 30s per job |
-| Last heartbeat | < 60s ago | > 120s ago |
 
 ## Health Check Script
 
-Save this as `check-all.sh` for a quick full-system check:
+Save this as `check-all.sh` for a quick full-system check (dev host ports):
 
 ```bash
 #!/bin/bash
@@ -261,7 +201,7 @@ Save this as `check-all.sh` for a quick full-system check:
 echo "=== Mailyte Service Status ==="
 echo ""
 
-services=("postfix:25" "dovecot:143" "rspamd:11334" "mysql:3306" "redis:6379" "api:5000" "health-monitor:8080")
+services=("postfix:25" "dovecot:143" "rspamd:11334" "mysql:3306" "redis:6379" "api:8083" "monitoring:8085")
 
 for svc in "${services[@]}"; do
     name="${svc%%:*}"
@@ -276,9 +216,11 @@ done
 echo ""
 echo "=== Docker Containers ==="
 docker compose ps --format "table {{.Name}}\t{{.Status}}"
+
+echo ""
+echo "=== Protocol-level verdicts ==="
+curl -s http://localhost:8085/heartbeat | python3 -c \
+  "import json,sys; d=json.load(sys.stdin); [print(f\"  {k}: {v['status']}\") for k,v in d.get('services',{}).items()]"
 ```
 
-```bash
-chmod +x check-all.sh
-./check-all.sh
-```
+In production, note that mysql/redis have no host ports at all — rely on `docker compose ps` and the monitoring service instead of raw `nc`.

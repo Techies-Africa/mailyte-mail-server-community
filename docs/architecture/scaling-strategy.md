@@ -1,8 +1,5 @@
 # Scaling Strategy
 
-> **Enterprise Edition** — This feature is available in [Mailyte Enterprise](https://mailyte.com). The Community Edition does not include this functionality.
-
-
 How to grow Mailyte from handling a few thousand emails a day to millions — and what to scale first when you hit limits.
 
 ---
@@ -21,33 +18,38 @@ Most deployments start vertical, go horizontal for workers, and offload data sto
 
 When your system starts struggling, here's the priority order. Fix the bottleneck you're actually hitting, not the theoretical one.
 
-### 1. Workers (easiest win)
+### 1. Stateless HTTP services (easiest win)
 
-Workers are stateless processes. You can run 2, 5, or 20 instances of any worker without changing anything else. They pull jobs from Redis/MySQL queues, so adding more instances just means jobs get processed faster.
+The gateway and most workers are stateless HTTP services. `docker-compose.prod.yml` already runs **api ×2, webhooks ×2, and tracking ×2**; raising those numbers (or replicating others) is a one-line change.
 
 Scale these first:
 
-| Worker | Scale when... |
-|--------|--------------|
-| Queue Manager | Outbound queue depth keeps growing |
-| Webhook Worker | Webhook delivery latency is high |
-| Tracking Worker | Open/click event processing is delayed |
-| Analytics Worker | Analytics snapshots are stale |
-| RAG Worker | Embedding backlog is growing |
+| Service | Scale when... |
+|---------|--------------|
+| api (gateway) | API response times climb under load |
+| webhooks | Webhook delivery latency is high |
+| tracking | Open/click event processing is delayed |
+| analytics | Rollups and reports are stale |
+| rag | Embedding backlog is growing |
 
 ```yaml
-# docker-compose.override.yml
+# docker-compose.prod.yml (or an override file)
 services:
-  queue-manager:
+  api:
     deploy:
       replicas: 3
-  webhook-worker:
+  webhooks:
     deploy:
-      replicas: 2
+      replicas: 3
 ```
 
-!!! tip "Workers are the free lunch"
-    Because workers are stateless, scaling them is the lowest-risk change you can make. No data migration, no config changes, no downtime.
+Two gotchas, both already handled for the replicated services in `docker-compose.prod.yml` and required for any service you add replicas to:
+
+- `container_name` must be nulled out (`!reset null`) — a fixed name collides with replica naming.
+- Fixed host-port publishes must be dropped (`ports: !reset []`) — every replica would fight for the same host port. Traefik reaches replicas over the internal network.
+
+!!! warning "queue_manager is not a throughput knob"
+    `queue_manager` manages **Postfix's own spool** via `postqueue` — it doesn't process a job queue, so running more replicas of it does not drain outbound mail faster. If the Postfix queue is growing, the bottleneck is delivery (remote acceptance, DNS, throttling), not queue management.
 
 ### 2. Redis
 
@@ -118,18 +120,17 @@ services:
           memory: 2G
 ```
 
-**Recommended starting points for a production deployment:**
+**What production ships with today** (`docker-compose.prod.yml` memory limits — raise these as volume grows):
 
-| Service | CPU | RAM | Notes |
-|---------|-----|-----|-------|
-| MySQL | 2-4 cores | 4-8 GB | Mostly InnoDB buffer pool |
-| Redis | 1-2 cores | 2-4 GB | Depends on cache size |
-| Postfix | 1-2 cores | 1-2 GB | Lightweight per connection |
-| Dovecot | 1-2 cores | 1-2 GB | Scales with concurrent IMAP sessions |
-| Rspamd | 2-4 cores | 2-4 GB | ML scoring is CPU-intensive |
-| FastAPI | 1-2 cores | 1-2 GB | Stateless, scale with replicas |
-| Qdrant | 2-4 cores | 4-8 GB | Depends on number of embeddings |
-| Workers | 0.5-1 core each | 512 MB each | Lightweight |
+| Service | Memory limit | Notes |
+|---------|-------------|-------|
+| MySQL | 2 GB | Mostly InnoDB buffer pool — first thing to raise |
+| Redis | 512 MB | Base compose also caps `maxmemory` at 256 MB LRU |
+| Postfix / Dovecot / Rspamd | 1 GB each | Rspamd's ML scoring is the CPU-heavy one |
+| Qdrant | 1 GB | Grows with embedding count |
+| api / webhooks / tracking | 512 MB each, ×2 replicas | Stateless, scale with replicas |
+| Most other workers | 256–512 MB each | Lightweight |
+| Prometheus / Kafka | 1 GB each | 30d metrics retention; Kafka idle until wired in |
 
 ## Horizontal Scaling Architecture
 
@@ -142,14 +143,14 @@ graph TB
     subgraph Node1["Node 1"]
         Postfix1["Postfix"]
         Dovecot1["Dovecot"]
-        API1["FastAPI"]
+        API1["API gateway"]
         Workers1["Workers"]
     end
 
     subgraph Node2["Node 2"]
         Postfix2["Postfix"]
         Dovecot2["Dovecot"]
-        API2["FastAPI"]
+        API2["API gateway"]
         Workers2["Workers"]
     end
 
@@ -180,13 +181,12 @@ Watch these metrics to know when it's time to scale:
 
 | Metric | Threshold | Action |
 |--------|-----------|--------|
-| Outbound queue depth > 1000 | 5+ minutes | Scale queue manager workers |
-| API response time p95 > 500ms | Sustained | Scale FastAPI replicas or MySQL |
-| Redis memory usage > 80% | Sustained | Scale Redis vertically or cluster |
+| Postfix queue depth > 1000 | 5+ minutes | Investigate delivery (remote deferrals, DNS, throttling) — not queue_manager |
+| API response time p95 > 500ms | Sustained | Add api replicas, or look at MySQL |
+| Redis memory usage > 80% | Sustained | Raise `maxmemory`/container limit, then cluster or offload |
 | MySQL slow queries > 10/min | Sustained | Optimize queries, add replicas |
-| Postfix queue depth > 5000 | 5+ minutes | Scale Postfix or check downstream |
 | Dovecot concurrent connections > 80% limit | Sustained | Scale Dovecot |
-| Rspamd scan latency > 2s average | Sustained | Scale Rspamd or ClamAV |
+| Rspamd scan latency > 2s average | Sustained | Give Rspamd more CPU, or scale it out |
 
 !!! info "Scale the bottleneck, not everything"
     Resist the urge to scale all services equally. Profile first, find the bottleneck, scale that one thing. Repeat. Most systems have one bottleneck at a time.

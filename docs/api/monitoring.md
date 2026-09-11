@@ -1,25 +1,35 @@
 # Monitoring
 
-> **Enterprise Edition** — This feature is available in [Mailyte Enterprise](https://mailyte.com). The Community Edition does not include this functionality.
+Health checks, service status, and system metrics for the Mailyte email server. The
+`/api/v1/monitoring/*` routes proxy to the internal monitoring service.
 
+!!! info "Platform-only surface"
+    Every `/api/v1/monitoring/*` endpoint is **platform-scoped** -- tenant
+    credentials cannot reach any of them. The read endpoints require operator role
+    `support` or higher; the three destructive POSTs require role `operator` plus
+    the admin permission level, and additionally forward an `X-Admin-Token` header
+    to the internal monitoring service. In practice these routes are called from an
+    operator console session.
 
-Health checks, service status, and system metrics for the Mailyte email server.
+## Health Check (public)
 
-## Health Check
-
-Quick health check for the API server and its database connection. This endpoint does not require authentication.
+Quick health check for the API server and its database connection.
 
 ```
 GET /health
 ```
 
 !!! note "No auth required"
-    The `/health` endpoint is at the root level, not under `/api/v1/`. It does not require an API key, which makes it suitable for load balancers and uptime monitors.
+    The `/health` endpoint is at the root level, not under `/api/v1/`. It does not
+    require any credential, which makes it suitable for load balancers and uptime
+    monitors. It is a different route from `GET /api/v1/monitoring/health` below,
+    which returns internal component status and is guarded like every other
+    monitoring route.
 
 **Example Request**
 
 ```bash
-curl http://your-server:5000/health
+curl http://your-server:8083/health
 ```
 
 **Example Response**
@@ -32,83 +42,60 @@ curl http://your-server:5000/health
 }
 ```
 
-When the database is down:
+When the database is down, `database` reads `"failed"` (the endpoint still returns
+`200` with `status: "healthy"` in that case; `503` is returned only if the handler
+itself fails).
 
-```json
-{
-  "status": "unhealthy",
-  "database": "failed",
-  "version": "1.0.0"
-}
+## Prometheus Metrics (public)
+
+```
+GET /metrics
 ```
 
-**HTTP status:** `200` when healthy, `503` when unhealthy.
+Root-level Prometheus text-format metrics for the API process (request counts,
+latencies, status codes).
 
 ## Monitoring Service Health
 
-Check the health of the internal monitoring service.
+Overall health of all email server components as reported by the monitoring
+service.
 
 ```
 GET /api/v1/monitoring/health
 ```
 
-**Example Request**
-
-```bash
-curl -H "X-API-Key: YOUR_KEY" \
-  http://your-server:5000/api/v1/monitoring/health
-```
+**Auth:** platform scope, role `support`+.
 
 **Example Response**
 
 ```json
 {
   "status": "healthy",
-  "monitoring_service": {
-    "uptime_seconds": 86400,
-    "services_monitored": 8
-  },
-  "timestamp": "2025-03-25T10:30:00Z"
+  "monitoring_service": { ... },
+  "timestamp": "2026-08-30T10:30:00Z"
 }
 ```
+
+Returns `503` with `status: "unhealthy"` when the monitoring service answers with a
+non-200, and `500` with `status: "error"` when it is unreachable.
 
 ## Service Status
 
 ### All Services
 
-Get the status of all monitored services (Postfix, Dovecot, Redis, etc.).
+Get the status of all monitored services (Postfix, Dovecot, Rspamd, MySQL, Redis,
+and the worker services).
 
 ```
 GET /api/v1/monitoring/services
 ```
 
-**Example Request**
+**Auth:** platform scope, role `support`+.
 
-```bash
-curl -H "X-API-Key: YOUR_KEY" \
-  http://your-server:5000/api/v1/monitoring/services
-```
-
-**Example Response**
-
-```json
-{
-  "services": {
-    "postfix": {"status": "running", "uptime": "5d 12h", "pid": 1234},
-    "dovecot": {"status": "running", "uptime": "5d 12h", "pid": 1235},
-    "redis": {"status": "running", "uptime": "5d 12h", "pid": 1236},
-    "mysql": {"status": "running", "uptime": "5d 12h", "pid": 1237},
-    "tracking": {"status": "running", "uptime": "5d 12h", "pid": 1238},
-    "analytics": {"status": "running", "uptime": "5d 12h", "pid": 1239},
-    "rate_limiter": {"status": "running", "uptime": "5d 12h", "pid": 1240},
-    "rag": {"status": "running", "uptime": "5d 12h", "pid": 1241}
-  }
-}
-```
+The response is the monitoring service's heartbeat payload, passed through
+verbatim.
 
 ### Single Service
-
-Get the status of a specific service.
 
 ```
 GET /api/v1/monitoring/services/{service_name}
@@ -120,136 +107,90 @@ GET /api/v1/monitoring/services/{service_name}
 |---|---|---|
 | `service_name` | string | Service name (e.g., `postfix`, `dovecot`, `redis`) |
 
-**Example Request**
-
-```bash
-curl -H "X-API-Key: YOUR_KEY" \
-  http://your-server:5000/api/v1/monitoring/services/postfix
-```
-
 ## System Metrics
 
-Get system-level metrics (CPU, memory, disk, mail queue size).
+System and mail-server metrics (CPU, memory, disk, throughput, queue depths),
+passed through from the monitoring service.
 
 ```
 GET /api/v1/monitoring/metrics
 ```
 
-**Example Request**
-
-```bash
-curl -H "X-API-Key: YOUR_KEY" \
-  http://your-server:5000/api/v1/monitoring/metrics
-```
-
-**Example Response**
-
-```json
-{
-  "system": {
-    "cpu_percent": 23.5,
-    "memory_percent": 45.2,
-    "disk_percent": 62.1,
-    "load_average": [1.2, 0.8, 0.6]
-  },
-  "mail": {
-    "queue_size": 12,
-    "deferred_count": 3,
-    "active_connections": 45,
-    "messages_today": 2500
-  }
-}
-```
+**Auth:** platform scope, role `support`+.
 
 ## Dashboard Stats
 
-Get statistics formatted for dashboard display.
+Pre-aggregated statistics for monitoring dashboards.
 
 ```
 GET /api/v1/monitoring/stats
 ```
 
-**Example Request**
-
-```bash
-curl -H "X-API-Key: YOUR_KEY" \
-  http://your-server:5000/api/v1/monitoring/stats
-```
+**Auth:** platform scope, role `support`+.
 
 ## Admin Operations
 
-These endpoints require the `X-Admin-Password` (or `X-Admin-Token`) header.
+The three POST endpoints below require:
+
+1. A platform-scoped credential with role `operator` or higher (an operator
+   session) and admin permission, **and**
+2. An `X-Admin-Token` header, which the gateway forwards to the internal monitoring
+   service for its own check. A missing or invalid token returns `401`
+   (`"Admin token required..."` / `"Invalid admin token"`).
 
 ### Restart a Service
-
-Restart a specific service.
 
 ```
 POST /api/v1/monitoring/services/{service_name}/restart
 ```
 
-!!! warning "Admin only"
-    This endpoint requires the `X-Admin-Password` header. API keys are not sufficient.
+**Request Body** (optional)
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `force` | boolean | `false` | Force-kill before restarting instead of a graceful restart |
+| `reason` | string | -- | Recorded in the audit log |
 
 **Example Request**
 
 ```bash
-curl -X POST \
-  -H "X-Admin-Password: your-admin-password" \
-  http://your-server:5000/api/v1/monitoring/services/postfix/restart
+curl -X POST -b operator-cookies.txt \
+  -H "X-CSRF-Token: $CSRF" \
+  -H "X-Admin-Token: $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"reason": "config change"}' \
+  http://your-server:8083/api/v1/monitoring/services/postfix/restart
 ```
 
-**Example Response**
-
-```json
-{
-  "service": "postfix",
-  "action": "restart",
-  "status": "success",
-  "message": "Service postfix restarted successfully"
-}
-```
+The monitoring service's restart result is passed through verbatim.
 
 ### Auto-Heal
 
-Trigger auto-healing for all services. The system checks each service and restarts any that are not running correctly.
+Run the auto-healing procedure across all (or selected) services: detect unhealthy
+components and attempt automatic recovery.
 
 ```
 POST /api/v1/monitoring/auto-heal
 ```
 
-**Example Request**
+**Request Body** (optional)
 
-```bash
-curl -X POST \
-  -H "X-Admin-Password: your-admin-password" \
-  http://your-server:5000/api/v1/monitoring/auto-heal
-```
-
-**Example Response**
-
-```json
-{
-  "status": "completed",
-  "actions_taken": [
-    {"service": "postfix", "action": "none", "reason": "already healthy"},
-    {"service": "dovecot", "action": "restarted", "reason": "not responding"}
-  ]
-}
-```
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `services` | array | -- | Limit auto-heal to these service names; omit to heal all unhealthy services |
+| `dry_run` | boolean | `false` | Report what would be healed without acting |
 
 ### Test Webhooks
 
-Send a test event to all configured webhook endpoints to verify they are working.
+Send a test payload to the configured webhook endpoints via the monitoring service.
 
 ```
 POST /api/v1/monitoring/webhooks/test
 ```
 
-**Example Request**
+**Request Body** (optional)
 
-```bash
-curl -X POST \
-  -H "X-Admin-Password: your-admin-password" \
-  http://your-server:5000/api/v1/monitoring/webhooks/test
-```
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `webhook_urls` | array | -- | Specific URLs to test; omit to test all configured webhooks |
+| `payload_type` | string | `ping` | `ping`, `alert`, or `recovery` |

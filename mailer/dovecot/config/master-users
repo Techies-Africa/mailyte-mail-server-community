@@ -1,0 +1,14 @@
+# Dovecot master-user passwd-file (RFC-less, Dovecot's own format).
+#
+# Grants the JMAP service (worker/jmap) impersonation rights so it can open
+# any mailbox's IMAP session without ever needing that mailbox's own
+# password. Login as "<mailbox>*jmap_master" using this user's password
+# (see auth_master_user_separator in dovecot.conf); `pass = yes` on the
+# master passdb means Dovecot still verifies the destination mailbox exists
+# via the normal SQL passdb, it just skips checking *its* password.
+#
+# The password hash below must be regenerated (via `doveadm pw -s
+# SHA512-CRYPT`) if IMAP_MASTER_PASSWORD in the root .env ever changes --
+# the two are independent copies of the same secret, one for Dovecot (this
+# file) and one for the JMAP service (env var) to present back to Dovecot.
+jmap_master:{SHA512-CRYPT}$6$drVxq65AUrlx1/.J$rSW9MtpF0FbTJobUwWg/VtH49fDLIbLOzG8LfbfOoSTf0iAMl3Y/zdsSKjkPTHMQlBxzAccRYquG4ehsYShRc.:::::

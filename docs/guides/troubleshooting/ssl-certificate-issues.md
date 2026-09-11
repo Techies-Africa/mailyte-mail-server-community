@@ -1,23 +1,31 @@
 ---
 title: "Troubleshooting: SSL Certificate Issues"
-description: Fix certificate renewal failures, domain mismatches, Let's Encrypt rate limits, and TLS configuration problems.
+description: Fix certificate renewal failures, domain mismatches, Let's Encrypt rate limits, SNI problems, and TLS configuration issues.
 ---
 
 # SSL Certificate Issues
 
 SSL/TLS problems usually show up as connection errors in mail clients, browser warnings on the API, or failed certificate renewals. Here's how to diagnose and fix them.
 
+## How Certificates Work in Mailyte
+
+The `cert_manager` container obtains and renews Let's Encrypt certificates using **HTTP-01 webroot challenges** (the `acme_webroot` service answers `/.well-known/acme-challenge/` on port 80; in production Traefik routes that path to it). Certificates land in `storage/ssl_certs/` and `storage/ssl_private/` on the host, which Postfix and Dovecot mount at `/etc/ssl/certs/custom` and `/etc/ssl/private/custom`. Per-domain SNI maps are written to `storage/sni_config/` (`postfix_sni.map` and `dovecot_sni.conf`).
+
 ## Quick Check
 
 ```bash
-# Check current certificate
-docker exec -it postfix openssl s_client -connect localhost:587 -starttls smtp < /dev/null 2>/dev/null | openssl x509 -noout -dates -subject -issuer
+# Check the certificate served on submission
+docker exec postfix sh -c "openssl s_client -connect localhost:587 -starttls smtp < /dev/null 2>/dev/null | openssl x509 -noout -dates -subject -issuer"
 
-# Check IMAPS certificate
+# Check IMAPS certificate from outside
 openssl s_client -connect mail.yourdomain.com:993 < /dev/null 2>/dev/null | openssl x509 -noout -dates -subject
 
-# Check cert-manager logs
+# Check cert_manager logs
 docker logs cert_manager --tail 50
+
+# Certificate inventory via the API
+curl https://api.yourdomain.com/api/v1/ssl/status -H "X-API-Key: YOUR_API_KEY"
+curl https://api.yourdomain.com/api/v1/ssl/certificates -H "X-API-Key: YOUR_API_KEY"
 ```
 
 ## Problem: Certificate Not Renewing
@@ -51,13 +59,11 @@ dig A mail.yourdomain.com +short
 
 **ACME staging mode still on:**
 
-Check your environment:
-
 ```bash
-docker exec -it cert_manager env | grep ACME_STAGING
+docker exec cert_manager env | grep ACME_STAGING
 ```
 
-If `ACME_STAGING=true`, certificates are issued by the staging CA and won't be trusted. Set it to `false` for production.
+`ACME_STAGING` **defaults to `true`** — staging-CA certificates are not trusted by clients. Set `ACME_STAGING=false` in `.env` for production and recreate the container.
 
 **Rate limit hit:**
 
@@ -72,11 +78,13 @@ If you hit a limit, wait for the window to reset. Check at [crt.sh](https://crt.
 ### Manual Renewal
 
 ```bash
-# Force a renewal attempt
-docker exec -it cert_manager python3 -c "from cert_manager import renew; renew(force=True)"
+# Trigger renewal for one domain via the API
+curl -X POST https://api.yourdomain.com/api/v1/ssl/certificates/yourdomain.com/renew \
+  -H "X-API-Key: YOUR_API_KEY"
 
-# Or restart the cert_manager
+# Or restart cert_manager — it re-evaluates all certificates on startup
 docker compose restart cert_manager
+docker logs cert_manager --tail 20
 ```
 
 ## Problem: Domain Mismatch
@@ -92,26 +100,22 @@ The certificate doesn't match the hostname the client is connecting to.
 
 ```bash
 # Check what domains the certificate covers
-docker exec -it postfix openssl s_client -connect localhost:587 -starttls smtp < /dev/null 2>/dev/null | openssl x509 -noout -text | grep -A1 "Subject Alternative Name"
+docker exec postfix sh -c "openssl s_client -connect localhost:587 -starttls smtp < /dev/null 2>/dev/null | openssl x509 -noout -text" | grep -A1 "Subject Alternative Name"
 ```
 
 ### Fix
 
-The certificate needs to include all hostnames clients connect to:
-
-- `mail.yourdomain.com` (primary hostname)
-- Any additional domains if using SNI
-
-Check that `HOSTNAME` in your `.env` matches what's in the certificate:
+The certificate needs to include the hostname clients connect to — the advertised mail hostname (`MAIL_HOSTNAME` in `.env`, which is also what autoconfig hands out to mail clients). Check that it matches:
 
 ```bash
-grep HOSTNAME .env
+grep -E "^(MAIL_)?HOSTNAME" .env
 ```
 
-For multi-domain certificates with SNI, check the SNI map:
+For per-domain certificates served via SNI, check the maps cert_manager generates:
 
 ```bash
-docker exec -it postfix cat /etc/ssl/sni/sni_map
+cat storage/sni_config/postfix_sni.map
+cat storage/sni_config/dovecot_sni.conf
 ```
 
 ## Problem: Certificate Expired
@@ -119,16 +123,16 @@ docker exec -it postfix cat /etc/ssl/sni/sni_map
 ### Verify Expiry
 
 ```bash
-# Check expiry date
 echo | openssl s_client -connect mail.yourdomain.com:993 2>/dev/null | openssl x509 -noout -enddate
 ```
 
-### Quick Fix: Restart cert_manager
+### Quick Fix: Renew and Restart
 
 ```bash
+curl -X POST https://api.yourdomain.com/api/v1/ssl/certificates/yourdomain.com/renew \
+  -H "X-API-Key: YOUR_API_KEY"
+# or
 docker compose restart cert_manager
-# Wait a minute, then check
-docker logs cert_manager --tail 20
 ```
 
 ### Emergency: Self-Signed Certificate
@@ -154,7 +158,7 @@ docker compose restart postfix dovecot
 ### Symptoms
 
 ```
-# In Postfix log
+# In the Postfix log (logs/mailer/postfix/mail.log)
 warning: TLS library problem: error:14209102:SSL routines:tls_early_post_process_client_hello:unsupported protocol
 ```
 
@@ -168,43 +172,32 @@ for ver in tls1 tls1_1 tls1_2 tls1_3; do
 done
 ```
 
-### Fix: Ensure Modern TLS
-
-In Postfix config:
-
-```bash
-# config/mailer/postfix/custom/main.cf
-smtpd_tls_mandatory_protocols = !SSLv2, !SSLv3, !TLSv1, !TLSv1.1
-smtpd_tls_protocols = !SSLv2, !SSLv3, !TLSv1, !TLSv1.1
-smtp_tls_mandatory_protocols = !SSLv2, !SSLv3, !TLSv1, !TLSv1.1
-smtp_tls_protocols = !SSLv2, !SSLv3, !TLSv1, !TLSv1.1
-```
+Usually the client is at fault (an ancient mail app requiring TLS 1.0). The server-side protocol settings live in `mailer/postfix/config/main.cf` — note this file is baked into the postfix image, so changes require a rebuild (`docker compose build postfix`), not just a restart.
 
 ## Problem: SNI Not Working
 
 SNI (Server Name Indication) lets you serve different certificates for different domains on the same IP.
 
-### Check SNI Map
+### Check the SNI Maps
 
 ```bash
-# View the SNI configuration
-cat storage/sni_config/sni_map
-
-# It should list domain-to-cert mappings:
-# domain1.com /etc/ssl/certs/domain1.crt /etc/ssl/private/domain1.key
-# domain2.com /etc/ssl/certs/domain2.crt /etc/ssl/private/domain2.key
+# Generated by cert_manager into storage/sni_config/
+cat storage/sni_config/postfix_sni.map     # tls_server_sni_maps format
+cat storage/sni_config/dovecot_sni.conf    # local_name {} blocks
 ```
+
+Both files are mounted read-only into postfix and dovecot at `/etc/ssl/sni`.
 
 ### Test SNI
 
 ```bash
 # Test with a specific hostname
-openssl s_client -connect mail.yourdomain.com:993 -servername domain2.com < /dev/null 2>/dev/null | openssl x509 -noout -subject
+openssl s_client -connect mail.yourdomain.com:993 -servername customer-domain.com < /dev/null 2>/dev/null | openssl x509 -noout -subject
 ```
 
 ### Fix
 
-Make sure the cert_manager has generated certificates for all domains and that the SNI map file is mounted correctly in both Postfix and Dovecot containers.
+Make sure cert_manager has issued a certificate for the domain (check `GET /api/v1/ssl/certificates/{domain}` and `docker logs cert_manager`), then confirm the domain appears in both SNI map files. Restart postfix/dovecot after the maps change.
 
 ## Problem: Wildcard Certificate Issues
 
@@ -215,16 +208,14 @@ If you're using a wildcard certificate for `*.yourdomain.com`:
 Wildcard certs require DNS-01 validation (not HTTP-01). Make sure:
 
 ```bash
-# Check env vars
-docker exec -it cert_manager env | grep -E "WILDCARD_DOMAIN|DNS_PROVIDER"
+docker exec cert_manager env | grep -E "WILDCARD_DOMAIN|DNS_PROVIDER"
 ```
 
-`DNS_PROVIDER` must be set to your DNS provider (e.g., `cloudflare`, `route53`).
+Both must be set in `.env` — `WILDCARD_DOMAIN=yourdomain.com` and `DNS_PROVIDER` naming your DNS provider (e.g., `route53`, `cloudflare`), with the provider's API credentials supplied.
 
 ### Verify DNS API Access
 
 ```bash
-# cert_manager logs will show DNS challenge status
 docker logs cert_manager 2>&1 | grep -i "dns\|challenge\|wildcard"
 ```
 

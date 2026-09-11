@@ -15,6 +15,20 @@
 # ==========================================================================
 
 # =============================================================================
+# POSTLOGD — Postfix's own logging daemon
+#
+# Without this service Postfix logs to syslog, and nothing in this container
+# runs a syslog daemon, so every mail log line was silently discarded: no
+# record of a delivery, a deferral, or a bounce anywhere on the host. That is
+# what made the "sending is not working" reports impossible to trace.
+#
+# maillog_file (main.cf) is what actually redirects logging to a file, and
+# Postfix refuses to start with it set unless this service exists --
+# "fatal: missing 'postlog' service in master.cf". Both must land together.
+# =============================================================================
+postlog   unix-dgram n  -       n       -       1       postlogd
+
+# =============================================================================
 # POSTSCREEN — Pre-SMTP filtering (rejects ~80% of spam before SMTP handshake)
 # Checks DNSBL, PREGREET, and connection patterns before handing to smtpd
 # =============================================================================
@@ -39,8 +53,11 @@ submission inet n       -       y       -       -       smtpd
   # No rate-limit policy in THIS list on purpose: the limiter is consulted at
   # exactly one point for every message -- main.cf's smtpd_data_restrictions,
   # which submission does not override -- because each policy call posts
-  # record:true and a second consultation double-counts every message. See
-  # the outage note above main.cf's smtpd_data_restrictions.
+  # record:true and a second consultation double-counts (this list had one
+  # briefly, halving every per-key and org cap for authenticated senders;
+  # inbound had it worse -- see the outage note above main.cf's
+  # smtpd_data_restrictions). DATA also runs once per message rather than
+  # once per recipient, which is the unit the caps mean.
   -o smtpd_recipient_restrictions=permit_sasl_authenticated,reject
   -o smtpd_relay_restrictions=permit_sasl_authenticated,reject
   -o smtpd_client_restrictions=permit_sasl_authenticated,reject
@@ -57,7 +74,7 @@ submission inet n       -       y       -       -       smtpd
 tracking-filter unix -  n       n       -       25      pipe
   flags=Rq
   user=vmail
-  argv=/usr/local/bin/tracking_injector.py -f ${sender} -- ${recipient}
+  argv=/usr/local/bin/tracking_injector.py -f ${sender} -a ${sasl_username} -- ${recipient}
 
 # =============================================================================
 # POST-TRACKING DELIVERY SERVICE
@@ -75,20 +92,79 @@ tracking-filter unix -  n       n       -       25      pipe
   -o smtpd_helo_restrictions=
   -o smtpd_sender_restrictions=
   -o smtpd_recipient_restrictions=permit_mynetworks,reject
+  # smtpd_relay_restrictions is a SEPARATE chain from
+  # smtpd_recipient_restrictions (modern Postfix splits relay-authorization
+  # from recipient-acceptance) -- this service never overrode it, so it
+  # silently inherited the public-facing global default
+  # (permit_sasl_authenticated, reject_unauth_destination). The tracking
+  # filter's re-injection connection from 127.0.0.1 is never
+  # SASL-authenticated (it's an internal loopback handoff, not a real mail
+  # client), so every single outbound message to an external domain got
+  # "554 5.7.1 Relay access denied" here -- confirmed live, this was the
+  # actual blocker after every other fix upstream, not a permissions or
+  # env-var issue at all.
+  -o smtpd_relay_restrictions=permit_mynetworks,reject
   -o smtpd_end_of_data_restrictions=
   # Keep the pipelining guard but drop the global list's rate-limit policy:
   # this listener receives the tracking filter's re-injected COPY of a
-  # message that was already counted once at its real ingress. Inheriting
-  # the global smtpd_data_restrictions counted every filtered message twice
-  # -- on an unauthenticated connection, so an outbound message's second
-  # count landed on the sender's INBOUND counters.
+  # message that was already counted once at its real ingress (DATA phase on
+  # port 25 or submission). Inheriting the global smtpd_data_restrictions
+  # counted every filtered message twice -- and the re-injection connection
+  # carries no SASL, so an outbound message's second count landed on the
+  # sender's INBOUND counters of all places.
   -o smtpd_data_restrictions=reject_unauth_pipelining
   -o smtpd_error_sleep_time=0
   -o smtpd_soft_error_limit=1001
   -o smtpd_hard_error_limit=1000
   -o smtpd_client_connection_count_limit=0
   -o smtpd_client_connection_rate_limit=0
-  -o receive_override_options=no_header_body_checks,no_unknown_recipient_checks
+  # Was no_header_body_checks,no_unknown_recipient_checks. The header/body
+  # part existed so the global security REJECT/HOLD rules don't re-run on a
+  # message already accepted at its real ingress -- that intent is preserved
+  # differently now: this listener's cleanup is cleanup_stream (below), whose
+  # ONLY header check is the egress-stream FILTER
+  # (stream_routing_checks; the security rules stay first-pass-only).
+  -o receive_override_options=no_unknown_recipient_checks
+  -o cleanup_service_name=cleanup_stream
+  -o smtpd_forbid_bare_newline=no
+
+# =============================================================================
+# INTERNAL SUBMISSION — trusted in-stack senders, WITH tracking
+# =============================================================================
+# The webmail/API submits here instead of port 25, so its mail passes through
+# the tracking filter.
+#
+# Why a separate port rather than adding content_filter to port 25: port 25
+# carries ALL INBOUND mail. Injecting tracking pixels and rewriting links in
+# messages *arriving* for our users would be wrong, and would rewrite other
+# people's mail. The filter has to apply to locally-originated mail only.
+#
+# Why not submission/587, which already has the filter: the webmail cannot
+# authenticate. No mailbox password is stored anywhere (email_accounts.password
+# is a one-way bcrypt hash), so it submits as a trusted client on the compose
+# network and worker/api/routes/mailbox.py pins the From address itself. That
+# is exactly why tracking never ran on a single webmail message: the filter sat
+# on the two SASL ports the webmail does not and cannot use, so it had executed
+# four times ever, last on 25 August.
+#
+# NOT published to the host in either compose file, so it is reachable only
+# from inside the compose network. Adding it to `ports:` would expose an
+# unauthenticated relay that trusts mynetworks -- do not.
+10587 inet  n       -       y       -       -       smtpd
+  -o syslog_name=postfix/internal-submission
+  -o content_filter=tracking-filter:
+  -o smtpd_client_restrictions=permit_mynetworks,reject
+  -o smtpd_relay_restrictions=permit_mynetworks,reject
+  -o smtpd_recipient_restrictions=permit_mynetworks,reject
+  -o smtpd_sender_restrictions=permit_mynetworks,reject
+  -o smtpd_helo_restrictions=
+  # The message is counted once here, at its real ingress. The tracking
+  # filter's re-injection into 10026 deliberately does not count it again --
+  # see that service's own note about double-counting.
+  -o smtpd_data_restrictions=reject_unauth_pipelining
+  # Marks the mail as originating from us, which is what DKIM signing and
+  # rspamd's outbound policy key off -- matching submission/smtps above.
+  -o milter_macro_daemon_name=ORIGINATING
 
 # =============================================================================
 # CORE POSTFIX SERVICES
@@ -139,6 +215,26 @@ smtp      unix  -       -       y       -       -       smtp
 
 # Relay service - handles mail relaying through smart hosts
 relay     unix  -       -       y       -       -       smtp
+
+# Marketing stream transport (SMTP-Send phase-01). Defined unconditionally but
+# UNREACHABLE until entrypoint.sh wires sender_dependent_default_transport_maps,
+# which it only does when MARKETING_BIND_IP is set -- at which point this
+# transport also gets a per-service smtp_bind_address/smtp_helo_name via
+# postconf -P. Distinct syslog_name so the marketing stream is separable in
+# mail logs from day one.
+marketing unix  -       -       y       -       -       smtp
+  -o syslog_name=postfix/marketing
+
+# Cleanup for the tracking re-injection listener (10026) only. Its single
+# header check is the per-message egress-stream FILTER; every other check is
+# blanked because the global security REJECT/HOLD rules already ran at the
+# message's real ingress and must not re-judge an accepted message.
+cleanup_stream unix n    -       y       -       0       cleanup
+  -o syslog_name=postfix/cleanup-stream
+  -o header_checks=regexp:/etc/postfix/stream_routing_checks
+  -o mime_header_checks=
+  -o nested_header_checks=
+  -o body_checks=
 
 # Administrative services
 showq     unix  n       -       y       -       -       showq

@@ -1,195 +1,98 @@
 # SSL Certificates
 
-Let's Encrypt auto-renewal, manual certificate installation, and SNI support for multiple domains.
+How cert_manager issues and renews Let's Encrypt certificates, generates SNI maps for Postfix/Dovecot/Traefik, and what to do for manual certs.
 
 ---
 
-Every connection to Mailyte — SMTP, IMAP, POP3, and the API — is encrypted with TLS. By default, Mailyte uses Let's Encrypt for free, automatically renewed certificates.
+Every connection to Mailyte — SMTP, IMAP, POP3, and the HTTPS surfaces — is encrypted with TLS. Certificates are managed end-to-end by the `cert_manager` container (`mailer/cert_manager/scripts/cert_manager.py`), which runs certbot with the **webroot HTTP-01** challenge.
 
-## Let's Encrypt Setup
+## How It Works
 
-The `cert-manager` container handles certificate provisioning and renewal. It uses the ACME protocol to get certificates from Let's Encrypt.
+1. cert_manager reads the active domains from MySQL and builds a SAN candidate list per mail domain: the apex plus `mail.`, `smtp.`, `imap.`, `autoconfig.`, and `autodiscover.` subdomains (the last two exist so Outlook/Thunderbird auto-setup works).
+2. Every candidate is checked against **live public DNS** (`A` lookup via 1.1.1.1) and kept only if it resolves to this server — one non-resolving name would fail the whole certbot order.
+3. `certbot certonly --webroot --webroot-path /var/www/acme-challenge --preferred-challenges http --cert-name <domain> -d <surviving names...>` issues the cert. The `acme_webroot` nginx container serves `/.well-known/acme-challenge/` (Traefik routes that path prefix to it on port 80, at priority 100 — above the HTTPS redirect).
+4. The lineage lands in the `letsencrypt_data` volume (`/etc/letsencrypt/live/<domain>/`); cert_manager then **deploys** copies to `${SSL_CERT_PATH}/<domain>.crt`, `<domain>_fullchain.crt` and `${SSL_KEY_PATH}/<domain>.key` (host: `storage/ssl_certs/`, `storage/ssl_private/`), and records the cert in the `ssl_certificates` table.
+5. It regenerates three SNI outputs under `SNI_CONFIG_PATH` (`/etc/ssl/sni`, host `storage/sni_config/`):
+   - `postfix_sni.map` — hostname → key/cert lines; the Postfix entrypoint copies it to `/etc/postfix/sni_certs.map` and runs `postmap -F`
+   - `dovecot_sni.conf` — `local_name` blocks; the Dovecot entrypoint copies it to `/etc/dovecot/conf.d/sni.conf`
+   - `traefik_certs.yml` — a Traefik file-provider TLS list, watched live
+6. It reloads Postfix and Dovecot by sending SIGHUP through the scoped docker-socket proxy (`DOCKER_RELOAD_ENABLED=true`, `DOCKER_PROXY_URL=http://docker-proxy:2375`).
 
-### How It Works
+Admin hostnames (`TRAEFIK_ADMIN_SUBDOMAINS`, default `api,autoconfig,jmap,caldav,docs,grafana,traefik,console` under `$DOMAIN`, plus any fully-qualified `TRAEFIK_EXTRA_HOSTNAMES`) get their own single-name certs and are excluded from the Postfix/Dovecot maps.
 
-1. On first boot, cert-manager requests a certificate for the hostname defined in `HOSTNAME`.
-2. Let's Encrypt verifies you control the domain (via HTTP-01 or DNS-01 challenge).
-3. The certificate is saved to `/etc/letsencrypt/live/$HOSTNAME/`.
-4. cert-manager checks daily and renews certificates that expire within 30 days.
-5. After renewal, it signals Postfix and Dovecot to reload their TLS config.
-
-### Required Environment Variables
+## Required Environment Variables
 
 ```bash
+ACME_EMAIL=admin@yourdomain.com   # ACME account (ACME_EMAILS=a@x,b@y for an account pool)
+ACME_STAGING=false                # true = staging CA (untrusted certs, for testing)
 HOSTNAME=mail.yourdomain.com
-ACME_EMAIL=admin@yourdomain.com
-SSL_CERT_PATH=/etc/letsencrypt/live/mail.yourdomain.com/fullchain.pem
-SSL_KEY_PATH=/etc/letsencrypt/live/mail.yourdomain.com/privkey.pem
+DOMAIN=yourdomain.com
 ```
 
-The `ACME_EMAIL` receives expiration warnings from Let's Encrypt if auto-renewal fails. Use a real address you monitor.
+The `ACME_EMAIL` address receives expiration warnings from Let's Encrypt if renewal fails — use a monitored address.
 
-### Challenge Types
-
-**HTTP-01 (default):** Let's Encrypt makes an HTTP request to your server on port 80. The cert-manager container handles the response. You need port 80 open and pointing to the server.
-
-**DNS-01:** Let's Encrypt checks for a specific DNS TXT record. Useful if port 80 isn't available or if you need wildcard certificates. Configure it in the cert-manager settings:
-
-```yaml
-# docker-compose.yml cert-manager section
-environment:
-  ACME_CHALLENGE: dns
-  DNS_PROVIDER: cloudflare
-  CF_API_TOKEN: your-cloudflare-api-token
-```
-
-> [!TIP]
-> DNS-01 is the only way to get wildcard certificates (`*.yourdomain.com`). If you're hosting multiple subdomains, this can simplify your setup.
+> [!NOTE]
+> `SSL_CERT_PATH` and `SSL_KEY_PATH` are **directories** (defaults `/etc/ssl/certs` and `/etc/ssl/private`), not file paths. Postfix and Dovecot read the shared `server.crt` / `server.key` from their own mounts of these directories, plus their per-domain SNI files.
 
 ## Auto-Renewal
 
-Renewal happens automatically. The cert-manager container runs a daily check. When a certificate is within 30 days of expiration, it renews.
+cert_manager loops every `CERT_CHECK_INTERVAL` seconds (default `21600` = 6 hours) and renews any certificate within `CERT_RENEWAL_DAYS` (default 30) of expiry, then regenerates the SNI outputs and reloads Postfix/Dovecot. There is no cron — it's one long-lived process under supervisord.
 
-After renewal, the container sends a `SIGHUP` to Postfix and Dovecot, which makes them reload certificates without dropping active connections.
-
-You can manually trigger a renewal check:
+Manual check/renewal:
 
 ```bash
-docker exec mailyte-cert-manager certbot renew --dry-run  # Test only
-docker exec mailyte-cert-manager certbot renew             # Actually renew
-```
-
-> [!NOTE]
-> Let's Encrypt certificates are valid for 90 days. The 30-day renewal window gives you plenty of buffer. If renewal fails, you'll get email warnings at the `ACME_EMAIL` address at 20 days, 10 days, and 1 day before expiration.
-
-## Manual Certificate Installation
-
-If you have certificates from another CA (or self-signed certs for testing), you can skip Let's Encrypt entirely.
-
-### Step 1: Place Your Files
-
-Put your certificate and key where the containers can reach them:
-
-```bash
-mkdir -p /opt/mailyte/ssl
-cp your-cert.pem /opt/mailyte/ssl/fullchain.pem
-cp your-key.pem /opt/mailyte/ssl/privkey.pem
-chmod 600 /opt/mailyte/ssl/privkey.pem
-```
-
-### Step 2: Mount in Docker Compose
-
-```yaml
-services:
-  postfix:
-    volumes:
-      - /opt/mailyte/ssl:/etc/ssl/mailyte:ro
-
-  dovecot:
-    volumes:
-      - /opt/mailyte/ssl:/etc/ssl/mailyte:ro
-```
-
-### Step 3: Update Environment Variables
-
-```bash
-SSL_CERT_PATH=/etc/ssl/mailyte/fullchain.pem
-SSL_KEY_PATH=/etc/ssl/mailyte/privkey.pem
-```
-
-### Step 4: Reload Services
-
-```bash
-docker exec mailyte-postfix postfix reload
-docker exec mailyte-dovecot doveadm reload
+docker exec cert_manager certbot certificates          # what exists
+docker exec cert_manager certbot renew --dry-run       # test renewal
+docker logs cert_manager --tail 100                    # what the manager is doing
 ```
 
 > [!WARNING]
-> When using manual certificates, you're responsible for renewal. Set a calendar reminder. Expired certificates mean broken email for all users.
+> certbot takes an exclusive lock on its config directory, so parallel issuance is serialized internally — a long queue of new domains is processed one order at a time. A built-in guard also refuses new orders when ~40 certificates have been issued in the last 7 days (Let's Encrypt limit: 50/week).
 
-## SNI for Multiple Domains
+## Wildcard Certificates (DNS-01)
 
-Server Name Indication (SNI) lets Mailyte serve different certificates for different domains on the same IP address. This is essential for multi-tenant setups where each organization has their own domain.
+Only if **both** `WILDCARD_DOMAIN` and `DNS_PROVIDER` are set, cert_manager issues `-d $WILDCARD_DOMAIN -d *.$WILDCARD_DOMAIN` via the matching certbot DNS plugin and deploys the result as the shared `server.crt`/`server.key` (plus `wildcard.crt`/`wildcard.key`). DNS-01 is the only way to get wildcards; provider credentials must be supplied the way the certbot plugin expects.
 
-### Postfix SNI
+## Manual Certificate Installation
 
-Add to `/etc/postfix/main.cf`:
+If you bring your own certificates, bypass cert_manager for those names:
 
-```ini
-tls_server_sni_maps = hash:/etc/postfix/sni_maps
-```
-
-Create `/etc/postfix/sni_maps`:
-
-```
-mail.example.com    /etc/letsencrypt/live/mail.example.com/fullchain.pem /etc/letsencrypt/live/mail.example.com/privkey.pem
-mail.another.org    /etc/letsencrypt/live/mail.another.org/fullchain.pem /etc/letsencrypt/live/mail.another.org/privkey.pem
-```
-
-Then hash the file:
+1. Place PEM files where the containers can see them, e.g. copy into `storage/ssl_certs/` / `storage/ssl_private/` using cert_manager's naming (`<domain>.crt`, `<domain>_fullchain.crt`, `<domain>.key`, key mode `0600`).
+2. Add the hostnames to the SNI files (or replace `server.crt`/`server.key` for the default identity).
+3. Reload:
 
 ```bash
-docker exec mailyte-postfix postmap -F hash:/etc/postfix/sni_maps
-docker exec mailyte-postfix postfix reload
+docker exec postfix postfix reload
+docker exec dovecot doveadm reload
 ```
 
-### Dovecot SNI
-
-Add to `/etc/dovecot/conf.d/10-ssl.conf`:
-
-```ini
-local_name mail.example.com {
-  ssl_cert = </etc/letsencrypt/live/mail.example.com/fullchain.pem
-  ssl_key = </etc/letsencrypt/live/mail.example.com/privkey.pem
-}
-
-local_name mail.another.org {
-  ssl_cert = </etc/letsencrypt/live/mail.another.org/fullchain.pem
-  ssl_key = </etc/letsencrypt/live/mail.another.org/privkey.pem
-}
-```
-
-### Automating Multi-Domain Certificates
-
-For multi-tenant deployments, you'll want to automate certificate provisioning when new domains are added. The Mailyte API handles this — when a new domain is added through the API, it:
-
-1. Triggers cert-manager to request a certificate for the domain.
-2. Updates the Postfix SNI map and Dovecot config.
-3. Reloads both services.
-
-See the API documentation for the domain provisioning endpoints.
+> [!WARNING]
+> You own renewal for manual certs, and cert_manager may regenerate the SNI files when other domains renew — keep manual entries in the database (`ssl_certificates`) consistent or they'll be dropped from the maps.
 
 ## Certificate File Formats
 
-Mailyte expects PEM-formatted certificates. If you have certificates in other formats:
+Mailyte expects PEM. Converting:
 
 ```bash
-# Convert DER to PEM
 openssl x509 -inform DER -in cert.der -out cert.pem
-
-# Convert PKCS#12 (.pfx) to PEM
 openssl pkcs12 -in cert.pfx -out cert.pem -nodes
-
-# Extract key from PKCS#12
 openssl pkcs12 -in cert.pfx -out key.pem -nodes -nocerts
 ```
 
 ## Verifying Your Setup
 
-Check that TLS is working correctly:
-
 ```bash
-# Test SMTP TLS (port 587)
-openssl s_client -starttls smtp -connect mail.yourdomain.com:587
+# SMTP STARTTLS (587) — SNI matters, use -servername
+openssl s_client -starttls smtp -connect mail.yourdomain.com:587 -servername mail.yourdomain.com
 
-# Test IMAPS (port 993)
-openssl s_client -connect mail.yourdomain.com:993
+# IMAPS (993)
+openssl s_client -connect mail.yourdomain.com:993 -servername mail.yourdomain.com
 
-# Test SMTPS (port 465)
-openssl s_client -connect mail.yourdomain.com:465
+# SMTPS (465)
+openssl s_client -connect mail.yourdomain.com:465 -servername mail.yourdomain.com
 
-# Check certificate expiration
-echo | openssl s_client -connect mail.yourdomain.com:993 2>/dev/null | openssl x509 -noout -dates
+# Expiry
+echo | openssl s_client -connect mail.yourdomain.com:993 -servername mail.yourdomain.com 2>/dev/null | openssl x509 -noout -dates
 ```
 
-All of these should show your certificate details without errors.
+All of these should show the expected certificate without errors. If a customer domain shows the default certificate instead of its own, check that its hostnames resolve to this server (step 2 above) and that its SNI entries exist in `storage/sni_config/`.

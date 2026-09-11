@@ -1,70 +1,90 @@
 ---
 title: Coding Standards
-description: Python style guide for Mailyte — Black, isort, flake8, naming conventions, and file organization.
+description: Python style guide for Mailyte — Ruff, mypy, the CI baseline ratchets, naming conventions, and file organization.
 ---
 
 # Coding Standards
 
 Consistency matters more than any individual style choice. Here's what we've agreed on.
 
-## Formatting
+## Formatting and Linting
 
-We use three tools. Run them before every commit.
-
-### Black (Code Formatting)
-
-Black formats your code so you don't have to argue about style.
+Two tools, both configured in `pyproject.toml` and both gated in CI (`.github/workflows/ci.yml`): **Ruff** for formatting and linting, **mypy** for type checking. Run them before every commit.
 
 ```bash
-black worker/ shared/ tests/
+pip install ruff mypy mypy-baseline
+```
+
+### Ruff (Formatting)
+
+```bash
+# Auto-format
+ruff format .
+
+# What CI runs (must pass cleanly)
+ruff format --check .
 ```
 
 Config in `pyproject.toml`:
 
 ```toml
-[tool.black]
+[tool.ruff]
 line-length = 100
-target-version = ['py311']
+target-version = "py311"
+exclude = ["database/migrations/archive", "alembic/versions"]
+
+[tool.ruff.format]
+quote-style = "double"
 ```
 
-### isort (Import Sorting)
-
-isort organizes your imports into groups: stdlib, third-party, local.
+### Ruff (Linting)
 
 ```bash
-isort worker/ shared/ tests/
+ruff check .
 ```
 
-Config in `pyproject.toml`:
+Enabled rule families:
 
 ```toml
-[tool.isort]
-profile = "black"
-line_length = 100
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "SIM"]
 ```
 
-### flake8 (Linting)
+`I` is import sorting — there is no separate isort; Ruff handles it (`ruff check --fix .` applies it).
 
-flake8 catches common mistakes.
+CI does **not** require zero violations. It counts them and compares against `ruff-baseline.txt` (a single number at the repo root). The count may only shrink:
+
+- If your change adds a violation, CI fails — fix it, or offset it by fixing an existing one.
+- If your change removes violations, CI prints a notice — update `ruff-baseline.txt` to the new count in the same PR so the ratchet doesn't drift back up.
+
+### mypy (Type Checking)
+
+mypy can't run once across the whole tree — `worker/*` and `mailer/*` are independently deployed services with no `__init__.py` between them, so module names collide (`worker/api/app.py` and `worker/analytics/app.py` are both module `app`). `scripts/run_mypy.sh` type-checks each directory in its own invocation and concatenates the output.
+
+Known pre-existing errors live in `mypy-baseline.txt` and are filtered out by the [mypy-baseline](https://pypi.org/project/mypy-baseline/) tool; only **new** errors fail CI:
 
 ```bash
-flake8 worker/ shared/ tests/
+# What CI runs
+bash scripts/run_mypy.sh | mypy-baseline filter
+
+# After FIXING existing errors, shrink the baseline
+bash scripts/run_mypy.sh | mypy-baseline sync
 ```
 
-Config in `pyproject.toml` or `.flake8`:
+The baseline may only shrink, never grow — don't `sync` to absorb new errors you introduced.
 
-```ini
-[flake8]
-max-line-length = 100
-extend-ignore = E203, W503
-exclude = .git, __pycache__, .venv, alembic
+mypy config in `pyproject.toml`:
+
+```toml
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+exclude = ["database/migrations/archive/", "alembic/versions/"]
 ```
 
-### Run All Three
+### Shell Scripts
 
-```bash
-black worker/ shared/ tests/ && isort worker/ shared/ tests/ && flake8 worker/ shared/ tests/
-```
+`scripts/*.sh` are linted with [ShellCheck](https://www.shellcheck.net/) in CI (advisory).
 
 ## Naming Conventions
 
@@ -128,43 +148,44 @@ created_at = row["created_at"]
 
 ### Worker Module Structure
 
-Each worker follows the same pattern:
+Each worker is a standalone FastAPI service. The common shape (see `worker/storage_usage/` for a compact example, `worker/api/` for the largest):
 
 ```
 worker/
-  tracking/
-    __init__.py
-    main.py           # Entry point, starts the service
-    routes.py          # HTTP endpoints (health, metrics)
-    service.py         # Core business logic
-    models.py          # Data models / Pydantic schemas
-    config.py          # Configuration loading
-    Dockerfile         # Container build
-    requirements.txt   # Dependencies
+  storage_usage/
+    app.py             # FastAPI app: routes, /health, /metrics, middleware
+    config.py          # Configuration from env vars
+    services/          # Core business logic (larger workers)
+    Dockerfile         # Container build (copies shared/ and database/ in)
+    requirements.txt   # Pinned dependencies for this service only
 ```
+
+The API gateway (`worker/api/`) additionally splits into `routes/`, `schemas/`, and `utils/`.
 
 ### Shared Code
 
-Code used by multiple workers goes in `shared/`:
+Code used by multiple workers goes in `shared/` (each service's Dockerfile copies it into the image; in dev it's bind-mounted):
 
 ```
 shared/
-  database.py          # Database connection helpers
-  redis_client.py      # Redis connection
-  metrics.py           # Prometheus metric helpers
-  auth.py              # Authentication utilities
-  models/              # Shared data models
+  config.py              # Configuration helpers
+  db_pool.py             # Database connection pooling
+  envelope_encryption.py # KEK/DEK envelope encryption
+  imap_mail.py           # IMAP access helpers
+  kafka_client.py        # Kafka producer/consumer helpers
+  logging_config.py      # Logging setup
+  metrics.py             # Prometheus metrics helper (get_metrics)
+  object_storage.py      # S3/object storage
+  ulid_utils.py          # ULID primary key helpers
+  webhook_dispatcher.py  # Global webhook event dispatcher
 ```
 
 ## Type Hints
 
-Use type hints everywhere. They make the code self-documenting and catch bugs early.
+Use type hints everywhere. They make the code self-documenting and catch bugs early — and new untyped code shows up in the mypy gate.
 
 ```python
-from typing import Optional
-
-
-def get_domain(domain_name: str) -> Optional[dict]:
+def get_domain(domain_name: str) -> dict | None:
     """Fetch a domain from the database. Returns None if not found."""
     ...
 
@@ -174,9 +195,11 @@ def send_email(
     recipient: str,
     subject: str,
     body: str,
-    headers: Optional[dict] = None,
+    headers: dict | None = None,
 ) -> bool: ...
 ```
+
+Prefer modern syntax (`dict | None` over `Optional[dict]`) — the Ruff `UP` rules flag the legacy forms.
 
 ## Docstrings
 
@@ -221,6 +244,8 @@ if not domain:
 if not user_is_authorized:
     raise HTTPException(status_code=403, detail="insufficient_permissions")
 ```
+
+Give every new endpoint a `response_model` — CI's OpenAPI gate counts untyped 200-responses against `openapi-untyped-baseline.txt`, and that count may only shrink (see [Adding Features](adding-features.md)).
 
 ### Business Logic
 
@@ -285,6 +310,7 @@ for alias in aliases:
 
 ## Dependencies
 
-- Add new Python dependencies to `requirements.txt` (or the worker's own `requirements.txt`)
-- Pin versions: `requests==2.31.0`, not `requests>=2.0`
-- Run `pip freeze` to get the exact version
+- Add new runtime dependencies to the **service's own** `worker/<service>/requirements.txt` (there is no repo-root `requirements.txt`); shared-module deps go in `shared/requirements.txt`
+- Test-only dependencies go in `requirements-test.txt`
+- Pin versions: `requests==2.32.5`, not `requests>=2.0`
+- CI runs `pip-audit` against the pinned files, so keeping pins current matters

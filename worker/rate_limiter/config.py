@@ -106,6 +106,7 @@ class CacheConfig:
     organization_mapping_ttl: int = 600  # 10 minutes
     webhook_urls_ttl: int = 300  # 5 minutes
     usage_stats_ttl: int = 60  # 1 minute
+    redis_pool_size: int = 10  # cache_service.py reads this; was missing entirely
 
 
 @dataclass

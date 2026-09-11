@@ -1,6 +1,6 @@
 # Installation Guide
 
-This guide will walk you through installing and configuring the Mailyte Mail Server on your infrastructure.
+This guide will walk you through installing and configuring the Enterprise Mail Server on your infrastructure.
 
 ## Prerequisites
 
@@ -383,4 +383,4 @@ If you encounter issues during installation:
 - Regular security updates
 - Monitor access logs regularly
 
-The installation is now complete! Your Mailyte Mail Server is ready to handle email traffic with advanced tracking, webhooks, and monitoring capabilities.
+The installation is now complete! Your Enterprise Mail Server is ready to handle email traffic with advanced tracking, webhooks, and monitoring capabilities.

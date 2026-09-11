@@ -10,15 +10,19 @@
         body{font-family:ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#09090B;color:#F9F9F9;min-height:100vh;-webkit-font-smoothing:antialiased}
         a{color:inherit;text-decoration:none}
 
-        .topbar{border-bottom:1px solid rgba(235,174,19,.12);padding:0 32px;height:56px;display:flex;align-items:center;justify-content:space-between;max-width:1200px;margin:0 auto}
+        .topbar{border-bottom:1px solid rgba(235,174,19,.12);padding:12px 32px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;row-gap:8px;max-width:1200px;margin:0 auto}
         .topbar .logo{display:flex;align-items:center;gap:10px;font-size:20px;font-weight:700}
         .topbar .logo img{height:32px;width:auto}
         .topbar .logo span{background:linear-gradient(135deg,#EBAE13,#FF9900);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
-        .topbar nav{display:flex;align-items:center;gap:8px}
+        .topbar nav{display:flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:center}
         .topbar nav a{color:#A1A1A9;font-size:13px;padding:6px 12px;border-radius:6px;transition:all .2s}
         .topbar nav a:hover{color:#EBAE13;background:rgba(235,174,19,.06)}
         .topbar nav a.cta{background:#EBAE13;color:#09090B;font-weight:600;padding:7px 16px;border-radius:50px}
         .topbar nav a.cta:hover{background:#DBA500}
+        @media(max-width:640px){
+            .topbar{justify-content:center;padding:12px 20px}
+            .topbar nav a{font-size:12px;padding:5px 9px}
+        }
 
         .hero{max-width:1200px;margin:0 auto;padding:60px 32px 40px;text-align:center}
         .hero h1{font-size:40px;font-weight:800;margin-bottom:12px;background:linear-gradient(135deg,#FFF 20%,#EBAE13 80%);-webkit-background-clip:text;-webkit-text-fill-color:transparent}
@@ -68,10 +72,10 @@
         </a>
         <nav>
             <a href="/">Home</a>
-            <a href="http://localhost:8000" target="_blank">Handbook</a>
+            <a href="https://docs.courier.mailyte.com" target="_blank">Handbook</a>
             <a href="/api-docs">Swagger</a>
             <a href="/api-reference">API Docs</a>
-            <a href="https://github.com/Techies-Africa/mailyte-mail-server-community" class="cta">GitHub</a>
+            <a href="https://github.com/Techies-Africa/mailyte-email-server" class="cta">GitHub</a>
         </nav>
     </div>
 
@@ -182,7 +186,7 @@
             <h2>Ready to get started?</h2>
             <p>Deploy the Community Edition in minutes, or contact us for Enterprise.</p>
             <div class="btns">
-                <a href="https://github.com/Techies-Africa/mailyte-mail-server-community" class="btn btn-gold">Get Community Edition &rarr;</a>
+                <a href="https://github.com/Techies-Africa/mailyte-email-server" class="btn btn-gold">Get Community Edition &rarr;</a>
                 <a href="https://mailyte.com" class="btn btn-ghost">Contact for Enterprise</a>
             </div>
         </div>
@@ -192,7 +196,7 @@
         <p>Mailyte Email Server &mdash; Built by <a href="https://techies.africa" style="color:#71717A">Techies Africa</a></p>
         <div class="links">
             <a href="/">Home</a>
-            <a href="https://github.com/Techies-Africa/mailyte-mail-server-community">GitHub</a>
+            <a href="https://github.com/Techies-Africa/mailyte-email-server">GitHub</a>
             <a href="https://mailyte.com">mailyte.com</a>
         </div>
     </footer>

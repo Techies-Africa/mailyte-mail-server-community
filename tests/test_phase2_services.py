@@ -2,7 +2,7 @@
 """
 Phase 2 Service Integration Tests
 
-Tests all Phase 2 production features against running Docker services.
+Tests all Phase 2 enterprise features against running Docker services.
 Each service is tested via HTTP API calls.
 
 Requirements:
@@ -128,7 +128,7 @@ def test_phase1():
 
 
 # ---------------------------------------------------------------------------
-# Phase 2 Tests — Additional Features
+# Phase 2 Tests — Enterprise Features
 # ---------------------------------------------------------------------------
 
 

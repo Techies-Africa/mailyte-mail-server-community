@@ -1,252 +1,156 @@
 # Performance Tuning
 
-> **Enterprise Edition** — This feature is available in [Mailyte Enterprise](https://mailyte.com). The Community Edition does not include this functionality.
-
-
-Postfix queue tuning, Dovecot connection limits, MySQL optimization, Redis memory, and Rspamd workers.
+Postfix queue tuning, Dovecot connection limits, MySQL optimization, and Redis memory — with the stack's real defaults as the starting point.
 
 ---
 
-Mailyte's defaults work well for small to medium deployments. Once you start handling thousands of mailboxes or high message volumes, you'll want to tune individual components. This page covers the knobs that matter most.
+Mailyte's defaults work well for small to medium deployments. Once you handle thousands of mailboxes or high message volumes, tune the components below. Remember that Postfix/Dovecot/Rspamd configs are **baked into the images** — persistent tuning changes go into `mailer/*/config/` followed by a rebuild (see each component's configuration page).
 
-## Postfix Queue Tuning
+## Postfix
 
-Postfix uses a queue-based architecture. Messages flow through several queues before delivery. Tuning these affects throughput and latency.
+### What's Already Set
+
+The shipped `main.cf` already includes the important throughput settings:
+
+```ini
+default_process_limit = 100
+smtpd_client_connection_rate_limit = 30      # POSTFIX_CONNECTION_RATE_LIMIT
+smtpd_client_connection_count_limit = 50     # POSTFIX_CONNECTION_COUNT_LIMIT
+smtpd_client_message_rate_limit = 100        # POSTFIX_MESSAGE_RATE_LIMIT
+smtpd_client_recipient_rate_limit = 200      # POSTFIX_RECIPIENT_RATE_LIMIT
+anvil_rate_time_unit = 60s
+```
+
+The per-client limits are env-tunable (the names in comments) without a rebuild. MySQL lookups already go through `proxy:` maps (persistent connections via `proxymap`) — no change needed there.
 
 ### Delivery Concurrency
 
+Postfix's own defaults apply where main.cf is silent (`default_destination_concurrency_limit = 20`, etc.). For high volume, raise in `mailer/postfix/config/main.cf`:
+
 ```ini
-# /etc/postfix/main.cf
-
-# Max simultaneous deliveries to any single destination
-default_destination_concurrency_limit = 20
-
-# Max simultaneous deliveries total
-default_process_limit = 100
-
-# Max simultaneous deliveries to a remote SMTP server
-smtp_destination_concurrency_limit = 20
-
-# Max simultaneous local deliveries
-local_destination_concurrency_limit = 5
+default_process_limit = 200            # more parallel deliveries overall
+smtp_destination_concurrency_limit = 20  # per remote destination — don't exceed ~20
 ```
 
-- **`default_process_limit`** controls how many delivery processes Postfix runs at once. The default of 100 works for most servers. Bump it to 200-300 for high-volume setups.
-- **`smtp_destination_concurrency_limit`** controls how many connections Postfix opens to a single remote server. Don't go above 20 — many servers will rate-limit or block you.
+Going above ~20 connections to a single remote server invites rate-limiting or blocking by the receiver.
 
 ### Queue Retry Schedule
 
-```ini
-# How long to wait before retrying a deferred message
-minimal_backoff_time = 300s
-maximal_backoff_time = 4000s
+Postfix defaults (`minimal_backoff_time = 300s`, `maximal_backoff_time = 4000s`, `maximal_queue_lifetime = 5d`, `queue_run_delay = 300s`) apply. For time-sensitive mail, reduce `minimal_backoff_time` to `60s`; for high-volume servers, raise `queue_run_delay` to `600s` to reduce disk I/O.
 
-# How long to keep trying before bouncing
-maximal_queue_lifetime = 5d
-bounce_queue_lifetime = 5d
+### Queue on Fast Storage
 
-# How often to scan the deferred queue
-queue_run_delay = 300s
+The Postfix spool lives in the `postfix_spool` named volume. If your Docker data root isn't on SSD/NVMe, move it — the queue is the most I/O-sensitive piece of the stack.
+
+```bash
+docker exec postfix postqueue -p | tail -1   # a healthy queue is mostly empty
 ```
 
-The defaults are conservative. For time-sensitive mail, reduce `minimal_backoff_time` to 60 seconds. For high-volume servers where most mail succeeds on the first try, increase `queue_run_delay` to 600 seconds to reduce disk I/O.
+## Dovecot
 
-### Queue Directory on Fast Storage
+### Shipped Process Limits
 
-Postfix's queue is I/O intensive. If you can put it on an SSD or NVMe drive, do it:
-
-```yaml
-# docker-compose.yml
-services:
-  postfix:
-    volumes:
-      - /fast-storage/postfix-queue:/var/spool/postfix
-```
-
-> [!TIP]
-> Run `mailq` (or `docker exec mailyte-postfix mailq`) to see what's in the queue. A healthy queue is mostly empty. If messages are piling up, check the deferred queue logs to find out why.
-
-## Dovecot Connection Limits
-
-Dovecot handles all IMAP and POP3 connections. Mobile devices are especially chatty — a single phone can maintain multiple persistent connections.
-
-### Process Limits
+The baked `dovecot.conf` already scales well past a thousand concurrent users:
 
 ```ini
-# /etc/dovecot/conf.d/10-master.conf
-
 service imap-login {
-  process_min_avail = 3
-  service_count = 1
+  process_min_avail = 2
   process_limit = 256
-
-  inet_listener imap {
-    port = 143
-  }
-  inet_listener imaps {
-    port = 993
-    ssl = yes
-  }
+  client_limit = 1000
+  service_count = 1        # one connection per login process (most secure)
+  vsz_limit = 64M
 }
-
 service imap {
   process_limit = 1024
-}
-```
-
-- **`service_count = 1`** — Each login process handles one connection, then exits. This is the most secure setting. Set it to `0` (unlimited) for better performance if you trust your users.
-- **`process_limit`** for `imap-login` — Max simultaneous login attempts.
-- **`process_limit`** for `imap` — Max simultaneous IMAP sessions. Each connected user uses at least one process.
-
-### Per-User Connection Limits
-
-```ini
-# /etc/dovecot/conf.d/20-imap.conf
-
-protocol imap {
-  mail_max_userip_connections = 20
-}
-
-protocol pop3 {
-  mail_max_userip_connections = 5
-}
-```
-
-This limits how many simultaneous connections a single user can have from one IP. The default of 20 for IMAP covers most multi-device setups (phone, laptop, tablet, desktop, each with multiple folders open).
-
-### vsz_limit (Memory per Process)
-
-```ini
-service imap {
+  client_limit = 1
+  service_count = 0
   vsz_limit = 512M
 }
+service pop3-login { process_limit = 128 }
+service pop3       { process_limit = 512 }
+service lmtp       { process_limit = 50 }
+service auth       { client_limit = 4096 }
+service auth-worker { process_limit = 30; process_min_avail = 5 }
+default_process_limit = 1000
+default_client_limit = 1000
 ```
 
-If users have very large mailboxes (50k+ messages), Dovecot processes may need more memory. Increase `vsz_limit` if you see processes getting killed.
+Each connected IMAP user consumes one `imap` process; raise `service imap { process_limit }` first when users hit connection errors. Mobile devices are chatty — a single phone can hold several persistent connections.
 
-## MySQL Query Optimization
+### Memory per Process
 
-Postfix and Dovecot query MySQL on every message delivery and every login. These queries need to be fast.
+`service imap { vsz_limit = 512M }` is already generous. If users with very large mailboxes (50k+ messages) see processes killed, raise it further.
 
-### Connection Pooling
+### Auth Throughput
 
-Postfix opens a new MySQL connection for each lookup by default. Use connection caching:
+`auth_cache_size = 10M` / `auth_cache_ttl = 1 hour` keep MySQL off the hot path for repeat logins. Remember the flip side: manual credential changes need a cache flush to take effect promptly.
+
+## MySQL
+
+The stack runs stock `mysql:8.0.35` with no custom tuning file. For a busy server, add one via a volume mount:
 
 ```ini
-# /etc/postfix/main.cf
-# Proxy maps cache MySQL connections across Postfix processes
-proxy_read_maps =
-  proxy:mysql:/etc/postfix/mysql-virtual-mailbox-domains.cf
-  proxy:mysql:/etc/postfix/mysql-virtual-mailbox-maps.cf
-  proxy:mysql:/etc/postfix/mysql-virtual-alias-maps.cf
-
-virtual_mailbox_domains = proxy:mysql:/etc/postfix/mysql-virtual-mailbox-domains.cf
-virtual_mailbox_maps = proxy:mysql:/etc/postfix/mysql-virtual-mailbox-maps.cf
-virtual_alias_maps = proxy:mysql:/etc/postfix/mysql-virtual-alias-maps.cf
-```
-
-The `proxy:` prefix routes queries through Postfix's `proxymap` daemon, which keeps persistent connections to MySQL.
-
-### Indexes
-
-Make sure these indexes exist on your MySQL tables:
-
-```sql
-ALTER TABLE virtual_domains ADD INDEX idx_name_active (name, active);
-ALTER TABLE virtual_users ADD INDEX idx_email_active (email, active);
-ALTER TABLE virtual_aliases ADD INDEX idx_source_active (source, active);
-```
-
-### MySQL Server Tuning
-
-```ini
-# /etc/mysql/conf.d/mailyte.cnf
-
+# my-tuning.cnf → mounted at /etc/mysql/conf.d/mailyte.cnf
 [mysqld]
-innodb_buffer_pool_size = 256M
-innodb_log_file_size = 64M
-innodb_flush_log_at_trx_commit = 2
-max_connections = 200
-query_cache_type = 1
-query_cache_size = 32M
-table_open_cache = 400
+innodb_buffer_pool_size = 1G          # ~50-70% of RAM on a dedicated DB host
+innodb_log_file_size = 256M
+innodb_flush_log_at_trx_commit = 2    # faster, slightly less durable — fine for mail metadata
+max_connections = 300
+table_open_cache = 800
 thread_cache_size = 16
 ```
 
-- **`innodb_buffer_pool_size`** — Set this to about 50-70% of available RAM on a dedicated database server. For a shared setup, 256 MB is a good starting point.
-- **`innodb_flush_log_at_trx_commit = 2`** — Slightly less durable than the default (1), but much faster. Acceptable for a mail database where you're not tracking financial transactions.
+(Don't copy `query_cache_*` settings from old guides — the query cache was removed in MySQL 8.)
+
+Indexes are managed by the Alembic migrations — the hot lookup paths (`domains(domain, active)`, `email_accounts(email, status)`, `aliases(source, active)`, `mail_logs(timestamp, status)`, `mail_logs(sasl_username, timestamp)`, …) are already covered. Don't hand-create indexes; add a migration if profiling shows a missing one.
 
 > [!WARNING]
-> Don't set `innodb_buffer_pool_size` larger than your available RAM. If MySQL starts swapping, performance will be far worse than with a smaller buffer pool.
+> Don't set `innodb_buffer_pool_size` larger than available RAM. A swapping MySQL is far slower than a smaller buffer pool.
 
-## Redis Memory
+## Redis
 
-Redis is used by Rspamd (Bayesian statistics, greylisting data) and by the Mailyte API (rate limiting, caching).
+Redis serves Rspamd (Bayes, greylisting, fuzzy, neural), the rate limiter, Dovecot's auth policy, and several caches. The shipped service runs stock `redis` with no memory cap.
 
-### Memory Limits
+To cap and protect training data, mount a config or add command flags:
 
 ```ini
-# /etc/redis/redis.conf
-
 maxmemory 512mb
 maxmemory-policy allkeys-lru
-```
-
-- **`maxmemory`** — Hard cap on Redis memory usage. 512 MB is plenty for most setups.
-- **`allkeys-lru`** — When memory is full, evict the least recently used keys. This is safe for caching data. Rspamd's Bayesian data survives eviction because the most-used statistics are always recently accessed.
-
-### Persistence
-
-```ini
 save 900 1
 save 300 10
 save 60 10000
 ```
 
-These lines tell Redis to snapshot to disk if at least 1 key changed in the last 15 minutes, 10 keys in the last 5 minutes, or 10,000 keys in the last minute. This protects Bayesian training data from being lost on restart.
+If evictions climb (`docker exec redis redis-cli info stats | grep evicted`), raise `maxmemory` — evicting Bayes/greylist keys degrades spam filtering accuracy.
 
-> [!NOTE]
-> If Redis runs out of memory and the `maxmemory-policy` starts evicting keys, Rspamd's Bayesian accuracy will gradually decrease as training data gets cleared. Monitor Redis memory usage and increase `maxmemory` if you see evictions climbing.
+## Rspamd
 
-## Rspamd Workers
-
-Rspamd uses worker processes to handle scanning in parallel.
-
-`/etc/rspamd/local.d/worker-normal.inc`:
+The shipped worker config doesn't pin process counts (Rspamd's default is one scanner per CPU by default behavior). To pin them, add to `mailer/rspamd/config/local.d/worker-normal.inc`:
 
 ```ini
-count = 4;
+count = 4;     # scanning workers ≈ CPU cores you want on filtering
 ```
 
-`/etc/rspamd/local.d/worker-proxy.inc`:
+If your CPU supports SSE4.2, Rspamd's Hyperscan engine accelerates regex matching automatically — check `docker exec rspamd rspamd --version` for `hyperscan`.
 
-```ini
-count = 2;
-```
+## Service Replicas
 
-- **Normal workers** do the actual spam scanning. Set this to the number of CPU cores you want dedicated to spam filtering. 4 workers can handle a few hundred messages per minute.
-- **Proxy workers** accept connections from Postfix. 2 is enough unless you're processing very high volumes.
-
-### Rspamd Hyperscan
-
-If your CPU supports it, enable Hyperscan for faster regex matching:
+Stateless workers can scale horizontally with compose:
 
 ```bash
-# Check if Hyperscan is available
-docker exec mailyte-rspamd rspamd --version
-# Look for "hyperscan" in the output
+docker compose up -d --scale webhooks=2 --scale tracking=2
 ```
 
-Hyperscan compiles regex patterns into optimized machine code. It can speed up scanning by 2-5x on Intel/AMD CPUs with SSE4.2 support.
+(Production already runs some services at `replicas: 2` — check `docker-compose.prod.yml` before assuming a "duplicate" container is a bug.)
 
 ## General Recommendations by Scale
 
 | Mailboxes | Messages/Day | CPU Cores | RAM | Notes |
 |-----------|-------------|-----------|-----|-------|
 | < 100 | < 1,000 | 2 | 4 GB | Defaults work fine |
-| 100-1,000 | 1,000-10,000 | 4 | 8 GB | Increase Postfix process limit to 200 |
-| 1,000-10,000 | 10,000-100,000 | 8 | 16 GB | Tune MySQL, increase Rspamd workers to 8 |
-| 10,000+ | 100,000+ | 16+ | 32+ GB | Split services across multiple hosts |
+| 100–1,000 | 1,000–10,000 | 4 | 8 GB | Raise Postfix `default_process_limit` to 200 |
+| 1,000–10,000 | 10,000–100,000 | 8 | 16 GB | Tune MySQL buffer pool, pin Rspamd workers |
+| 10,000+ | 100,000+ | 16+ | 32+ GB | Split services across hosts; managed DB/Redis (`docker-compose.cloud.yml`) |
 
 > [!TIP]
-> Monitor first, tune second. Use Prometheus metrics (see [Monitoring Configuration](monitoring-configuration.md)) to identify actual bottlenecks before changing defaults. Random tuning often makes things worse.
+> Monitor first, tune second. Use the Prometheus metrics ([reference](../reference/prometheus-metrics.md)) and `mail_logs` to identify actual bottlenecks before changing defaults. Random tuning often makes things worse.

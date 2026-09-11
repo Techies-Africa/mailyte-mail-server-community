@@ -1,1 +1,1 @@
-# Shared utilities for Mailyte mail server
+# Shared utilities for enterprise mail server

@@ -1,7 +1,7 @@
 # Laravel API (mailyte-api) ↔ Email Server Integration Plan
 
-> **Enterprise Edition** — This feature is available in [Mailyte Enterprise](https://mailyte.com). The Community Edition does not include this functionality.
-
+!!! note "Status: historical plan — the integration is live"
+    This page is the original integration plan, kept for context. As of 2026-08-30 the integration it describes is implemented and in production: mailyte-api provisions orgs/domains/mailboxes through this server's gateway, and this server fires signed webhooks back (see `shared/webhook_dispatcher.py` for the full event catalogue — it covers far more than the handful listed below). The PHP snippets are illustrative, not the shipped code, and endpoint paths shown here may lag the live API — the [API Reference](../api/index.md) is authoritative. Note in particular that mailbox creation is `POST /api/v1/mailboxes/email-accounts`, and organization creation requires a **platform-scoped** API key.
 
 ## Overview
 
@@ -33,12 +33,12 @@ These two systems need to communicate bidirectionally:
 │  ┌─────────────────────────────────────────────────────┐ │
 │  │  EmailServerClient (HTTP client to email server)     │ │
 │  │                                                      │ │
-│  │  POST /api/v1/organizations   → create org           │ │
-│  │  POST /api/v1/domains         → provision domain     │ │
-│  │  POST /api/v1/email-accounts  → create mailbox       │ │
-│  │  POST /api/v1/aliases         → create alias         │ │
-│  │  GET  /api/v1/analytics       → fetch metrics        │ │
-│  │  GET  /api/v1/domains/{id}/verify-dns → check DNS    │ │
+│  │  POST /api/v1/organizations/           → create org  │ │
+│  │  POST /api/v1/domains/            → provision domain │ │
+│  │  POST /api/v1/mailboxes/email-accounts → mailbox     │ │
+│  │  POST /api/v1/aliases/            → create alias     │ │
+│  │  GET  /api/v1/analytics/...       → fetch metrics    │ │
+│  │  GET  /api/v1/domains/... (DNS verification)         │ │
 │  └─────────────────────────────────────────────────────┘ │
 │                         │                                  │
 │           HTTP (internal network)                          │
@@ -59,12 +59,12 @@ These two systems need to communicate bidirectionally:
 ┌──────────────────────────────────────────────────────────┐
 │              Email Server (mailyte-email-server)           │
 │                                                           │
-│  FastAPI Management API (port 8080)                       │
-│  Postfix SMTP (port 25, 587)                              │
-│  Dovecot IMAP/POP3 (port 993, 995)                       │
-│  Rspamd Anti-spam                                         │
-│  Tracking Service                                         │
-│  Webhook Dispatcher                                       │
+│  FastAPI Gateway (bind port 8080; api.<domain> in prod)   │
+│  Postfix SMTP (25, 587, 465)                              │
+│  Dovecot IMAP/POP3 (143/993, 110/995)                     │
+│  Rspamd (anti-spam + DKIM signing)                        │
+│  Tracking / log_ingestor (mail_logs producer)             │
+│  Webhook Dispatcher (signed, retried, dead-lettered)      │
 └──────────────────────────────────────────────────────────┘
 ```
 

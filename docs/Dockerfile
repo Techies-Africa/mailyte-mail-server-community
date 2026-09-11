@@ -43,6 +43,9 @@ COPY worker/               /srv/docs/worker/
 COPY stylesheets/          /srv/docs/stylesheets/
 COPY javascripts/          /srv/docs/javascripts/
 
+# Copy legacy top-level docs
+# Legacy root docs removed — all content is in organized subdirectories
+
 # Copy theme overrides and includes
 COPY overrides/ /srv/overrides/
 COPY includes/  /srv/includes/
@@ -88,7 +91,7 @@ RUN echo 'server { \n\
 # Initialize a git repo so git-revision-date plugin doesn't crash
 RUN git init /srv && git -C /srv add -A && git -C /srv -c user.name="build" -c user.email="build@mailyte.com" commit -m "docs build" --allow-empty 2>/dev/null || true
 
-# Build at startup via entrypoint
+# Build at startup (ensures all files are present after COPY)
 RUN mkdir -p /app/site
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh

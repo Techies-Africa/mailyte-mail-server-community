@@ -5,110 +5,117 @@ description: Detecting attacks against your Mailyte server — brute force, spam
 
 # Security Monitoring
 
-You can't stop what you can't see. This page covers detecting and responding to security threats against your email server.
+You can't stop what you can't see. This page covers detecting and responding to security threats against your email server — using the data sources that actually exist.
+
+## Where Security Data Lives
+
+| Signal | Source of truth | How to query |
+|--------|----------------|--------------|
+| Failed SMTP/IMAP logins | `failed_auth_attempts` table (written by the Dovecot auth-policy server) | `/api/v1/security/failed-auth` + `/summary` |
+| Auth events, key lifecycle, compliance actions | `audit_logs` table | `/api/v1/compliance/audit-log` |
+| Per-message mail flow | `mail_logs` / `delivery_events` (produced by `log_ingestor` since 2026-08-22) | `/api/v1/analytics`, message trace |
+| DLP policy hits | `dlp_violations` table | `/api/v1/security/dlp/violations` (content redacted by design) |
+| IP reputation | `ip_reputation` table | direct SQL |
+| Service/system anomalies | Monitoring service + Prometheus | see [Monitoring](../monitoring/index.md) |
+| Raw service logs | Docker stdout + `logs/<service>/` rotating files | `docker compose logs` |
+
+!!! warning "Prometheus is not the security data plane"
+    The provisioned Grafana security dashboard and the `BruteForceDetected` / `DLPViolation` alert rules query series (`auth_failures_total`, `dlp_violations_total`, `blocked_ips_total`, `geo_blocked_total`) that **no deployed service exports** — those panels and alerts are silent regardless of what's happening. Until exporters for them exist, monitor security through the tables and endpoints above.
 
 ## What to Monitor
 
 ### Authentication Events
 
-| Event | Log Source | What to look for |
-|-------|-----------|-----------------|
-| Failed SMTP logins | Dovecot auth log | Repeated failures from same IP |
-| Failed IMAP logins | Dovecot auth log | Credential stuffing patterns |
-| Failed API auth | API logs | Invalid API keys, expired keys |
-| Successful logins from unusual IPs | Dovecot, API | Geo-impossible travel |
+| Event | Where to look | What to look for |
+|-------|--------------|-----------------|
+| Failed SMTP/IMAP logins | `failed_auth_attempts` | Repeated failures from same IP; distributed failures against one account |
+| Failed API auth | API logs; per-IP limiter blocks | Invalid API keys, `429` bursts |
+| Auth successes from unusual IPs | `audit_logs`, `user_logins` | Geo-impossible travel |
 
 ### Email Flow Anomalies
 
 | Event | What it means |
 |-------|--------------|
-| Sudden spike in outbound volume | Compromised account sending spam |
+| Sudden spike in outbound volume | Compromised account or leaked SMTP credential sending spam |
 | High bounce rate | Bad list, or domain blacklisted |
-| Spike in spam score | Content filtering issue |
+| Spike in Rspamd rejects | Inbound campaign, or filtering misconfiguration |
 | Queue growing without sending | Postfix or network issue |
+| **Queue empty and nothing arriving** | Routing fault — a stale transport map once loop-bounced all inbound for 13 domains while every service reported healthy (fixed 2026-08-27) |
 
 ### System Events
 
 | Event | What it means |
 |-------|--------------|
-| Unexpected container restart | Possible exploit or OOM |
+| Unexpected container restart | Possible exploit or OOM — check `docker events` and monitoring webhook history |
 | Disk usage spike | Log bomb, large attachment, or data exfiltration |
-| Network traffic anomaly | Port scan, DDoS, or data leak |
 | Config file changes | Unauthorized access |
 
 ## Detecting Brute Force Attacks
 
-### Pattern: SMTP Brute Force
+The [auth-policy server](intrusion-detection.md) already delays and blocks automatically. To *see* what it's fighting:
 
 ```bash
-# Count failed auth attempts per IP in the last hour
-docker logs dovecot 2>&1 | grep "Password mismatch" | \
-  awk '{print $NF}' | sort | uniq -c | sort -rn | head -20
+# Hourly summary with top offender IPs
+curl -s -H "X-API-Key: $PLATFORM_KEY" \
+  "https://<api-host>/api/v1/security/failed-auth/summary?hours=24" | python3 -m json.tool
 ```
 
-If you see hundreds of failures from a single IP, it's a brute force attack. Fail2ban handles this automatically (see [Intrusion Detection](intrusion-detection.md)), but you should also alert on it.
+```sql
+-- Raw view: attempts per IP, last hour
+SELECT client_ip, service, SUM(attempt_count) AS attempts
+FROM failed_auth_attempts
+WHERE last_attempt_at >= NOW() - INTERVAL 1 HOUR
+GROUP BY client_ip, service
+ORDER BY attempts DESC LIMIT 20;
+```
 
-### Pattern: API Key Brute Force
+Log-side confirmation:
 
 ```bash
-# Count 401 responses per IP in the last hour
-docker logs api 2>&1 | grep "401" | \
-  awk '{print $1}' | sort | uniq -c | sort -rn | head -20
-```
-
-### Prometheus Alert
-
-```yaml
-- alert: BruteForceDetected
-  expr: rate(mailyte_auth_failures_total[5m]) > 10
-  for: 2m
-  labels:
-    severity: critical
-  annotations:
-    summary: "Brute force detected: {{ $value }} failures/sec on {{ $labels.service }}"
+docker compose logs dovecot --since 1h 2>&1 | grep -ci "auth failed"
 ```
 
 ## Detecting Spam Floods
 
-### Outbound Spam (Compromised Account)
+### Outbound Spam (Compromised Account or Credential)
 
-A compromised account will suddenly send thousands of emails. Watch for:
-
-```yaml
-- alert: SuspiciousOutboundVolume
-  expr: rate(mailyte_emails_sent_total[10m]) > 100  # per org
-  for: 5m
-  labels:
-    severity: warning
-  annotations:
-    summary: "Unusual outbound volume from org {{ $labels.organization_id }}: {{ $value }} emails/sec"
+```sql
+-- Top senders in the last hour, from the delivery log
+SELECT sender, COUNT(*) AS msgs
+FROM mail_logs
+WHERE created_at >= NOW() - INTERVAL 1 HOUR
+GROUP BY sender ORDER BY msgs DESC LIMIT 10;
 ```
 
 ### Quick Response
 
 ```bash
-# Find the sender
-docker exec -it postfix grep "status=sent" /var/log/postfix/maillog | \
-  awk -F'from=<' '{print $2}' | awk -F'>' '{print $1}' | sort | uniq -c | sort -rn | head -10
+# 1. Suspend the mailbox via the API
+curl -X PUT "https://<api-host>/api/v1/mailboxes/email-accounts/<account_id>" \
+  -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
+  -d '{"status": "suspended"}'
 
-# Suspend the account
-curl -X POST http://localhost:8083/api/v1/edit/mailbox \
-  -H "X-API-Key: ADMIN_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"items": ["compromised@domain.com"], "attr": {"status": "suspended"}}'
+# 2. CRITICAL: flush the Dovecot auth cache, or the account keeps
+#    authenticating for up to 1 hour (auth_cache_ttl)
+docker compose exec dovecot doveadm auth cache flush compromised@domain.com
 
-# Flush their queued messages
-docker exec -it postfix postqueue -p | grep "compromised@" | awk '{print $1}' | \
-  while read id; do docker exec -it postfix postsuper -d "$id"; done
+# 3. If it's an SMTP API-key credential, revoke it -- the API flushes the cache for you
+curl -X POST "https://<api-host>/api/v1/smtp-credentials/<id>/revoke" -H "X-API-Key: $KEY"
+
+# 4. Flush their queued messages
+docker compose exec postfix postqueue -p | awk -v s="compromised@domain.com" '$7==s {print $1}' | \
+  tr -d '*!' | while read id; do docker compose exec postfix postsuper -d "$id"; done
 ```
 
 ### Inbound Spam Flood
 
-A spike in inbound spam means Rspamd thresholds might need adjusting:
-
 ```bash
-# Check recent spam scores
-docker logs rspamd 2>&1 | grep "reject\|add header" | wc -l
+# Rspamd is scraped at rspamd:11334/metrics -- check what your version names
+# its action counters, then query them
+curl -s http://localhost:11334/metrics | grep -i action
+
+# Log-side count of rejects in the last hour
+docker compose logs rspamd --since 1h 2>&1 | grep -c "reject"
 ```
 
 ## Detecting Unauthorized Access
@@ -116,28 +123,23 @@ docker logs rspamd 2>&1 | grep "reject\|add header" | wc -l
 ### Unusual API Key Usage
 
 ```sql
--- Find keys with sudden activity spikes
-SELECT key_id, name, usage_count, last_used
+-- Recently active keys
+SELECT id, name, organization_id, last_used
 FROM api_keys
 WHERE last_used > NOW() - INTERVAL 1 HOUR
-ORDER BY usage_count DESC;
+ORDER BY last_used DESC;
 ```
 
-### Login from New Location
+!!! danger "api_keys rows are secrets"
+    The `key_id` column holds the raw credential (see [Authentication](authentication.md#api-key-authentication)). Anyone with read access to this table holds every active API key — restrict database access accordingly, and rotate keys after any suspected exposure.
 
-Track login IPs and alert on new ones:
+### Audit Trail
 
-```python
-def check_unusual_login(email: str, ip: str):
-    """Check if this IP has been used before for this account."""
-    known_ips = db.execute(
-        "SELECT DISTINCT ip_address FROM user_sessions WHERE email_account_id = "
-        "(SELECT id FROM email_accounts WHERE email = %s) AND created_at > NOW() - INTERVAL 30 DAY",
-        (email,),
-    )
-
-    if ip not in [row["ip_address"] for row in known_ips]:
-        alert(f"New login IP for {email}: {ip}")
+```bash
+# Query the audit log through the compliance API
+curl -s -H "X-API-Key: $PLATFORM_KEY" \
+  "https://<api-host>/api/v1/compliance/audit-log?event_type=auth.failed&hours=24" \
+  | python3 -m json.tool
 ```
 
 ### File Integrity
@@ -146,87 +148,64 @@ Monitor config files for unauthorized changes:
 
 ```bash
 # Create baseline hashes
-find config/ -type f -exec md5sum {} \; > /opt/mailyte/config_hashes.md5
+find mailer/*/config config/ -type f -exec sha256sum {} \; > /opt/mailyte/config_hashes.sha256
 
 # Check for changes (run via cron)
-md5sum -c /opt/mailyte/config_hashes.md5 2>&1 | grep "FAILED"
+sha256sum -c /opt/mailyte/config_hashes.sha256 2>&1 | grep -v ": OK$"
 ```
 
 ## Log Analysis
 
-### Centralized Logging
+### Log format and redaction
 
-Forward all logs to a central location for analysis:
-
-```yaml
-# docker-compose.yml - logging config
-services:
-  postfix:
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "50m"
-        max-file: "5"
-        tag: "postfix"
-```
+Service logs are pipe-delimited text (`timestamp | service | level | module:line | message`) from `shared/logging_config.py`. A redaction filter scrubs values whose keys look like `password`, `secret`, `token`, or `api_key` before any handler sees them — but treat logs as sensitive anyway.
 
 ### Useful Log Queries
 
 ```bash
 # All authentication failures in the last hour
-docker logs dovecot --since 1h 2>&1 | grep -i "auth.*fail\|password mismatch"
+docker compose logs dovecot --since 1h 2>&1 | grep -i "auth.*fail"
 
 # All rejected emails
-docker logs postfix --since 1h 2>&1 | grep "NOQUEUE: reject"
+docker compose logs postfix --since 1h 2>&1 | grep "NOQUEUE: reject"
 
 # All TLS errors
-docker logs postfix --since 1h 2>&1 | grep -i "tls.*error\|ssl.*error"
+docker compose logs postfix --since 1h 2>&1 | grep -i "tls.*error\|ssl.*error"
 
 # API errors
-docker logs api --since 1h 2>&1 | grep "ERROR\|CRITICAL"
+docker compose logs api --since 1h 2>&1 | grep "ERROR\|CRITICAL"
 
 # Rspamd rejections
-docker logs rspamd --since 1h 2>&1 | grep "reject"
+docker compose logs rspamd --since 1h 2>&1 | grep "reject"
 ```
 
-### Automated Log Monitoring
+### Container log rotation
 
-Create a script that runs every 5 minutes:
+Production caps Docker logs per container (`json-file`, `max-size: 10m`, `max-file: 3`) so a log flood cannot fill the disk through stdout alone.
+
+## Automated Watch Script
+
+A simple cron-driven check against the real data sources:
 
 ```bash
 #!/bin/bash
-# scripts/security_check.sh
+# scripts-local/security_check.sh -- run every 5 minutes via cron
 
-# Check for brute force
-FAILED_LOGINS=$(docker logs dovecot --since 5m 2>&1 | grep -c "Password mismatch")
-if [ "$FAILED_LOGINS" -gt 50 ]; then
-  echo "ALERT: $FAILED_LOGINS failed logins in 5 minutes" | \
-    curl -X POST -d @- "https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK"
+MYSQL="docker compose exec -T mysql mysql -N -u root -p${DB_ROOT_PASSWORD} mailserver -e"
+
+FAILED=$($MYSQL "SELECT COALESCE(SUM(attempt_count),0) FROM failed_auth_attempts
+                 WHERE last_attempt_at >= NOW() - INTERVAL 5 MINUTE;")
+if [ "${FAILED:-0}" -gt 50 ]; then
+  echo "ALERT: $FAILED failed logins in 5 minutes" | your-notify-command
 fi
 
-# Check for spam floods
-OUTBOUND=$(docker logs postfix --since 5m 2>&1 | grep -c "status=sent")
-if [ "$OUTBOUND" -gt 500 ]; then
-  echo "ALERT: $OUTBOUND emails sent in 5 minutes" | \
-    curl -X POST -d @- "https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK"
-fi
-
-# Check for configuration changes
-if ! md5sum -c /opt/mailyte/config_hashes.md5 &>/dev/null; then
-  echo "ALERT: Configuration files have been modified" | \
-    curl -X POST -d @- "https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK"
+OUTBOUND=$($MYSQL "SELECT COUNT(*) FROM mail_logs
+                   WHERE created_at >= NOW() - INTERVAL 5 MINUTE;")
+if [ "${OUTBOUND:-0}" -gt 500 ]; then
+  echo "ALERT: $OUTBOUND messages logged in 5 minutes" | your-notify-command
 fi
 ```
 
 ## Security Dashboard
 
-Create a Grafana dashboard with these panels:
-
-| Panel | Query | Type |
-|-------|-------|------|
-| Failed Logins (5m rate) | `rate(mailyte_auth_failures_total[5m])` | Time series |
-| Auth Success vs Failure | `mailyte_auth_failures_total` vs `mailyte_auth_successes_total` | Pie chart |
-| Rejected Emails | `rate(mailyte_emails_rejected_total[5m])` | Time series |
-| Banned IPs (Fail2ban) | `mailyte_fail2ban_banned_ips` | Stat |
-| Active Sessions by Country | `mailyte_active_sessions{country!=""}` | Geo map |
-| Spam Score Distribution | `mailyte_spam_score_bucket` | Heatmap |
+The provisioned Grafana security dashboard exists (`monitoring/grafana/dashboards/security_dashboard.json`) but most of its panels await exporters — see the warning at the top of this page. The working security view today is the **console's security screens**, backed by `/api/v1/security/*`, plus the SQL above.

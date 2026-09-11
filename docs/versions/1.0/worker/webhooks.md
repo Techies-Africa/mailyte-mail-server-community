@@ -1,7 +1,7 @@
 
 # Webhook Service
 
-The Webhook Service provides real-time event notifications for all email-related activities in the Mailyte Mail Server. It captures events from various sources and delivers them reliably to configured endpoints.
+The Webhook Service provides real-time event notifications for all email-related activities in the Enterprise Mail Server. It captures events from various sources and delivers them reliably to configured endpoints.
 
 ## Overview
 
@@ -134,7 +134,7 @@ WEBHOOK_ENABLED_EVENTS=email.smtp.inbound,email.smtp.outbound,email.imap.read
     "subject": "Important Message",
     "size": 1024,
     "headers": {
-      "X-Mailer": "Mailyte Mail Server"
+      "X-Mailer": "Enterprise Mail Server"
     }
   },
   "metadata": {

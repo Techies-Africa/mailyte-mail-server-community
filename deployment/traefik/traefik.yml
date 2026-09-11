@@ -1,0 +1,120 @@
+# =============================================================================
+# Mailyte Email Server - Traefik Static Configuration
+# =============================================================================
+#
+# This file configures Traefik as the reverse proxy / edge router for the
+# Mailyte email server production deployment.
+#
+# Features:
+#   - Automatic HTTPS via Let's Encrypt (ACME)
+#   - HTTP-to-HTTPS redirect on all traffic
+#   - Docker provider for automatic service discovery
+#   - Access logging for audit and debugging
+#   - Health check endpoint (ping)
+#   - Dashboard for monitoring
+#
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# API & Dashboard
+# -----------------------------------------------------------------------------
+api:
+  dashboard: true
+  insecure: false
+
+# -----------------------------------------------------------------------------
+# Ping - Health Check Endpoint
+# -----------------------------------------------------------------------------
+ping:
+  entryPoint: web
+
+# -----------------------------------------------------------------------------
+# Entry Points
+# -----------------------------------------------------------------------------
+entryPoints:
+  # HTTP - NOT an unconditional entrypoint-level redirect to HTTPS anymore.
+  # That would also redirect ACME HTTP-01 challenge requests (Let's
+  # Encrypt must reach /.well-known/acme-challenge/* as plain HTTP, not a
+  # redirect) -- entrypoint-level redirection applies to the whole
+  # entrypoint with no path exemption. The redirect-to-HTTPS behavior is
+  # now a router-level middleware instead (see docker-compose.prod.yml:
+  # the traefik service's own "catchall" router, low priority), and the
+  # acme_webroot service's router (high priority, no redirect middleware)
+  # wins for the challenge path specifically.
+  web:
+    address: ":80"
+
+  # HTTPS - primary entry point for all services
+  websecure:
+    address: ":443"
+
+  # Dashboard - Traefik admin UI
+  dashboard:
+    address: ":8080"
+
+# -----------------------------------------------------------------------------
+# Providers
+# -----------------------------------------------------------------------------
+providers:
+  docker:
+    endpoint: "unix:///var/run/docker.sock"
+    exposedByDefault: false
+    network: mailserver_network
+    watch: true
+
+  # cert_manager writes traefik_certs.yml here (see cert_manager.py's
+  # _update_sni_maps) -- watch: true picks up new/renewed certs live, no
+  # Traefik restart needed. filename, not directory: the mounted path
+  # (storage/sni_config) also holds postfix_sni.map/dovecot_sni.conf for
+  # the other two SNI consumers, neither of which is valid Traefik config
+  # syntax -- a directory provider would try to parse those too.
+  file:
+    filename: /etc/traefik/dynamic/traefik_certs.yml
+    watch: true
+
+# -----------------------------------------------------------------------------
+# Certificates — NOT Traefik's own built-in ACME (certResolver)
+# -----------------------------------------------------------------------------
+# Traefik's internal ACME handler unconditionally intercepts the entire
+# /.well-known/acme-challenge/ path on any entrypoint where a certResolver
+# is configured -- confirmed live, it swallowed every challenge request
+# meant for cert_manager's own certbot (used for mail domains, which need
+# real files on disk for Postfix/Dovecot, not Traefik's internal
+# acme.json) before our acme-webroot router ever saw them. Two independent
+# ACME clients can't share port 80 that way. Fix: ONE ACME client
+# (cert_manager, via the `file` provider above) issues certs for
+# everything -- both mail domains and Traefik's own admin-subdomain
+# routers (api/docs/grafana/jmap/caldav/autoconfig/dashboard) -- and
+# Traefik just reads the resulting files. See cert_manager.py's
+# process_admin_domains().
+
+# -----------------------------------------------------------------------------
+# Access Log
+# -----------------------------------------------------------------------------
+accessLog:
+  filePath: /var/log/traefik/access.log
+  format: json
+  bufferingSize: 100
+  filters:
+    statusCodes:
+      - "200-599"
+    retryAttempts: true
+    minDuration: "10ms"
+  fields:
+    defaultMode: keep
+    names:
+      ClientUsername: drop
+    headers:
+      defaultMode: drop
+      names:
+        User-Agent: keep
+        Authorization: drop
+        Content-Type: keep
+        X-Forwarded-For: keep
+
+# -----------------------------------------------------------------------------
+# General Log
+# -----------------------------------------------------------------------------
+log:
+  level: INFO
+  format: json

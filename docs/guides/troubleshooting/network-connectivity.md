@@ -7,19 +7,24 @@ description: Diagnose blocked ports, DNS resolution failures, firewall issues, a
 
 Email depends on the network more than most applications. Ports get blocked, DNS breaks, firewalls interfere, and Docker networking adds its own layer of complexity.
 
+!!! note "Where to run diagnostics"
+    The mail containers are intentionally minimal — `dig`, `nc`, `ping`, and `tcpdump` are **not installed** inside them. Run network diagnostics from the Docker host (or an external machine); for name resolution *inside* a container, use `getent hosts`, which is always present.
+
 ## Quick Connectivity Check
 
+Run on the host:
+
 ```bash
-# Check all required ports from inside the server
-for port in 25 587 465 993 995 80 443; do
+# Check all required ports are listening
+for port in 25 587 465 143 993 995 80 443; do
   ss -tlnp | grep ":$port " > /dev/null && echo "Port $port: LISTENING" || echo "Port $port: NOT LISTENING"
 done
 
-# DNS resolution
-docker exec -it postfix dig MX gmail.com +short
+# External DNS resolution
+dig MX gmail.com +short
 
-# Outbound SMTP
-docker exec -it postfix nc -zv gmail-smtp-in.l.google.com 25
+# Outbound SMTP reachability
+nc -zv gmail-smtp-in.l.google.com 25 -w 5
 ```
 
 ## Problem: Port 25 Blocked
@@ -29,7 +34,7 @@ Many cloud providers block outbound port 25 by default to prevent spam.
 ### Check If Blocked
 
 ```bash
-# Test outbound port 25
+# Test outbound port 25 from the host
 nc -zv gmail-smtp-in.l.google.com 25 -w 5
 
 # If it times out, port 25 is blocked outbound
@@ -48,10 +53,9 @@ nc -zv gmail-smtp-in.l.google.com 25 -w 5
 
 ### Workaround: Use a Relay
 
-If you can't unblock port 25, route outbound mail through a relay:
+If you can't unblock port 25, route outbound mail through a relay. These are standard Postfix settings in `mailer/postfix/config/main.cf` — note the file is baked into the image, so rebuild the postfix container after editing (`docker compose build postfix && docker compose up -d postfix`):
 
-```bash
-# config/mailer/postfix/custom/main.cf
+```
 relayhost = [smtp-relay.example.com]:587
 smtp_sasl_auth_enable = yes
 smtp_sasl_password_maps = hash:/etc/postfix/sasl_passwd
@@ -64,24 +68,20 @@ smtp_use_tls = yes
 ### Check DNS from Containers
 
 ```bash
-# Test from different containers
-docker exec -it postfix dig A gmail.com +short
-docker exec -it api dig A mysql +short
-docker exec -it dovecot nslookup mysql
+# Container-name resolution (Docker's embedded DNS at 127.0.0.11)
+docker exec api getent hosts mysql
+docker exec postfix getent hosts redis
+
+# External resolution from inside a container
+docker exec postfix getent hosts gmail.com
+
+# The container's resolver config
+docker exec postfix cat /etc/resolv.conf
 ```
-
-### Check Docker DNS
-
-```bash
-# Docker's default DNS
-docker exec -it postfix cat /etc/resolv.conf
-```
-
-Docker containers use `127.0.0.11` (Docker's embedded DNS) to resolve other container names.
 
 ### Fix: Custom DNS
 
-If external DNS resolution fails, add DNS servers to Docker:
+If external DNS resolution fails inside containers, add DNS servers to Docker:
 
 ```json
 // /etc/docker/daemon.json
@@ -96,7 +96,7 @@ Then restart Docker:
 sudo systemctl restart docker
 ```
 
-Or per-container in docker-compose.yml:
+Or per-container in docker-compose.override.yml:
 
 ```yaml
 services:
@@ -131,70 +131,67 @@ sudo ufw status verbose
 sudo ufw allow 25/tcp    # SMTP
 sudo ufw allow 587/tcp   # Submission
 sudo ufw allow 465/tcp   # SMTPS
+sudo ufw allow 143/tcp   # IMAP (STARTTLS)
 sudo ufw allow 993/tcp   # IMAPS
 sudo ufw allow 995/tcp   # POP3S
-sudo ufw allow 80/tcp    # HTTP (Let's Encrypt)
-sudo ufw allow 443/tcp   # HTTPS (API)
-
-# iptables
-sudo iptables -A INPUT -p tcp --dport 25 -j ACCEPT
-sudo iptables -A INPUT -p tcp --dport 587 -j ACCEPT
-sudo iptables -A INPUT -p tcp --dport 993 -j ACCEPT
+sudo ufw allow 4190/tcp  # ManageSieve (optional)
+sudo ufw allow 80/tcp    # HTTP (Let's Encrypt challenges, redirect)
+sudo ufw allow 443/tcp   # HTTPS (API, webmail, autoconfig — via Traefik)
 ```
 
-### Internal Ports to Block
+### Internal Ports
 
-These should NOT be accessible from the internet:
+Internal services (MySQL, Redis, Prometheus, Grafana, Qdrant, the worker HTTP ports) must not be reachable from the internet. Since 2026-08-22, `docker-compose.prod.yml` rebinds all of them to `127.0.0.1` — Traefik on 443 is the only web entry point. Verify nothing else leaks:
 
 ```bash
-# Block external access to internal services
-sudo ufw deny from any to any port 3306  # MySQL
-sudo ufw deny from any to any port 6379  # Redis
-sudo ufw deny from any to any port 9090  # Prometheus
-sudo ufw deny from any to any port 3000  # Grafana
-sudo ufw deny from any to any port 6333  # Qdrant
+# Anything listening on 0.0.0.0 beyond the mail/web ports is a problem
+sudo ss -tlnp | grep '0.0.0.0' | grep -vE ':(25|587|465|143|993|995|4190|80|443) '
 ```
+
+!!! warning "Docker bypasses ufw"
+    Docker publishes ports with its own iptables rules, **in front of** ufw. A `ufw deny 3306` does not protect a port that compose publishes on `0.0.0.0` — the fix is the loopback binding in the compose file, not a ufw rule.
 
 ## Problem: Docker Networking
 
 ### Containers Can't Talk to Each Other
 
 ```bash
-# Check that all containers are on the same network
-docker network inspect mailserver_network | grep -A3 "Containers"
+# Check that both containers are on the same network
+docker network inspect mailyte-email-server_mailserver_network | grep -A3 "Containers"
 
-# Ping between containers
-docker exec -it api ping -c 3 mysql
-docker exec -it postfix ping -c 3 redis
+# Test resolution + reachability from one container
+docker exec api getent hosts mysql
 ```
+
+(The network name is prefixed with the compose project name — `docker network ls | grep mailserver` finds the exact name on your machine.)
 
 ### Fix: Container Not on Network
 
 ```bash
-# Manually connect a container to the network
-docker network connect mailserver_network <container_name>
+docker network connect <network_name> <container_name>
 ```
 
-### DNS Resolution Between Containers
+Better: fix the service's `networks:` entry in the compose file and recreate it.
 
-Docker containers resolve each other by container name. If `api` can't reach `mysql`:
+### Reaching the Host from a Container
 
-```bash
-# Check the container name matches what's in the config
-docker ps --format "table {{.Names}}\t{{.Status}}"
+`host.docker.internal` does not resolve on a custom bridge network unless the service declares it:
 
-# Test resolution
-docker exec -it api getent hosts mysql
+```yaml
+services:
+  myservice:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 ```
 
 ### Port Conflicts
 
 ```bash
 # Check for port conflicts on the host
-sudo ss -tlnp | grep -E ":(25|587|465|993|995|80|443|3306|6379|8080-8090) "
+sudo ss -tlnp | grep -E ":(25|587|465|993|995|80|443) "
 ```
 
-If another service is using a port, either stop it or change Mailyte's port mapping in `docker-compose.yml`.
+If another service owns a port, either stop it or remap Mailyte's binding in `docker-compose.override.yml` with `ports: !override` — a plain `ports:` entry **appends** to the base file's list instead of replacing it, leaving the conflict in place.
 
 ## Problem: Outbound Email Blocked by ISP
 
@@ -211,10 +208,12 @@ If it hangs, your ISP is blocking it.
 ### Solutions
 
 1. **Use a VPS** — run Mailyte on a cloud server, not at home
-2. **Use a relay** — route through an SMTP relay service
+2. **Use a relay** — route through an SMTP relay service (see above)
 3. **Use a VPN** — tunnel traffic through a VPN that doesn't block port 25
 
 ## Network Debugging Tools
+
+All from the host:
 
 ```bash
 # Trace the route to a mail server
@@ -223,17 +222,14 @@ traceroute gmail-smtp-in.l.google.com
 # Check TCP connection
 nc -zv mail.yourdomain.com 587
 
-# Detailed TCP connection debug
-curl -v telnet://mail.yourdomain.com:587
-
-# Check if port is open externally (from another machine)
+# Check if ports are open externally (from another machine)
 nmap -p 25,587,993 mail.yourdomain.com
 
 # DNS trace
 dig +trace MX yourdomain.com
 
-# Monitor network traffic (briefly)
-docker exec -it postfix tcpdump -i any -n port 25 -c 20
+# Monitor SMTP traffic briefly
+sudo tcpdump -i any -n port 25 -c 20
 ```
 
 ## Required Ports Reference
@@ -243,8 +239,9 @@ docker exec -it postfix tcpdump -i any -n port 25 -c 20
 | 25 | TCP | SMTP | In + Out | Yes |
 | 465 | TCP | SMTPS | In | Recommended |
 | 587 | TCP | Submission | In | Yes |
+| 143 | TCP | IMAP (STARTTLS) | In | Recommended |
 | 993 | TCP | IMAPS | In | Yes |
 | 995 | TCP | POP3S | In | Optional |
 | 4190 | TCP | ManageSieve | In | Optional |
 | 80 | TCP | HTTP | In | Yes (Let's Encrypt) |
-| 443 | TCP | HTTPS | In | Yes (API) |
+| 443 | TCP | HTTPS | In | Yes (API, webmail, autoconfig) |

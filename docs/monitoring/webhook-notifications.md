@@ -1,240 +1,147 @@
 # Webhook Notifications
 
-Push alerts to Slack, Microsoft Teams, Discord, or any HTTP endpoint when something goes wrong.
+Push health events to any HTTP endpoint when something goes wrong — service failures, resource alerts, recovery actions, and periodic summaries.
 
 ## How It Works
 
-The health monitor and Alertmanager both support webhook notifications. When an alert fires or a service gets restarted, an HTTP POST is sent to your configured webhook URLs.
+The monitoring service's webhook notifier (`worker/monitoring/services/webhook_notifier.py`) POSTs an **encrypted** JSON payload to every configured endpoint whenever a health event fires. Delivery runs on a thread pool (5 workers) so a slow endpoint never blocks a health check.
 
 ```mermaid
 graph LR
-    HM[Health Monitor] -->|service restart| WH[Webhook Dispatcher]
-    AM[Alertmanager] -->|alert fired| WH
-    WH --> SL[Slack]
-    WH --> MS[Microsoft Teams]
-    WH --> DC[Discord]
-    WH --> CU[Custom Endpoint]
+    MON[Monitoring service] -->|health events| WN[Webhook notifier]
+    WN -->|encrypted POST| EP1[Endpoint 1]
+    WN -->|encrypted POST| EP2[Endpoint 2]
 ```
 
-## Webhook Payload
+This is a separate path from Alertmanager — Prometheus alerts route through Alertmanager (whose configured receiver endpoint does not exist yet, see [Alerting](alerting.md)), while the monitoring service's own probes and thresholds deliver through this notifier and do work today.
 
-Every webhook sends a JSON payload like this:
+## Event Types
+
+| Event type | Fired when | Severity |
+|-----------|-----------|----------|
+| `health.service.status_change` | A probed service changes status | derived from new status |
+| `health.system.cpu_high` / `memory_high` / `disk_high` (and `_warning` variants) | Resource thresholds breached (80/90% CPU+memory, 75/85% disk) | warning / critical |
+| `health.recovery.restart` / `health.recovery.auto_heal_all` | A restart or auto-heal ran | info on success, warning on failure |
+| `health.summary.periodic` | The 5-minute sweep found anything unhealthy | — |
+| `health.test.webhook` | `POST /test/webhooks` was called | — |
+
+## Configuring Endpoints
+
+Endpoints live in the **`webhook_urls` database table**:
+
+| Column | Meaning |
+|--------|---------|
+| `url` | Where to POST |
+| `event_types` | Comma-separated list, `*` for all, `health.*` matches everything here |
+| `active` | 1 to enable |
+| `priority` | Delivery order |
+| `timeout_seconds` | Per-endpoint timeout (default 30) |
+| `encryption_key` | Optional per-endpoint key identifier for payload encryption |
+
+If the database is unreachable, the notifier falls back to the comma-separated `HEALTH_WEBHOOK_URLS` environment variable.
+
+```sql
+INSERT INTO webhook_urls (name, url, event_types, active, priority, timeout_seconds)
+VALUES ('ops-receiver', 'https://your-app.com/api/mailyte-health', 'health.*', 1, 1, 30);
+```
+
+## The Payload Is Encrypted
+
+The wire format is **not** the plain event. The event JSON is encrypted with Fernet (key derived from `WEBHOOK_SECRET` via PBKDF2-SHA256), then wrapped:
 
 ```json
 {
-  "event": "service_unhealthy",
-  "timestamp": "2026-03-25T10:30:00Z",
+  "encrypted_payload": "base64(fernet(event_json))",
+  "timestamp": "2026-08-30T10:30:00Z",
+  "event_type": "health.service.status_change",
+  "source": "health_monitor"
+}
+```
+
+**Request headers:**
+
+| Header | Value |
+|--------|-------|
+| `X-Webhook-Signature` | `sha256=<HMAC-SHA256 of encrypted_payload, keyed with WEBHOOK_SECRET>` |
+| `X-Webhook-Source` | `health-monitor` |
+| `X-Webhook-Event` | the event type |
+| `X-Webhook-Timestamp` | ISO-8601 UTC |
+
+A receiver must share `WEBHOOK_SECRET` to verify the signature and decrypt the payload. The decrypted event looks like:
+
+```json
+{
+  "event_type": "health.service.status_change",
+  "timestamp": "2026-08-30T10:30:00Z",
+  "service": {
+    "name": "postfix",
+    "old_status": "up",
+    "new_status": "down",
+    "details": {"message": "Connection refused"}
+  },
   "severity": "critical",
-  "service": "postfix",
-  "message": "Postfix failed 3 consecutive health checks — restarting container",
-  "details": {
-    "consecutive_failures": 3,
-    "last_error": "Connection refused on port 25",
-    "action_taken": "container_restart",
-    "host": "mail.yourdomain.com"
-  }
+  "source": "health_monitor"
 }
 ```
 
-**Event types:**
-
-| Event | Severity | When It Fires |
-|-------|----------|---------------|
-| `service_unhealthy` | critical | Service failed health checks |
-| `service_restarted` | warning | Auto-healing restarted a container |
-| `service_recovered` | info | Service came back after being down |
-| `restart_failed` | critical | Auto-healing couldn't fix the service |
-| `alert_fired` | varies | Prometheus alert rule triggered |
-| `alert_resolved` | info | Alert condition cleared |
-
-## Slack
-
-### Setup
-
-1. Create a Slack app at [api.slack.com/apps](https://api.slack.com/apps)
-2. Enable **Incoming Webhooks**
-3. Add a webhook to your channel
-4. Copy the webhook URL
-
-### Alertmanager Config
-
-```yaml
-# monitoring/alertmanager/alertmanager.yml
-receivers:
-  - name: slack-alerts
-    slack_configs:
-      - api_url: "https://hooks.slack.com/services/T00/B00/xxxx"
-        channel: "#mailyte-alerts"
-        username: "Mailyte Alerts"
-        icon_emoji: ":envelope:"
-        title: '{{ .CommonAnnotations.summary }}'
-        text: >-
-          {{ range .Alerts }}
-          *{{ .Labels.severity | toUpper }}:* {{ .Annotations.summary }}
-          {{ .Annotations.description }}
-          {{ end }}
-        send_resolved: true
-```
-
-### Health Monitor Config
-
-```yaml
-# In the health monitor environment
-health-monitor:
-  environment:
-    - WEBHOOK_SLACK_URL=https://hooks.slack.com/services/T00/B00/xxxx
-    - WEBHOOK_SLACK_CHANNEL=#mailyte-alerts
-```
-
-## Microsoft Teams
-
-### Setup
-
-1. In your Teams channel, click **...** > **Connectors**
-2. Add **Incoming Webhook**
-3. Copy the webhook URL
-
-### Config
-
-```yaml
-receivers:
-  - name: teams-alerts
-    webhook_configs:
-      - url: "https://outlook.office.com/webhook/xxx/IncomingWebhook/yyy"
-        send_resolved: true
-```
-
-The health monitor formats Teams messages as adaptive cards:
-
-```json
-{
-  "@type": "MessageCard",
-  "themeColor": "FF0000",
-  "summary": "Postfix is down",
-  "sections": [{
-    "activityTitle": "Mailyte Alert: Service Down",
-    "facts": [
-      { "name": "Service", "value": "Postfix" },
-      { "name": "Status", "value": "Unhealthy" },
-      { "name": "Since", "value": "2026-03-25 10:30:00 UTC" }
-    ]
-  }]
-}
-```
-
-## Discord
-
-### Setup
-
-1. In your Discord channel, go to **Settings** > **Integrations** > **Webhooks**
-2. Create a new webhook
-3. Copy the URL
-
-### Config
-
-```yaml
-health-monitor:
-  environment:
-    - WEBHOOK_DISCORD_URL=https://discord.com/api/webhooks/xxx/yyy
-```
-
-## Custom Webhook
-
-Send alerts to any HTTP endpoint:
-
-```yaml
-health-monitor:
-  environment:
-    - WEBHOOK_CUSTOM_URL=https://your-app.com/api/alerts
-    - WEBHOOK_CUSTOM_HEADERS=Authorization:Bearer your-token,Content-Type:application/json
-```
-
-### Alertmanager Custom Webhook
-
-```yaml
-receivers:
-  - name: custom-webhook
-    webhook_configs:
-      - url: "https://your-app.com/api/alerts"
-        http_config:
-          bearer_token: "your-secret-token"
-        send_resolved: true
-        max_alerts: 10
-```
-
-## Example: Building a Simple Webhook Receiver
-
-Need to handle alerts in your own code? Here's a minimal receiver:
+## Example: Building a Receiver
 
 ```python
-from fastapi import FastAPI, Request
-import json
+import base64, hashlib, hmac, json, os
+
+from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+from fastapi import FastAPI, Header, HTTPException, Request
 
 app = FastAPI()
+SECRET = os.environ["WEBHOOK_SECRET"]
+
+kdf = PBKDF2HMAC(
+    algorithm=hashes.SHA256(), length=32, salt=b"health_monitor_salt", iterations=100000
+)
+FERNET = Fernet(base64.urlsafe_b64encode(kdf.derive(SECRET.encode())))
 
 
-@app.post("/api/alerts")
-async def receive_alert(request: Request):
-    payload = await request.json()
+@app.post("/api/mailyte-health")
+async def receive(request: Request, x_webhook_signature: str = Header("")):
+    body = await request.json()
+    encrypted = body["encrypted_payload"]
 
-    for alert in payload.get("alerts", [payload]):
-        severity = alert.get("severity", alert.get("labels", {}).get("severity", "unknown"))
-        message = alert.get("message", alert.get("annotations", {}).get("summary", "No message"))
+    expected = hmac.new(SECRET.encode(), encrypted.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(f"sha256={expected}", x_webhook_signature):
+        raise HTTPException(status_code=401, detail="bad signature")
 
-        print(f"[{severity.upper()}] {message}")
-
-        # Do something with the alert:
-        # - Log to a database
-        # - Send an SMS
-        # - Create a PagerDuty incident
-        # - Open a Jira ticket
-
+    event = json.loads(FERNET.decrypt(base64.b64decode(encrypted)))
+    print(f"[{event.get('severity', '?').upper()}] {event['event_type']}")
+    # Log to a database, page someone, open a ticket, ...
     return {"status": "received"}
 ```
 
-## Notification Throttling
+Return `200` — anything else is recorded as a failed delivery.
 
-Nobody wants 500 alerts in 5 minutes. Configure throttling:
+## Forwarding to Slack / Teams / Discord
 
-### Alertmanager Grouping
-
-```yaml
-route:
-  group_by: [alertname, severity]
-  group_wait: 30s       # Wait 30s to batch alerts in the same group
-  group_interval: 5m    # Wait 5m before sending updates for the same group
-  repeat_interval: 4h   # Don't repeat the same alert more than every 4 hours
-```
-
-### Health Monitor Throttling
-
-```yaml
-health-monitor:
-  environment:
-    - WEBHOOK_MIN_INTERVAL=300  # At least 5 min between notifications for the same service
-    - WEBHOOK_BATCH_WINDOW=30   # Batch notifications within a 30-second window
-```
+There is no built-in Slack, Teams, or Discord formatting — those integrations expect their own payload shapes and cannot consume the encrypted envelope directly. Run a small receiver like the one above that decrypts the event and re-posts a formatted message to your chat webhook.
 
 ## Testing Webhooks
 
-Verify your webhook setup works before waiting for a real incident:
-
 ```bash
-# Test Alertmanager webhook
-curl -X POST http://localhost:9093/api/v2/alerts \
-  -H "Content-Type: application/json" \
-  -d '[{
-    "labels": {"alertname": "TestAlert", "severity": "warning"},
-    "annotations": {"summary": "Test notification", "description": "Verifying webhook delivery"}
-  }]'
+# Fire a test event at every configured endpoint (needs the monitoring admin token)
+curl -X POST http://localhost:8085/test/webhooks \
+  -H "X-Admin-Token: $TOKEN"
 
-# Test health monitor webhook
-curl -X POST http://localhost:8080/admin/test-webhook
-
-# Test a raw webhook URL
-curl -X POST https://hooks.slack.com/services/T00/B00/xxxx \
-  -H "Content-Type: application/json" \
-  -d '{"text": "Test message from Mailyte"}'
+# Or through the API gateway (platform credential, operator role)
+curl -X POST https://<api-host>/api/v1/monitoring/webhooks/test \
+  -H "X-API-Key: $KEY" -H "X-Admin-Token: $TOKEN"
 ```
 
-> **Tip:** Set up a test channel first. Send all test notifications there, not to your production alerts channel. Your team will thank you.
+The response reports per-endpoint success/failure and delivery times.
+
+## Throttling and Noise Control
+
+- Health-summary webhooks only fire when something is actually unhealthy — a clean 5-minute sweep sends nothing.
+- The heartbeat endpoint sends its summary **after** responding (FastAPI background task), so callers never wait on webhook delivery.
+- Per-endpoint `timeout_seconds` caps how long a dead receiver can hold a delivery thread.
+
+> **Tip:** Set up a test endpoint first (webhook.site works for shape inspection — remember payloads are encrypted, so you'll see the envelope, not the event). Point production events at your real receiver only once signature verification works.

@@ -10,12 +10,29 @@ Thanks for wanting to contribute. Here's how we work.
 ## PR Process
 
 1. **Pick or create an issue** — check the issue tracker first
-2. **Branch off `main`** — use the naming convention below
-3. **Make your changes** — follow the coding standards
+2. **Branch off `develop`** — the default working branch; `main` is the release branch — use the naming convention below
+3. **Make your changes** — follow the [coding standards](coding-standards.md)
 4. **Write/update tests** — PRs without tests for new features will be asked to add them
 5. **Open a pull request** — fill out the template
 6. **Address review feedback** — iterate until approved
-7. **Merge** — squash merge into `main`
+7. **Merge** — squash merge into `develop`
+
+## What CI Checks
+
+Every PR runs `.github/workflows/ci.yml`. It must be green, and several gates are **ratchets** — the tracked number may only improve:
+
+| Gate | What passes |
+|------|-------------|
+| `ruff format --check .` | Zero formatting diffs |
+| `ruff check .` | Violation count ≤ `ruff-baseline.txt` (shrink the baseline when you fix violations) |
+| `scripts/run_mypy.sh \| mypy-baseline filter` | No mypy errors beyond `mypy-baseline.txt` |
+| Unit tests + coverage | Total line coverage ≥ `coverage-baseline.txt`; changed lines ≥ 60% (`diff-cover` vs `origin/develop`) |
+| OpenAPI contract | Committed `openapi.json` matches the live spec; untyped-response count ≤ `openapi-untyped-baseline.txt` |
+| Alembic migrations | `alembic upgrade head` reaches head on a fresh DB, is idempotent, and survives seeded data through downgrade/re-upgrade |
+| Compose validation | `docker compose config` passes for base + prod + dev file combinations |
+| Security scan | Bandit + pip-audit (advisory) |
+
+See [Coding Standards](coding-standards.md) for how to run the lint/type gates locally and when to update the baseline files.
 
 ## Branch Naming
 
@@ -120,6 +137,7 @@ How did you test this? What should reviewers check?
 - [ ] Docs updated (if user-facing)
 - [ ] No secrets committed
 - [ ] Migration included (if DB changes)
+- [ ] Baseline files updated if a ratchet count dropped
 ```
 
 ## Development Setup

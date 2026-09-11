@@ -30,7 +30,10 @@ This module provides a complete Dovecot configuration for secure email access wi
 
 ### Core Configuration
 - `config/dovecot.conf` - Main Dovecot configuration
-- `config/dovecot-sql.conf.ext` - MySQL authentication settings
+- `config/dovecot-sql.conf.ext` - MySQL authentication settings (mailbox passwords)
+- `config/dovecot-sql-smtp.conf.ext` - SMTP-only credential passdb (SMTP API keys), reached only via the `protocol smtp` passdb block; enforces active/expiry state and per-key `allow_nets` IP allowlists in the query itself
+- `config/master-users` - Master-user credentials (`auth_master_user_separator = *`) used by JMAP/storage-usage/API for mailbox impersonation
+- `config/sieve/` - Global Sieve scripts (smart-folder routing on `X-Email-Category`, plus the archive pipe)
 
 ## Service Architecture
 
@@ -43,6 +46,12 @@ This module provides a complete Dovecot configuration for secure email access wi
 - **POP3**: Traditional email retrieval
 - **UIDL Support**: Unique message identification
 - **TLS Encryption**: Secure connections
+
+### Other Listeners
+- **LMTP (port 24)**: local delivery from Postfix; the global Sieve pipes each delivered message to `sieve-pipe/archive-message`, which POSTs it to the archiver (this is the only point where plaintext exists on the inbound path once mail_crypt is in play)
+- **SASL auth (port 24100)**: Postfix's `smtpd_sasl_path = inet:dovecot:24100`
+- **ManageSieve (port 4190)**: remote Sieve management (also used by the API gateway's filters module)
+- **doveadm HTTP API (port 24180)**: internal network only, authenticated by `DOVEADM_API_KEY`; the API and log_ingestor flush the auth cache through it whenever a credential changes -- without that flush, `auth_cache_ttl` (1 hour) keeps revoked credentials working
 
 ### Authentication Flow
 ```
@@ -64,9 +73,10 @@ Client → Dovecot → MySQL → User Validation → Mailbox Access
 - **Message Quota**: Maximum number of messages
 
 ### Notification Thresholds
-- **Warning**: 80% quota usage
-- **Critical**: 95% quota usage
-- **Exceeded**: 100% quota usage
+Configured in `dovecot.conf` as `quota_warning` rules invoking the `quota-warning` script at:
+- **75%** quota usage
+- **80%** quota usage
+- **95%** quota usage
 
 ### Webhook Events
 ```json

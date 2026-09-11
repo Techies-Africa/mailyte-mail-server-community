@@ -1,259 +1,204 @@
 # Rspamd Configuration
 
-Spam filtering, DKIM signing, ClamAV virus scanning, greylisting, and how to train the Bayesian filter.
+Spam filtering, DKIM/ARC signing, greylisting, Bayesian training, per-organization policies, and the smart-folder classifier.
 
 ---
 
-Rspamd is the brain behind Mailyte's spam detection. It uses machine learning, blacklists, content analysis, and a bunch of other signals to score every message. It also handles DKIM signing for outgoing mail and integrates with ClamAV for virus scanning.
+Rspamd is the brain behind Mailyte's spam detection. It scores every message, signs outgoing mail with DKIM and ARC, greylists unknown senders, and tags messages with an `X-Email-Category` header for smart-folder routing. It connects to Postfix as a milter on port 11332.
 
-All Rspamd config files live under `/etc/rspamd/`. The main config structure:
+The configuration is **baked into the image** from `mailer/rspamd/config/` (`COPY config/ /etc/rspamd/`), so `local.d/` overrides live in the repo, not on the host:
 
 ```
-/etc/rspamd/
-  rspamd.conf            # Main config (usually don't touch this)
-  local.d/               # Your overrides go here
-  override.d/            # Hard overrides (rarely needed)
+mailer/rspamd/config/
+  rspamd.local.lua          # loads the custom Lua modules
+  dkim_selectors.map        # baked placeholder; rewritten at runtime by the DKIM sync (see below)
+  local.d/                  # module configs (baked)
+  local.d/lua/              # email_classifier.lua, transport_rules.lua
 ```
 
-> [!TIP]
-> Always put your changes in `/etc/rspamd/local.d/`. Files in this directory merge with the defaults. Files in `override.d/` replace entire config blocks, which can break things when Rspamd updates.
+## Workers
+
+| Worker | Bind | Purpose |
+|--------|------|---------|
+| proxy | `*:11332` (milter mode, `self_scan = yes`) | What Postfix connects to |
+| normal | `*:11333` | Scanning |
+| controller | `*:11334` | Web UI, `/metrics`, learn/stat API |
+
+> [!WARNING]
+> The controller (`worker-controller.inc`) has **no password and no `secure_ip` configured**, and port 11334 is published (bound to 127.0.0.1 in production). Anyone who can reach it can reconfigure and train the filter. Don't expose it beyond localhost/reverse-proxy with auth.
 
 ## Spam Scoring
 
-Rspamd assigns a score to every incoming message. The score determines what happens to it.
-
-`/etc/rspamd/local.d/actions.conf`:
+`local.d/actions.conf` — the global defaults:
 
 ```ini
 reject = 15;
+rewrite_subject = 10;
 add_header = 6;
 greylist = 4;
+subject = "[SPAM] %s";
 ```
 
-- **Score below 4** — Message is delivered normally.
-- **Score 4 to 6** — Message gets greylisted (delayed, then retried).
-- **Score 6 to 15** — Message is delivered but gets a spam header (`X-Spam: Yes`). The user's client or a Sieve rule can move it to Junk.
-- **Score 15 or above** — Message is rejected outright at the SMTP level.
+- **Score below 4** — delivered normally.
+- **Score 4–6** — greylisted (deferred, retried).
+- **Score 6–10** — delivered with a spam header; the global sieve script files it into Junk.
+- **Score 10–15** — subject rewritten to `[SPAM] ...`.
+- **Score 15+** — rejected at SMTP time.
 
-> [!NOTE]
-> These thresholds are a good starting point. If you're getting too many false positives, raise the `add_header` threshold. If spam is getting through, lower it. Check your logs for a week before adjusting.
+### Per-Organization Overrides
 
-## DKIM Signing
-
-Rspamd signs all outgoing mail with DKIM keys. This helps receiving servers verify that mail really came from your domain.
-
-`/etc/rspamd/local.d/dkim_signing.conf`:
-
-```ini
-allow_envfrom_empty = true;
-allow_hdrfrom_mismatch = false;
-allow_hdrfrom_multiple = false;
-allow_username_mismatch = false;
-use_domain = "header";
-use_esld = true;
-sign_authenticated = true;
-sign_local = true;
-
-domain {
-  yourdomain.com {
-    path = "/var/lib/rspamd/dkim/yourdomain.com.key";
-    selector = "mail";
-  }
-}
-```
-
-Each domain needs its own DKIM key. To generate one:
+Thresholds can differ per organization. The `settings` module reads dynamic rules from Redis (`settings.conf`: `redis { servers = "redis:6379"; } id_prefix = "rspamd_settings:";`), and `scripts/sync_rspamd_settings.py` populates them from each organization's `settings.spam_policy` JSON in MySQL:
 
 ```bash
-# Generate a 2048-bit DKIM key
-docker exec mailyte-rspamd rspamadm dkim_keygen \
-  -s mail -d yourdomain.com -b 2048 \
-  -k /var/lib/rspamd/dkim/yourdomain.com.key
-
-# This prints the DNS TXT record you need to add
+python3 scripts/sync_rspamd_settings.py --watch   # daemon mode, default 60s interval
+python3 scripts/sync_rspamd_settings.py --org <org_id>
 ```
 
-The command outputs a DNS record. Add it to your domain's DNS — see [DNS Setup](dns-setup.md) for details.
+It writes one `rspamd_settings:org_{org}_{domain}` entry per domain (actions: reject / add header / greylist / rewrite subject, optional quarantine) and maintains the per-domain sender/domain white/blacklist sets consumed by the multimap rules below. Two Redis databases are involved, matching what each rspamd module reads: the `rspamd_settings:*` keys go to **db 0** (the `settings` module's default), while the `org_sender_whitelist_*` / `org_sender_blacklist_*` / `org_domain_whitelist_*` sets go to **db 3** — the db `multimap.conf`'s `redis://redis:6379/3/...` maps read. (Before 2026-08-30 the script wrote everything to db 0, so per-org sender lists never matched at scan time.) No compose service runs it — schedule it via cron or run it by hand after changing an organization's spam policy.
+
+## DKIM and ARC Signing
+
+`local.d/dkim_signing.conf`:
+
+```ini
+enabled = true;
+path = "/var/lib/rspamd/dkim/$domain.$selector.key";
+selector = "default";
+selector_map = "/etc/rspamd/dkim_selectors.map";
+sign_authenticated = true;
+sign_local = true;
+use_esld = true;
+allow_hdrfrom_mismatch = false;
+allow_username_mismatch = false;
+try_fallback = true;
+sign_algorithm = "rsa";
+```
+
+`local.d/arc.conf` mirrors the same settings for ARC sealing.
+
+Keys live at `/var/lib/rspamd/dkim/{domain}.{selector}.key`, bind-mounted from the host's `./storage/dkim_keys`, owned by `_rspamd`. MySQL (`dkim_keys`, envelope-encrypted) is the source of truth; `worker/api/utils/dkim_sync.py` exports it to these files and the selector map — automatically on every API DKIM change (create/rotate/activate/update/delete), and on demand from the docker host:
+
+```bash
+python3 scripts/generate_dkim.py sync             # reconcile disk with MySQL (keys + selector map)
+python3 scripts/generate_dkim.py sync --prune     # also remove files for deleted/disabled domains
+python3 scripts/generate_dkim.py backfill         # mint keys for active domains that have none, then sync
+python3 scripts/generate_dkim.py dns yourdomain.com   # print the DNS record
+```
+
+The host tool works by `docker exec`: the `api` container decrypts and streams the desired state, and the files are written inside the `rspamd` container (its image has no Python and MySQL is not published on the host). Per-domain rotation is an API flow (`POST /{domain_id}/dkim/rotate` + `.../activate`), not a script flag.
+
+The default selector is `default` (DNS name `default._domainkey.<domain>`); rotated domains use timestamped selectors via the selector map. See [DNS Setup](dns-setup.md) for the record format.
+
+> [!NOTE]
+> `try_fallback = true` matters: with it set to `false`, a missing selector-map entry made Rspamd sign **nothing** (`R_DKIM_NA` on all outbound mail).
 
 > [!WARNING]
-> Keep DKIM private keys secure. They should be readable only by the Rspamd process. If a key is compromised, anyone can send email that appears to come from your domain.
+> `/etc/rspamd/dkim_selectors.map` is baked into the image layer, so recreating the rspamd container resets it to the packaged placeholder — non-default selectors then stop matching until `generate_dkim.py sync` runs again (the sync also maintains a durable copy at `/var/lib/rspamd/dkim/dkim_selectors.map`; repointing `selector_map` there and rebuilding the image makes the map survive recreates). New key files need no reload — the `path` template is resolved per message — and map edits are picked up on Rspamd's map watch interval.
 
-## ClamAV Integration
+## Antivirus (ClamAV) — Not Deployed by Default
 
-Rspamd sends attachments to ClamAV for virus scanning.
-
-`/etc/rspamd/local.d/antivirus.conf`:
+`local.d/antivirus.conf` ships **disabled**:
 
 ```ini
 clamav {
-  action = "reject";
-  type = "clamav";
+  enabled = false;
   servers = "clamav:3310";
   scan_mime_parts = true;
-  scan_text_mime = false;
-  scan_image_mime = false;
   symbol = "CLAM_VIRUS";
-  patterns {
-    JUST_EICAR = "/^Eicar-Test-Signature$/i";
-  }
+  action = "reject";
 }
 ```
 
-Key settings:
-
-- **`action = "reject"`** — Messages with viruses are rejected immediately. No quarantine, no "maybe." Viruses get bounced.
-- **`scan_mime_parts = true`** — Each MIME attachment is scanned individually.
-- **`scan_text_mime = false`** — Plain text parts aren't scanned (they can't contain executable viruses).
-- **`scan_image_mime = false`** — Images aren't scanned either, which saves CPU.
-
-> [!NOTE]
-> ClamAV needs to download its virus signature database on first start. This can take a few minutes. The `freshclam` process handles updates automatically after that.
+There is no `clamav` service in either compose file. To enable virus scanning: add a `clamav/clamav` service to `docker-compose.yml`, flip `enabled = true`, and rebuild the rspamd image. Leaving it disabled while ClamAV isn't running is deliberate — it prevents connection errors on every scan.
 
 ## Greylisting
 
-Greylisting temporarily rejects mail from unknown senders. Legitimate servers retry after a delay; most spam bots don't.
-
-`/etc/rspamd/local.d/greylist.conf`:
+`local.d/greylisting.conf`:
 
 ```ini
+enabled = true;
 servers = "redis:6379";
-expire = 86400;
 timeout = 300;
-key_prefix = "rg";
-max_data_len = 10240;
-message = "Try again later";
-whitelisted_ip = "/etc/rspamd/local.d/greylist-whitelist-ip.inc";
+expire = 86400;
+expire_whitelist = 604800;
+threshold = 1.0;
+skip_authenticated = true;
+skip_local = true;
+whitelist_symbols = ["DKIM_VALID", "DKIM_VALID_AU", "DMARC_POLICY_ALLOW", "SPF_ALLOW"];
+per_domain_whitelist = true;
+message = "Greylisted for %d seconds";
 ```
 
-- **`timeout = 300`** — Senders must wait 5 minutes before retrying. Most legitimate mail servers retry within 5-15 minutes.
-- **`expire = 86400`** — Once a sender passes greylisting, they're remembered for 24 hours.
-
-To whitelist known good senders (like Google, Microsoft, etc.), add their IP ranges to the whitelist file:
-
-```
-# /etc/rspamd/local.d/greylist-whitelist-ip.inc
-209.85.128.0/17   # Google
-40.92.0.0/15      # Microsoft
-```
+- **`timeout = 300`** — unknown senders must wait 5 minutes before retrying.
+- **`expire = 86400`** — a sender that passes is remembered for 24 hours (whitelisted entries for 7 days).
+- **Authenticated and local mail is never greylisted**, and mail that already passes DKIM/DMARC/SPF skips it too.
+- `local.d/whitelist_domains.map` pre-whitelists 34 major providers (Gmail, Outlook/Microsoft, Yahoo, iCloud, Proton, Zoho, the big ESPs, …).
 
 ## Bayesian Filtering
 
-Rspamd's Bayesian classifier learns from the mail it sees. It stores statistics in Redis.
-
-`/etc/rspamd/local.d/classifier-bayes.conf`:
+`local.d/classifier-bayes.conf`:
 
 ```ini
-servers = "redis:6379";
 backend = "redis";
-autolearn = true;
-
-autolearn {
-  spam_threshold = 12.0;
-  ham_threshold = -0.5;
-}
-
+servers = "redis:6379";
+new_schema = true;
+expire = 8640000;
+per_user = true;
+per_language = true;
 min_learns = 200;
 ```
 
-- **`autolearn = true`** — Messages with very high or very low scores automatically train the filter. High-scoring messages teach it what spam looks like; low-scoring messages teach it what good mail looks like.
-- **`min_learns = 200`** — The Bayesian filter doesn't activate until it has seen at least 200 messages total (ham + spam). Until then, it doesn't have enough data to be useful.
+The classifier doesn't act until it has seen at least 200 learned messages. Training is per-user and per-language.
 
 ### Manual Training
 
-You can manually train the filter to improve accuracy:
-
 ```bash
-# Train a message as spam
-docker exec mailyte-rspamd rspamc learn_spam < /path/to/spam-message.eml
-
-# Train a message as ham (not spam)
-docker exec mailyte-rspamd rspamc learn_ham < /path/to/good-message.eml
-
-# Check training statistics
-docker exec mailyte-rspamd rspamc stat
+docker exec -i rspamd rspamc learn_spam < /path/to/spam-message.eml
+docker exec -i rspamd rspamc learn_ham < /path/to/good-message.eml
+docker exec rspamd rspamc stat
 ```
 
-> [!TIP]
-> The more you train, the better Bayesian filtering gets. If users report spam that got through, feed those messages to `learn_spam`. If good mail ended up in Junk, feed it to `learn_ham`. Over time, the filter becomes very accurate for your specific mail patterns.
+## Other Active Modules
 
-## Other Useful Modules
+| Module | Config | Notes |
+|--------|--------|-------|
+| DMARC | `dmarc.conf` | `quarantine → add_header`, `reject → reject`, `softfail → add_header`; reporting off |
+| SPF | `spf.conf` | 2k cache, 1d expiry, `whitelist_on_authenticated = true` |
+| Fuzzy | `fuzzy_check.conf` | Local read/write fuzzy store in Redis + read-only `rspamd.com` public feed |
+| Neural | `neural.conf` | `NEURAL_SPAM` network, spam_score 8 / ham_score −2, retrains continuously |
+| Phishing | `phishing.conf` | OpenPhish + PhishTank feeds enabled |
+| URL reputation | `url_reputation.conf` | Redis-backed, 30-day expiry |
+| Milter headers | `milter_headers.conf` | Adds `Authentication-Results`, `X-Spam-Status`; strips upstream spam flags; adds `X-Email-Category` for recipients |
+| Multimap | `multimap.conf` | Per-org lists from Redis: `ORG_SENDER_WHITELIST` (−5.0), `ORG_SENDER_BLACKLIST` (+10.0), `ORG_DOMAIN_WHITELIST` (−3.0); plus `DISPOSABLE_EMAIL` (+3.0) and `FREEMAIL_FROM` (0.0) from rspamd.com maps |
 
-### Rate Limiting
+## Custom Lua Modules
 
-`/etc/rspamd/local.d/ratelimit.conf`:
+`rspamd.local.lua` loads two repo-local modules:
 
-```ini
-rates {
-  to = {
-    symbol = "RATELIMIT_CHECK";
-    bucket {
-      burst = 100;
-      rate = "1 / 1m";
-    }
-  }
-  bounce_to = {
-    symbol = "RATELIMIT_CHECK";
-    bucket {
-      burst = 10;
-      rate = "1 / 5m";
-    }
-  }
-}
-```
-
-### Phishing Detection
-
-`/etc/rspamd/local.d/phishing.conf`:
-
-```ini
-openphish_enabled = true;
-phishtank_enabled = true;
-```
-
-These modules check URLs in messages against known phishing databases.
-
-### Multimap Rules
-
-You can create custom rules that match specific patterns:
-
-`/etc/rspamd/local.d/multimap.conf`:
-
-```ini
-BLOCK_SENDER_DOMAIN {
-  type = "from";
-  filter = "email:domain";
-  map = "/etc/rspamd/local.d/blocked-domains.map";
-  score = 15.0;
-  description = "Sender domain is blocked";
-}
-```
+- **`local.d/lua/email_classifier.lua`** — assigns `X-Email-Category` ∈ {`primary`, `notifications`, `social`, `promotions`, `updates`} from sender domain/local-part heuristics. Dovecot's global sieve script routes Social/Promotions/Updates into the matching smart folders (Notifications is deliberately not auto-filed).
+- **`local.d/lua/transport_rules.lua`** — evaluates console-authored transport rules stored in Redis (`mailyte:transport_rules`). Gated by `TRANSPORT_RULES_ENABLED` (compose default `false`). `redirect`/`bcc` actions are evaluated but skipped — a milter cannot reroute a message.
 
 ## Rspamd Web UI
 
-Rspamd includes a web interface for monitoring and managing the filter. It runs on port 11334.
-
-`/etc/rspamd/local.d/worker-controller.inc`:
-
-```ini
-password = "$2$hash-of-your-password";
-enable_password = "$2$hash-of-your-admin-password";
-```
-
-Generate password hashes with:
+The controller Web UI runs on port 11334 (production binds it to `127.0.0.1`). As shipped it has **no password** — access it through an SSH tunnel:
 
 ```bash
-docker exec mailyte-rspamd rspamadm pw
+ssh -L 11334:127.0.0.1:11334 your-server
+# then open http://localhost:11334
 ```
-
-> [!WARNING]
-> Don't expose port 11334 to the public internet. Access the web UI through a reverse proxy with authentication, or over an SSH tunnel.
 
 ## Checking a Message
 
-To manually check how Rspamd would score a message:
-
 ```bash
-docker exec mailyte-rspamd rspamc < /path/to/message.eml
+docker exec -i rspamd rspamc < /path/to/message.eml
 ```
 
-This prints the score, matched rules, and what action would be taken. Useful for debugging why a specific message was flagged or missed.
+This prints the score, matched symbols, and the action that would be taken.
+
+## Testing and Reloading
+
+```bash
+docker exec rspamd rspamadm configtest    # validate config
+docker exec rspamd rspamadm configdump    # dump effective config
+docker compose restart rspamd             # apply changes (config is baked — rebuild for repo edits)
+```

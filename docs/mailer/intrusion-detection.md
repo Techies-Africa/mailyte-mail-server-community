@@ -2,6 +2,9 @@
 
 Fail2ban watches the mail server logs in real time and automatically bans IP addresses that show signs of attack -- brute-force login attempts, spam delivery, rate limit violations, and other abuse patterns. It is the bouncer at the door.
 
+!!! note "Host-side install, not a container"
+    `mailer/intrusion_detection/` is **not in any compose file** and does not run inside the postfix/dovecot containers. It is installed directly on the host by `mailer/intrusion_detection/scripts/install.sh` (run as root), which installs the fail2ban package and deploys the jail config, filters, and webhook action from this directory. Banning at the host's iptables is the point -- a container could not block traffic ahead of Docker's own published ports. Whether fail2ban is actually installed on a given host is host state; check `systemctl status fail2ban` there.
+
 ## What It Does
 
 - Monitors Postfix and Dovecot logs for attack patterns
@@ -218,12 +221,16 @@ The `fail2ban-manager.py` script provides an API for querying ban history and ma
 
 ## Configuration
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `FAIL2BAN_BANTIME` | `1800` | Default ban time in seconds |
-| `FAIL2BAN_FINDTIME` | `600` | Default detection window in seconds |
-| `FAIL2BAN_MAXRETRY` | `5` | Default max failures before ban |
-| `WEBHOOK_URLS` | (empty) | Webhook URLs for ban notifications |
+Defaults come from the `[DEFAULT]` section of `mailer/intrusion_detection/config/fail2ban.conf` (literal values, not environment variables):
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `bantime` | `1800` | Default ban time in seconds (per-jail values override) |
+| `findtime` | `600` | Default detection window in seconds |
+| `maxretry` | `5` | Default max failures before ban |
+| `destemail` / `sender` | `admin@yourdomain.com` / `fail2ban@yourdomain.com` | Ban notification mail (edit before installing) |
+
+The webhook action (`actions/webhook.conf` + `scripts/fail2ban-webhook.py`) is attached to every jail alongside `iptables-multiport`.
 
 ## Gotchas
 
@@ -231,7 +238,7 @@ The `fail2ban-manager.py` script provides an API for querying ban history and ma
     In a Docker environment, Fail2ban sees the Docker bridge IP, not the client's real IP, unless you use host networking or configure Postfix to log the `X-Forwarded-For` header. Make sure your setup preserves client IPs.
 
 !!! warning "Log Paths"
-    Fail2ban needs access to the same log files that Postfix and Dovecot write to. Make sure the log volume is shared between containers.
+    The jail config's `logpath` values (`/var/log/mail.log`, `/var/log/dovecot.log`) are the classic host locations. In this stack, Postfix and Dovecot logs are bind-mounted to `./logs/mailer/postfix/mail.log` and `./logs/mailer/dovecot/` under the project root -- point the jails at those host paths (or symlink) when installing, or fail2ban tails files nothing writes.
 
 !!! tip "Testing"
     To test a jail without waiting for real attacks, use `fail2ban-regex` to verify your filter patterns against a log file:

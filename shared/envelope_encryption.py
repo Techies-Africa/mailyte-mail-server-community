@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 CURRENT_KEY_VERSION = 1
-_NONCE_LENGTH_BYTES = 12  # standard for AES-GCM; the dkim_keys nonce column assumes this
+_NONCE_LENGTH_BYTES = 12  # standard for AES-GCM; conventions.md dkim_keys columns assume this
 
 _kek_cache: dict[int, bytes] = {}
 _kek_lock = threading.Lock()
@@ -63,13 +63,10 @@ def _load_kek(key_version: int = CURRENT_KEY_VERSION) -> bytes:
             with open(path, "rb") as f:
                 raw = f.read().strip()
         except FileNotFoundError:
-            # `from None`: the FileNotFoundError adds nothing the message
-            # below doesn't already name, and chaining it makes the traceback
-            # read as an internal error rather than a configuration one.
             raise KEKNotConfiguredError(
                 f"Encryption KEK not found at {path!r}. Run scripts/generate_dkim_kek.sh "
                 f"and mount the result before this service can encrypt or decrypt private keys."
-            ) from None
+            )
 
         # Accept either raw 32 bytes or base64-encoded 32 bytes -- the
         # generation script writes base64 (safer to eyeball / copy), a KMS
@@ -82,7 +79,7 @@ def _load_kek(key_version: int = CURRENT_KEY_VERSION) -> bytes:
             except Exception as exc:
                 raise KEKNotConfiguredError(
                     f"KEK at {path!r} is neither 32 raw bytes nor valid base64: {exc}"
-                ) from exc
+                )
             if len(key) != 32:
                 raise KEKNotConfiguredError(
                     f"KEK at {path!r} decodes to {len(key)} bytes, need exactly 32 (AES-256)."

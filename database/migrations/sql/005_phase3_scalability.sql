@@ -32,31 +32,46 @@ CREATE TABLE IF NOT EXISTS jmap_states (
 -- 3. Migration Jobs — IMAP-to-IMAP mailbox migration tracking
 -- =============================================================================
 
+-- NOTE: This definition is the single source of truth for migration_jobs and must
+-- stay in sync with the CREATE TABLE in worker/migration/app.py, which the running
+-- migration service reads and writes. Both use CREATE TABLE IF NOT EXISTS, so
+-- whichever runs first wins — they must not diverge.
 CREATE TABLE IF NOT EXISTS migration_jobs (
-    id INT AUTO_INCREMENT PRIMARY KEY,
-    job_id VARCHAR(100) NOT NULL UNIQUE,
-    org_id VARCHAR(100) NULL,
-    source_host VARCHAR(255) NULL,
-    source_port INT NULL,
-    source_user VARCHAR(255) NULL,
-    source_email VARCHAR(255) NULL,
+    job_id VARCHAR(36) PRIMARY KEY,
+    status VARCHAR(20) NOT NULL DEFAULT 'pending',
+    direction VARCHAR(10) NOT NULL DEFAULT 'import',
+    source_host VARCHAR(255) NOT NULL,
+    source_port INT NOT NULL DEFAULT 993,
+    source_ssl TINYINT(1) NOT NULL DEFAULT 1,
+    source_username VARCHAR(255) NOT NULL,
+    source_password TEXT NOT NULL,
+    target_host VARCHAR(255),
+    target_port INT DEFAULT 993,
+    target_ssl TINYINT(1) DEFAULT 1,
     target_email VARCHAR(255) NOT NULL,
-    status ENUM('pending','running','paused','completed','failed','cancelled') NOT NULL DEFAULT 'pending',
+    target_password TEXT NOT NULL,
+    org_id VARCHAR(100),
+    folder_mapping JSON,
+    exclude_folders JSON,
     total_messages INT NOT NULL DEFAULT 0,
     migrated_messages INT NOT NULL DEFAULT 0,
     failed_messages INT NOT NULL DEFAULT 0,
-    current_folder VARCHAR(255) NULL,
-    speed FLOAT DEFAULT 0 COMMENT 'Messages per second',
-    folder_mapping JSON NULL COMMENT 'Source->target folder name mapping',
-    exclude_folders JSON NULL COMMENT 'List of folders to skip',
-    last_uid JSON NULL COMMENT 'Per-folder last-synced UID for resume',
-    error_log TEXT NULL,
-    started_at TIMESTAMP NULL,
-    completed_at TIMESTAMP NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    INDEX idx_migration_status (status),
-    INDEX idx_migration_org (org_id),
-    CONSTRAINT fk_migration_org FOREIGN KEY (org_id) REFERENCES organizations(id) ON DELETE SET NULL
+    current_folder VARCHAR(255),
+    speed DOUBLE NOT NULL DEFAULT 0,
+    error_log LONGTEXT,
+    is_delta TINYINT(1) NOT NULL DEFAULT 0,
+    is_retry TINYINT(1) NOT NULL DEFAULT 0,
+    parent_job_id VARCHAR(36),
+    last_uid JSON,
+    webhook_url VARCHAR(500),
+    started_at DATETIME,
+    completed_at DATETIME,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    INDEX idx_status (status),
+    INDEX idx_org_id (org_id),
+    INDEX idx_direction (direction),
+    INDEX idx_parent (parent_job_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 -- =============================================================================
@@ -100,7 +115,7 @@ BEGIN
        AND PARTITION_NAME IS NOT NULL;
 
     -- MySQL cannot partition a table that has foreign keys (ERROR 1506).
-    -- mail_logs keeps its organization FK, so skip partitioning rather than fail.
+    -- mail_logs keeps fk_mail_logs_org, so skip partitioning rather than fail.
     SELECT COUNT(*) INTO fk_count
       FROM information_schema.TABLE_CONSTRAINTS
      WHERE TABLE_SCHEMA    = DATABASE()
@@ -141,7 +156,7 @@ BEGIN
        AND PARTITION_NAME IS NOT NULL;
 
     -- MySQL cannot partition a table that has foreign keys (ERROR 1506).
-    -- mail_queue keeps its organization FK, so skip partitioning rather than fail.
+    -- mail_queue keeps fk_mail_queue_org, so skip partitioning rather than fail.
     SELECT COUNT(*) INTO fk_count
       FROM information_schema.TABLE_CONSTRAINTS
      WHERE TABLE_SCHEMA    = DATABASE()

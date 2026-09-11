@@ -1,7 +1,9 @@
 #!/bin/bash
 ################################################################################
 # Mailyte Email Server — First User Setup
-# Creates your first organization, API key, domain, and mailbox
+# Creates your first organization, domain, mailbox, and API key via the API's
+# one-time bootstrap endpoint (POST /api/v1/bootstrap). This script no longer
+# writes to MySQL directly -- see worker/api/routes/bootstrap.py.
 ################################################################################
 
 set -e
@@ -26,12 +28,11 @@ if [ -f "$PROJECT_ROOT/.env" ]; then
     source "$PROJECT_ROOT/.env"
 fi
 
-DB_ROOT_PASS="${DB_ROOT_PASSWORD:-rootpassword}"
-DB_NAME="${DB_NAME:-mailserver}"
-DB_HOST="${DB_HOST:-mysql}"
+API_BASE="${API_BASE:-http://localhost:8083}"
 
-# Check services are running
-if ! docker compose ps --format "{{.Name}}" 2>/dev/null | grep -q "mysql"; then
+# Check the API service is up -- this script now talks only to the API,
+# never to the database directly.
+if ! docker compose ps --format "{{.Name}}" 2>/dev/null | grep -q "^api$"; then
     echo -e "  ${RED}[!!]${NC} Services are not running. Start them first:"
     echo "       ./start.sh"
     exit 1
@@ -47,21 +48,19 @@ if [ -z "$ORG_NAME" ]; then
     exit 1
 fi
 
-read -p "  Domain (e.g., yourdomain.com): " DOMAIN_NAME
-if [ -z "$DOMAIN_NAME" ]; then
-    echo -e "  ${RED}[!!]${NC} Domain is required"
+read -p "  Admin email address (e.g., admin@yourdomain.com): " EMAIL
+if [ -z "$EMAIL" ]; then
+    echo -e "  ${RED}[!!]${NC} Email address is required"
     exit 1
 fi
-
-read -p "  Email address (e.g., admin@${DOMAIN_NAME}): " EMAIL
-if [ -z "$EMAIL" ]; then
-    EMAIL="admin@${DOMAIN_NAME}"
+if [[ "$EMAIL" != *"@"*"."* ]]; then
+    echo -e "  ${RED}[!!]${NC} Email address must be in the form user@yourdomain.com"
+    exit 1
 fi
-
-read -p "  Display name (e.g., Admin): " DISPLAY_NAME
-if [ -z "$DISPLAY_NAME" ]; then
-    DISPLAY_NAME="Admin"
-fi
+# The domain is derived from the email, not asked separately -- that is the
+# only domain the bootstrap endpoint accepts, so a separately-typed domain
+# could silently mismatch the one actually created.
+DOMAIN_NAME="${EMAIL#*@}"
 
 read -sp "  Password for ${EMAIL}: " PASSWORD
 echo ""
@@ -69,62 +68,55 @@ if [ -z "$PASSWORD" ]; then
     echo -e "  ${RED}[!!]${NC} Password is required"
     exit 1
 fi
-
-LOCAL_PART="${EMAIL%%@*}"
-
-echo ""
-echo -e "  ${CYAN}Setting up...${NC}"
-
-# Create org, API key, domain, mailbox in one go
-docker exec -i mysql mysql -u root -p"${DB_ROOT_PASS}" "${DB_NAME}" <<EOSQL 2>/dev/null
-INSERT IGNORE INTO organizations (id, name, active) VALUES ('${ORG_NAME}', '${ORG_NAME}', 1);
-EOSQL
-
-if [ $? -ne 0 ]; then
-    echo -e "  ${RED}[!!]${NC} Failed to create organization. Check database credentials."
+if [ "${#PASSWORD}" -lt 8 ]; then
+    echo -e "  ${RED}[!!]${NC} Password must be at least 8 characters"
     exit 1
 fi
-echo -e "  ${GREEN}[OK]${NC} Organization: ${ORG_NAME}"
 
-# Generate API key
-API_KEY=$(python3 -c "import secrets; print(secrets.token_urlsafe(32))" 2>/dev/null || openssl rand -base64 32 | tr -dc 'a-zA-Z0-9' | head -c 32)
-API_KEY_HASH=$(python3 -c "import hashlib; print(hashlib.sha256('${API_KEY}'.encode()).hexdigest())")
+echo ""
+echo -e "  ${CYAN}Setting up via the API...${NC}"
 
-docker exec -i mysql mysql -u root -p"${DB_ROOT_PASS}" "${DB_NAME}" <<EOSQL 2>/dev/null
-INSERT INTO api_keys (key_id, key_hash, name, permissions, organization_id, active)
-VALUES ('${API_KEY}', '${API_KEY_HASH}', '${ORG_NAME}-key', '{"read": true, "write": true}', '${ORG_NAME}', 1);
-EOSQL
-echo -e "  ${GREEN}[OK]${NC} API Key: ${API_KEY}"
+# Read the single-use bootstrap token the API wrote at startup. This is the
+# only way in -- the bootstrap paradox: you need an API key to call the API,
+# but a fresh install has none yet. See worker/api/app.py's startup hook and
+# worker/api/routes/bootstrap.py. The token is refused as soon as any
+# organization exists, so this only ever works once.
+TOKEN=$(docker compose exec -T api cat /app/data/bootstrap-token 2>/dev/null | tr -d '\r\n')
 
-# Create domain
-docker exec -i mysql mysql -u root -p"${DB_ROOT_PASS}" "${DB_NAME}" <<EOSQL 2>/dev/null
-INSERT IGNORE INTO domains (organization_id, domain, active) VALUES ('${ORG_NAME}', '${DOMAIN_NAME}', 1);
-EOSQL
-echo -e "  ${GREEN}[OK]${NC} Domain: ${DOMAIN_NAME}"
-
-# Create mailbox using the API container (has bcrypt)
-DOMAIN_ID=$(docker exec -i mysql mysql -u root -p"${DB_ROOT_PASS}" "${DB_NAME}" -N -e "SELECT id FROM domains WHERE domain='${DOMAIN_NAME}' LIMIT 1" 2>/dev/null)
-
-docker exec api python3 -c "
-import bcrypt, sys
-sys.path.insert(0, '/app')
-from utils.database import get_db_connection
-pw = bcrypt.hashpw('${PASSWORD}'.encode(), bcrypt.gensalt()).decode()
-conn = get_db_connection()
-cur = conn.cursor()
-cur.execute(
-    'INSERT INTO email_accounts (email, local_part, domain_id, organization_id, password, name, status) VALUES (%s, %s, %s, %s, %s, %s, %s)',
-    ('${EMAIL}', '${LOCAL_PART}', ${DOMAIN_ID}, '${ORG_NAME}', pw, '${DISPLAY_NAME}', 'active')
-)
-conn.commit()
-print('OK')
-" 2>/dev/null
-
-if [ $? -eq 0 ]; then
-    echo -e "  ${GREEN}[OK]${NC} Mailbox: ${EMAIL}"
-else
-    echo -e "  ${YELLOW}[!!]${NC} Mailbox creation may have failed — check if it already exists"
+if [ -z "$TOKEN" ]; then
+    echo -e "  ${RED}[!!]${NC} No bootstrap token is available."
+    echo "       Either an organization already exists (already set up), or"
+    echo "       the API hasn't finished starting yet. Check: docker compose logs api"
+    exit 1
 fi
+
+RESPONSE_FILE=$(mktemp)
+HTTP_CODE=$(curl -sS -o "$RESPONSE_FILE" -w "%{http_code}" -X POST "${API_BASE}/api/v1/bootstrap/" \
+    -H "X-Bootstrap-Token: ${TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d "{\"organization_name\":\"$(printf '%s' "$ORG_NAME" | sed 's/"/\\"/g')\",\"admin_email\":\"${EMAIL}\",\"admin_password\":\"$(printf '%s' "$PASSWORD" | sed 's/"/\\"/g')\"}")
+BODY=$(cat "$RESPONSE_FILE")
+rm -f "$RESPONSE_FILE"
+
+if [ "$HTTP_CODE" != "200" ]; then
+    echo -e "  ${RED}[!!]${NC} Bootstrap failed (HTTP ${HTTP_CODE}):"
+    echo "  $BODY"
+    exit 1
+fi
+
+API_KEY=$(python3 -c "import sys, json; print(json.load(sys.stdin)['data']['api_key'])" <<< "$BODY" 2>/dev/null \
+    || echo "$BODY" | grep -o '"api_key"[[:space:]]*:[[:space:]]*"[^"]*"' | sed -E 's/.*"([^"]+)"$/\1/')
+
+if [ -z "$API_KEY" ]; then
+    echo -e "  ${RED}[!!]${NC} Bootstrap succeeded but no API key was found in the response:"
+    echo "  $BODY"
+    exit 1
+fi
+
+echo -e "  ${GREEN}[OK]${NC} Organization: ${ORG_NAME}"
+echo -e "  ${GREEN}[OK]${NC} Domain: ${DOMAIN_NAME}"
+echo -e "  ${GREEN}[OK]${NC} Mailbox: ${EMAIL}"
+echo -e "  ${GREEN}[OK]${NC} API Key: ${API_KEY}"
 
 echo ""
 echo -e "  ${CYAN}${BOLD}Setup complete!${NC}"
@@ -150,5 +142,5 @@ echo ""
 
 # Save API key to a file for convenience
 echo "${API_KEY}" > "$PROJECT_ROOT/.api-key"
-echo -e "  ${YELLOW}[i]${NC} API key saved to .api-key (add to .gitignore)"
+echo -e "  ${YELLOW}[i]${NC} API key saved to .api-key (gitignored)"
 echo ""

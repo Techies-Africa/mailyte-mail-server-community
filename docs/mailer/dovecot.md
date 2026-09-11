@@ -8,7 +8,11 @@ Dovecot is where emails live once they arrive. It stores them, serves them to ma
 - **POP3** on ports 110 (STARTTLS) and 995 (implicit TLS)
 - **LMTP** on port 24 -- receives mail from Postfix for local delivery
 - **Auth service** on port 24100 -- shared SASL authentication for Postfix
-- **ManageSieve** on port 4190 -- remote Sieve script management
+- **ManageSieve** on port 4190 -- remote Sieve script management (also used by the API gateway's filters module)
+- **doveadm HTTP API** on port 24180 -- internal network only, never published; used by the API and log ingestor to flush the auth cache when credentials change
+- **SMTP API keys** -- a dedicated `protocol smtp` passdb (`dovecot-sql-smtp.conf.ext`) authenticates SMTP-only credentials, enforcing active/expiry state and per-key IP allowlists (`allow_nets`) in the query itself
+- **Master users** -- `auth_master_user_separator = *` plus a master passdb lets JMAP, storage usage, and the API impersonate mailboxes with one service credential
+- **Inbound archiving** -- the global sieve pipes every LMTP-delivered message to the `archive-message` script, which POSTs it to the archiver
 - **Quota enforcement** with warning notifications at 75%, 80%, and 95%
 - **Smart folders** -- auto-created Notifications, Social, Promotions, Updates folders
 
@@ -229,29 +233,37 @@ dovecot:
     - "993:993"
     - "110:110"
     - "995:995"
+    - "4190:4190"
   volumes:
-    - mail_data:/var/mail/vhosts
-    - ssl_certs:/etc/ssl
-    - sieve_scripts:/etc/dovecot/sieve
+    - ./storage/mail_data:/var/mail/vhosts
+    - ./storage/ssl_certs:/etc/ssl/certs/custom
+    - ./storage/ssl_private:/etc/ssl/private/custom
+    - ./storage/sni_config:/etc/ssl/sni:ro
+    - ./logs/mailer/dovecot:/var/log/dovecot
+    - ./config/mailer/dovecot:/etc/dovecot/custom
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: ["ALL"]
+  cap_add: ["NET_BIND_SERVICE", "CHOWN", "FOWNER", "SETUID", "SETGID", "DAC_OVERRIDE", "SYS_CHROOT"]
 ```
+
+Production (`docker-compose.prod.yml`) additionally mounts `config/mailer/dovecot/local.conf` and `secrets/mail_crypt`: mail migrated from mailcow is `mail_crypt`-encrypted at rest, and without the plugin plus the source system's global keys, every FETCH fails while SEARCH still counts the messages -- mailboxes look full and read empty.
 
 ## Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DB_HOST` | `mysql` | MySQL host |
-| `DB_PORT` | `3306` | MySQL port |
-| `DB_NAME` | `mailserver` | Database name |
-| `DB_USER` | `mailuser` | Database user |
-| `DB_PASSWORD` | `mailpassword` | Database password |
-| `SSL_CERT_PATH` | `/etc/ssl/certs/server.crt` | TLS certificate |
-| `SSL_KEY_PATH` | `/etc/ssl/private/server.key` | TLS private key |
-| `MAIL_QUOTA_DEFAULT` | `5368709120` | Default quota in bytes (5 GB) |
+| `DB_HOST` / `DB_PORT` / `DB_NAME` / `DB_USER` / `DB_PASSWORD` | `mysql` / `3306` / `mailserver` / `mailuser` / -- | SQL auth and user lookups |
+| `DOVEADM_API_KEY` | (empty) | Authenticates the doveadm HTTP listener on 24180 |
+| `REDIS_HOST` / `REDIS_PORT` | `redis` / `6379` | Auth policy backend |
+| `ARCHIVE_SERVICE_URL` / `ARCHIVE_TIMEOUT` | `http://archiver:8083` / `3` | Inbound archive target for the sieve pipe |
 
 ## Gotchas
 
-!!! warning "Auth Cache Invalidation"
-    When you change a user's password via the API, the old password may still work for up to 1 hour due to `auth_cache_ttl`. If you need immediate invalidation, run `doveadm auth cache flush` inside the container.
+!!! warning "Auth cache delays revocation"
+    Successful auth results land in Dovecot's cache for up to `auth_cache_ttl` (1 hour) -- a `nocache` passdb extra field is NOT honored on Dovecot 2.3.16 (verified live). A deleted, suspended, or password-changed credential therefore keeps authenticating until the cache is flushed. Every auth-affecting mutation in the API flushes the affected username through the doveadm HTTP API (`http://dovecot:24180`); if you change credentials any other way, run `doveadm auth cache flush` yourself or the change is not enforced.
+
+!!! warning "SYS_CHROOT is not optional"
+    `imap-login` / `pop3-login` / `anvil` chroot on every start, unconditionally. Dropping `SYS_CHROOT` from `cap_add` makes every login process crash-loop and takes down all IMAP/POP3/LMTP -- silently, since no healthcheck catches it.
 
 !!! warning "Quota Calculation"
     Maildir quotas are calculated from actual file sizes on disk. If you manually move files around in `/var/mail/vhosts/`, you need to recalculate quotas with `doveadm quota recalc -A`.

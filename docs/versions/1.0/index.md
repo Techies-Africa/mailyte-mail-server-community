@@ -1,11 +1,11 @@
 
-# Mailyte Mail Server Documentation
+# Enterprise Mail Server Documentation
 
-Welcome to the comprehensive documentation for the **Mailyte Mail Server** - a robust, scalable email solution designed for modern businesses and organizations.
+Welcome to the comprehensive documentation for the **Enterprise Mail Server** - a robust, scalable email solution designed for modern businesses and organizations.
 
-## What is Mailyte Mail Server?
+## What is Enterprise Mail Server?
 
-Mailyte Mail Server is a complete email infrastructure solution that provides:
+Enterprise Mail Server is a complete email infrastructure solution that provides:
 
 - **Unlimited Domain Support** with automatic SSL management
 - **Cloud Storage Integration** for scalable mail storage
@@ -23,7 +23,7 @@ Mailyte Mail Server is a complete email infrastructure solution that provides:
 
     ---
 
-    New to Mailyte Mail Server? Start here for installation and basic configuration.
+    New to Enterprise Mail Server? Start here for installation and basic configuration.
 
     [:octicons-arrow-right-24: Installation Guide](getting-started/installation.md)
 
@@ -208,4 +208,4 @@ Ready to get started? Here are some recommended paths:
 
 ---
 
-*This documentation is maintained by the Mailyte Mail Server team and is updated with each release. Last updated: {{ git_revision_date_localized }}*
+*This documentation is maintained by the Enterprise Mail Server team and is updated with each release. Last updated: {{ git_revision_date_localized }}*

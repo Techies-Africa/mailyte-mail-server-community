@@ -17,7 +17,7 @@ This section is not meant to be read front to back. It's a reference — look up
 
     ---
 
-    Docker exec commands for Postfix, Dovecot, Rspamd, and MySQL — the commands you'll actually use day to day.
+    The management CLIs (`start.sh`, `manage.py`, `scripts/`) plus the docker exec commands for Postfix, Dovecot, Rspamd, and MySQL.
 
     [:octicons-arrow-right-24: CLI Commands](cli-commands.md)
 
@@ -25,7 +25,7 @@ This section is not meant to be read front to back. It's a reference — look up
 
     ---
 
-    Every config file across all services, with all available options documented.
+    Where every config file actually lives — baked image configs, host mounts, and generated files — with the key effective settings.
 
     [:octicons-arrow-right-24: Configuration Reference](configuration-reference.md)
 
@@ -51,16 +51,16 @@ This section is not meant to be read front to back. It's a reference — look up
 
 | Reference | What's In It | When You Need It |
 |-----------|-------------|------------------|
-| [CLI Commands](cli-commands.md) | Docker exec commands for Postfix, Dovecot, Rspamd, MySQL | Managing services from the command line |
-| [Configuration Reference](configuration-reference.md) | Every config file and its options | Customizing service behavior |
-| [Database Schema](database-schema.md) | Tables, columns, types, and relationships | Writing queries or building integrations |
-| [Log Formats](log-formats.md) | Where logs live and how to parse them | Debugging delivery or auth issues |
-| [Webhook Events](webhook-events.md) | Every event type with full payload examples | Building webhook consumers |
-| [Error Codes](error-codes.md) | API, SMTP, and Rspamd error codes with explanations | Troubleshooting failures |
+| [CLI Commands](cli-commands.md) | Management CLIs, scripts/, and docker exec commands | Managing services from the command line |
+| [Configuration Reference](configuration-reference.md) | Config file locations and key effective settings | Customizing service behavior |
+| [Database Schema](database-schema.md) | All 83 tables at the current Alembic head | Writing queries or building integrations |
+| [Log Formats](log-formats.md) | Where logs live, their formats, and the log ingestor | Debugging delivery or auth issues |
+| [Webhook Events](webhook-events.md) | The event catalogue, payloads, signing, retries | Building webhook consumers |
+| [Error Codes](error-codes.md) | API error envelope + codes, SMTP/DSN, Rspamd actions | Troubleshooting failures |
 | [Performance Metrics](performance-metrics.md) | Key metrics and their healthy ranges | Capacity planning and alerting |
-| [Prometheus Metrics](prometheus-metrics.md) | Every exposed metric with labels and types | Writing PromQL queries and dashboards |
+| [Prometheus Metrics](prometheus-metrics.md) | Every exposed metric, with the service-prefix rule | Writing PromQL queries and dashboards |
 | [API Endpoints](api-endpoints.md) | All REST endpoints in one table | Quick API lookup |
-| [Environment Variables](environment-variables.md) | Complete env var reference with defaults | Initial setup and reconfiguration |
+| [Environment Variables](environment-variables.md) | The variables code actually reads, with defaults | Initial setup and reconfiguration |
 | [Glossary](glossary.md) | Email jargon explained in plain English | Understanding the docs |
 
 !!! tip "Most common lookups"

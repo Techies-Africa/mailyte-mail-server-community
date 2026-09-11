@@ -10,7 +10,8 @@ import logging
 from datetime import datetime, timedelta
 from typing import Any
 
-from database_service import DatabaseService
+from services.database_service import DatabaseService
+from shared.ulid_utils import generate_ulid
 
 logger = logging.getLogger(__name__)
 
@@ -44,8 +45,14 @@ class SuppressionService:
             if self.is_suppressed(email, organization_id):
                 return True
 
-            # Count recent bounces
-            bounce_count = self._count_recent_bounces(email, organization_id)
+            # Count recent bounces, +1 for the current one being processed
+            # right now: the caller's own tracking-event write for this
+            # exact bounce runs asynchronously (config.async_logging) and
+            # isn't guaranteed to have landed in email_tracking yet, so a
+            # bare _count_recent_bounces() undercounts by exactly one on
+            # every call -- confirmed live: a first HARD bounce (threshold
+            # 1) never suppressed; only the second one did, one bounce late.
+            bounce_count = self._count_recent_bounces(email, organization_id) + 1
 
             should_suppress = False
             if bounce_type == "HARD":
@@ -226,9 +233,9 @@ class SuppressionService:
                 expires_at = datetime.utcnow() + timedelta(days=self.suppression_duration)
 
             query = """
-                INSERT INTO email_suppressions 
-                (email, suppression_type, reason, organization_id, expires_at, created_at, updated_at, active)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, 1)
+                INSERT INTO email_suppressions
+                (id, email, suppression_type, reason, organization_id, expires_at, created_at, updated_at, active)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 1)
                 ON DUPLICATE KEY UPDATE
                 reason = VALUES(reason),
                 updated_at = VALUES(updated_at),
@@ -236,9 +243,21 @@ class SuppressionService:
             """
 
             now = datetime.utcnow()
+            # id has no DB-side default (char(26), no auto_increment) --
+            # every insert needs an application-generated ULID, matching
+            # this table's actual primary key type.
             self.db.execute_query(
                 query,
-                (email, suppression_type, reason, organization_id, expires_at, now, now),
+                (
+                    generate_ulid(),
+                    email,
+                    suppression_type,
+                    reason,
+                    organization_id,
+                    expires_at,
+                    now,
+                    now,
+                ),
                 fetch_results=False,
             )
 

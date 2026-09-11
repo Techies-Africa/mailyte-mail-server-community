@@ -16,7 +16,6 @@ COPY worker/rate_limiter/services ./services
 COPY shared ./shared
 COPY database ./database
 
-# H1 (00-foundation/07-security-model.md): non-root runtime user.
 RUN groupadd -r mailyte && useradd -r -g mailyte -u 10001 mailyte \
  && chown -R mailyte:mailyte /app
 USER mailyte

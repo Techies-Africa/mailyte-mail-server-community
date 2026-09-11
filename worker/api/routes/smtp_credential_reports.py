@@ -18,20 +18,33 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
-
-from database.models.core import SmtpCredentialEvent
 from utils.auth import create_api_response, require_api_key
 from utils.smtp_credentials import fetch_scoped_credential
+
+from database.models.core import SmtpCredentialEvent
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-_engine = create_engine(
-    f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}"
-    f"@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}",
-    pool_pre_ping=True,
-)
-_Session = sessionmaker(bind=_engine)
+# One pooled engine for the module, created lazily on FIRST USE -- see the
+# matching comment in routes/smtp_credentials.py: an import-time
+# create_engine() with incomplete DB_* env made app.py's try/except router
+# loader silently drop this router (and its spec paths). A broken DB config
+# now fails loudly on the first request instead.
+_engine = None
+_Session = None
+
+
+def get_db_session():
+    global _engine, _Session
+    if _Session is None:
+        _engine = create_engine(
+            f"mysql+pymysql://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}"
+            f"@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}",
+            pool_pre_ping=True,
+        )
+        _Session = sessionmaker(bind=_engine)
+    return _Session()
 
 
 @router.get(
@@ -41,7 +54,7 @@ _Session = sessionmaker(bind=_engine)
 )
 @require_api_key("read")
 async def list_smtp_credential_events(credential_id: str, request: Request):
-    session = _Session()
+    session = get_db_session()
     try:
         credential = fetch_scoped_credential(session, request, credential_id)
         if not credential:
@@ -80,7 +93,7 @@ async def list_smtp_credential_events(credential_id: str, request: Request):
 )
 @require_api_key("read")
 async def smtp_credential_usage(credential_id: str, request: Request):
-    session = _Session()
+    session = get_db_session()
     try:
         credential = fetch_scoped_credential(session, request, credential_id)
         if not credential:

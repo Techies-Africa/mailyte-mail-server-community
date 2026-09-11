@@ -1,17 +1,31 @@
 # Prometheus Setup
 
-> **Enterprise Edition** — This feature is available in [Mailyte Enterprise](https://mailyte.com). The Community Edition does not include this functionality.
-
-
-Complete prometheus.yml configuration, scrape intervals, targets for each service, and retention settings.
+The shipped prometheus.yml, how it's mounted, retention, and the known target corrections.
 
 ---
 
-Prometheus collects metrics from all Mailyte components. This page walks through the full configuration file and explains each section.
+Prometheus (`prom/prometheus:v2.51.0`) collects metrics from every worker service and the infrastructure exporters. The active configuration is `monitoring/prometheus/prometheus.yml`, mounted read-only into the container together with the rules directory:
 
-## prometheus.yml — Full Configuration
+```yaml
+# docker-compose.yml (shipped)
+prometheus:
+  image: prom/prometheus:v2.51.0
+  volumes:
+    - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    - ./monitoring/prometheus/rules:/etc/prometheus/rules:ro
+    - prometheus_data:/prometheus
+  command:
+    - '--config.file=/etc/prometheus/prometheus.yml'
+    - '--storage.tsdb.path=/prometheus'
+    - '--storage.tsdb.retention.time=30d'
+    - '--web.console.libraries=/etc/prometheus/console_libraries'
+    - '--web.console.templates=/etc/prometheus/consoles'
+    - '--web.enable-lifecycle'
+  ports:
+    - "9090:9090"        # production binds 127.0.0.1:9090
+```
 
-Here's the complete Prometheus config used by Mailyte. It lives at `/etc/prometheus/prometheus.yml` inside the Prometheus container.
+## prometheus.yml — As Shipped
 
 ```yaml
 global:
@@ -19,311 +33,127 @@ global:
   evaluation_interval: 15s
   scrape_timeout: 10s
 
-  external_labels:
-    environment: 'production'
-    cluster: 'mailyte'
-
 rule_files:
-  - '/etc/prometheus/rules/*.yml'
+  - "/etc/prometheus/rules/*.yml"
 
 alerting:
   alertmanagers:
     - static_configs:
-        - targets:
-            - 'alertmanager:9093'
+        - targets: ['alertmanager:9093']
 
 scrape_configs:
-  # -----------------------------------------------
-  # Prometheus self-monitoring
-  # -----------------------------------------------
   - job_name: 'prometheus'
-    scrape_interval: 30s
-    static_configs:
-      - targets: ['localhost:9090']
+    static_configs: [{ targets: ['localhost:9090'] }]
 
-  # -----------------------------------------------
-  # Postfix metrics (via postfix_exporter sidecar)
-  # -----------------------------------------------
-  - job_name: 'postfix'
-    scrape_interval: 15s
-    static_configs:
-      - targets: ['postfix-exporter:9154']
-        labels:
-          service: 'smtp'
+  # Mail services
+  # (postfix-exporter/dovecot-exporter jobs are commented out in the real file
+  # since 2026-08-30 — neither exporter exists in any compose file; the rspamd
+  # job followed on 2026-08-31 — this build's controller serves no /metrics)
 
-  # -----------------------------------------------
-  # Dovecot metrics (via dovecot_exporter sidecar)
-  # -----------------------------------------------
-  - job_name: 'dovecot'
-    scrape_interval: 15s
-    static_configs:
-      - targets: ['dovecot-exporter:9166']
-        labels:
-          service: 'imap'
-
-  # -----------------------------------------------
-  # Rspamd metrics (native endpoint)
-  # -----------------------------------------------
-  - job_name: 'rspamd'
-    scrape_interval: 15s
+  # Worker services — targets use internal container ports
+  - job_name: 'api'
     metrics_path: /metrics
-    static_configs:
-      - targets: ['rspamd:11334']
-        labels:
-          service: 'antispam'
+    static_configs: [{ targets: ['api:8080'] }]
+  - job_name: 'webhooks'
+    static_configs: [{ targets: ['webhooks:8081'] }]
+  - job_name: 'rate_limiter'
+    static_configs: [{ targets: ['rate_limiter:8082'] }]
+  - job_name: 'monitoring'
+    static_configs: [{ targets: ['monitoring:8085'] }]
+  - job_name: 'tracking'
+    static_configs: [{ targets: ['tracking:8086'] }]
+  - job_name: 'analytics'
+    static_configs: [{ targets: ['analytics:8085'] }]          # container port (host-mapped to 8087)
+  - job_name: 'dashboard'
+    static_configs: [{ targets: ['dashboard:8088'] }]
+  - job_name: 'archiver'
+    static_configs: [{ targets: ['archiver:8083'] }]
+  - job_name: 'encryption'
+    static_configs: [{ targets: ['encryption:8084'] }]
+  - job_name: 'queue_manager'
+    static_configs: [{ targets: ['queue_manager:8090'] }]
+  - job_name: 'rag'
+    static_configs: [{ targets: ['rag:8090'] }]                # container port (host-mapped to 8091)
+  - job_name: 'storage_usage'
+    static_configs: [{ targets: ['storage_usage:8092'] }]
+  - job_name: 'delivery_optimizer'
+    static_configs: [{ targets: ['delivery_optimizer:8088'] }]
+  - job_name: 'jmap'
+    static_configs: [{ targets: ['jmap:8098'] }]
+  - job_name: 'migration'
+    static_configs: [{ targets: ['migration:8099'] }]
+  - job_name: 'autoconfig'
+    static_configs: [{ targets: ['autoconfig:8100'] }]
+  - job_name: 'caldav'
+    static_configs: [{ targets: ['caldav:8101'] }]
+  - job_name: 'templates'
+    static_configs: [{ targets: ['templates:8089'] }]
+  - job_name: 'url_protection'
+    static_configs: [{ targets: ['url_protection:8090'] }]
+  - job_name: 'oauth'
+    static_configs: [{ targets: ['oauth:8091'] }]
 
-  # -----------------------------------------------
-  # Mailyte FastAPI (native Prometheus middleware)
-  # -----------------------------------------------
-  - job_name: 'mailyte-api'
-    scrape_interval: 10s
-    metrics_path: /metrics
-    static_configs:
-      - targets: ['api:5000']
-        labels:
-          service: 'api'
-
-  # -----------------------------------------------
-  # MySQL metrics (via mysqld_exporter)
-  # -----------------------------------------------
+  # Infrastructure exporters
   - job_name: 'mysql'
-    scrape_interval: 30s
-    static_configs:
-      - targets: ['mysql-exporter:9104']
-        labels:
-          service: 'database'
-
-  # -----------------------------------------------
-  # Redis metrics (via redis_exporter)
-  # -----------------------------------------------
+    static_configs: [{ targets: ['mysql-exporter:9104'] }]
   - job_name: 'redis'
-    scrape_interval: 15s
-    static_configs:
-      - targets: ['redis-exporter:9121']
-        labels:
-          service: 'cache'
-
-  # -----------------------------------------------
-  # ClamAV metrics (via clamav_exporter)
-  # -----------------------------------------------
-  - job_name: 'clamav'
-    scrape_interval: 60s
-    static_configs:
-      - targets: ['clamav-exporter:9810']
-        labels:
-          service: 'antivirus'
-
-  # -----------------------------------------------
-  # Node exporter (host-level metrics)
-  # -----------------------------------------------
-  - job_name: 'node'
-    scrape_interval: 30s
-    static_configs:
-      - targets: ['node-exporter:9100']
-        labels:
-          service: 'host'
+    static_configs: [{ targets: ['redis-exporter:9121'] }]
 ```
 
-## Scrape Intervals Explained
+(A `kafka-exporter:9308` job is present but commented out — no kafka-exporter service exists yet.)
 
-Different services get different scrape intervals based on how quickly their metrics change and how resource-intensive scraping is.
+> [!WARNING]
+> Targets must use **container** ports, not host-published ports — the service-to-service hop inside the compose network never crosses the host port mapping. Two jobs originally got this wrong (`analytics` targeted 8087 instead of 8085, `rag` targeted 8091 instead of 8090) and scraped nothing; both were fixed, the dead `postfix`/`dovecot` exporter jobs commented out, and the missing `templates`/`url_protection`/`oauth` jobs added on 2026-08-30.
 
-| Job | Interval | Why |
-|-----|----------|-----|
-| `prometheus` | 30s | Self-monitoring doesn't need to be frequent |
-| `postfix` | 15s | Queue sizes can change rapidly during delivery spikes |
-| `dovecot` | 15s | Connection counts fluctuate with user activity |
-| `rspamd` | 15s | Spam patterns can shift quickly |
-| `mailyte-api` | 10s | API latency and errors need fast detection |
-| `mysql` | 30s | Database metrics are relatively stable |
-| `redis` | 15s | Memory and command rates are useful to track closely |
-| `clamav` | 60s | Signature updates and scan rates don't change fast |
-| `node` | 30s | CPU, memory, and disk change slowly |
+## Retention
 
-> [!TIP]
-> Don't set scrape intervals below 10 seconds unless you have a specific reason. More frequent scraping means more storage, more CPU, and more network traffic — with diminishing returns for most metrics.
+Retention is fixed by the compose command flag: `--storage.tsdb.retention.time=30d` (there is no env var for it). To change it, edit the `command:` list; you can also add `--storage.tsdb.retention.size=10GB` — whichever limit is hit first triggers cleanup.
 
-## Retention Settings
+Rough sizing for this stack's metric volume: ~2 GB for 30 days at the shipped 15 s interval. For longer horizons use remote write (Thanos/Mimir) rather than growing local retention.
 
-Prometheus stores metric data locally. Configure how long to keep it.
+## Exporters
 
-### Time-Based Retention
-
-Add this to your Prometheus startup command (in `docker-compose.yml`):
-
-```yaml
-services:
-  prometheus:
-    image: prom/prometheus:latest
-    command:
-      - '--config.file=/etc/prometheus/prometheus.yml'
-      - '--storage.tsdb.path=/prometheus'
-      - '--storage.tsdb.retention.time=30d'
-      - '--web.enable-lifecycle'
-    volumes:
-      - prometheus-data:/prometheus
-      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - ./prometheus/rules:/etc/prometheus/rules:ro
-    ports:
-      - '9090:9090'
-```
-
-`--storage.tsdb.retention.time=30d` keeps 30 days of metrics. Adjust based on your disk space and how far back you need to look.
-
-### Size-Based Retention
-
-You can also cap storage by size:
-
-```yaml
-command:
-  - '--storage.tsdb.retention.time=30d'
-  - '--storage.tsdb.retention.size=10GB'
-```
-
-When both are set, whichever limit is hit first triggers cleanup.
-
-### How Much Disk Space Do You Need?
-
-A rough estimate for Mailyte's full metric set:
-
-| Retention | Estimated Storage |
-|-----------|------------------|
-| 7 days | ~500 MB |
-| 30 days | ~2 GB |
-| 90 days | ~6 GB |
-| 365 days | ~20 GB |
-
-These estimates assume default scrape intervals and a moderate-traffic server. High-cardinality labels (like per-recipient metrics) can increase storage significantly.
-
-> [!NOTE]
-> For long-term storage (months to years), consider using a remote write backend like Thanos, Cortex, or Grafana Mimir. Prometheus local storage is designed for weeks, not years.
-
-## Exporter Configuration
-
-### postfix_exporter
-
-The Postfix exporter reads Postfix log files and exposes metrics.
-
-```yaml
-# docker-compose.yml
-postfix-exporter:
-  image: kumina/postfix-exporter:latest
-  command:
-    - '--postfix.logfile_path=/var/log/mail.log'
-    - '--postfix.showq_path=/var/spool/postfix/public/showq'
-  volumes:
-    - postfix-logs:/var/log:ro
-    - postfix-spool:/var/spool/postfix:ro
-  ports:
-    - '9154:9154'
-```
-
-### dovecot_exporter
-
-The Dovecot exporter connects to Dovecot's stats socket.
-
-```yaml
-dovecot-exporter:
-  image: kumina/dovecot-exporter:latest
-  command:
-    - '--dovecot.socket_path=/var/run/dovecot/stats'
-  volumes:
-    - dovecot-run:/var/run/dovecot:ro
-  ports:
-    - '9166:9166'
-```
-
-### mysqld_exporter
+Only two ship:
 
 ```yaml
 mysql-exporter:
-  image: prom/mysqld-exporter:latest
+  image: prom/mysqld-exporter:v0.15.1
   environment:
-    DATA_SOURCE_NAME: "exporter:exporter-password@(mysql:3306)/mailserver"
-  ports:
-    - '9104:9104'
-```
+    - MYSQLD_EXPORTER_PASSWORD=${DB_PASSWORD}
+  command:
+    - '--mysqld.address=mysql:3306'
+    - '--mysqld.username=${DB_USER:-mailuser}'
+    - '--no-collect.slave_status'   # no replica; the app user lacks REPLICATION CLIENT
 
-> [!WARNING]
-> Create a dedicated MySQL user for the exporter with read-only permissions:
-> ```sql
-> CREATE USER 'exporter'@'%' IDENTIFIED BY 'exporter-password';
-> GRANT PROCESS, REPLICATION CLIENT, SELECT ON *.* TO 'exporter'@'%';
-> ```
-
-### redis_exporter
-
-```yaml
 redis-exporter:
-  image: oliver006/redis_exporter:latest
+  image: oliver006/redis_exporter:v1.58.0
   environment:
-    REDIS_ADDR: "redis://redis:6379"
-  ports:
-    - '9121:9121'
+    - REDIS_ADDR=redis://redis:6379
 ```
 
-## Recording Rules
-
-Recording rules pre-compute frequently used queries so dashboards load faster.
-
-Create `/etc/prometheus/rules/recording.yml`:
-
-```yaml
-groups:
-  - name: mailyte-recording
-    interval: 30s
-    rules:
-      - record: mailyte:postfix_delivery_rate_5m
-        expr: rate(postfix_delivery_total[5m])
-
-      - record: mailyte:postfix_bounce_rate_5m
-        expr: rate(postfix_bounce_total[5m])
-
-      - record: mailyte:rspamd_spam_ratio_1h
-        expr: >
-          rate(rspamd_actions_total{action=~"reject|add header"}[1h])
-          /
-          rate(rspamd_scanned_total[1h])
-
-      - record: mailyte:api_error_rate_5m
-        expr: >
-          rate(http_requests_total{job="mailyte-api", status=~"5.."}[5m])
-          /
-          rate(http_requests_total{job="mailyte-api"}[5m])
-
-      - record: mailyte:dovecot_connections_by_protocol
-        expr: sum by (protocol) (dovecot_active_connections)
-```
+If you add postfix/dovecot/node exporters, give them the service names the commented-out scrape jobs in `prometheus.yml` already expect (`postfix-exporter`, `dovecot-exporter`), uncomment those jobs, and add a `node` job — then restore the matching commented-out rules in `rules/mail_alerts.yml`.
 
 ## Reloading Configuration
 
-Prometheus supports hot-reloading if you started it with `--web.enable-lifecycle`:
+`--web.enable-lifecycle` is set, so a hot reload works after config edits:
 
 ```bash
-# Reload via API
-curl -X POST http://localhost:9090/-/reload
-
-# Or send SIGHUP to the process
-docker exec mailyte-prometheus kill -HUP 1
+curl -X POST http://localhost:9090/-/reload    # dev; use 127.0.0.1 on the prod host
+# or
+docker compose restart prometheus
 ```
 
-> [!TIP]
-> Always validate your config before reloading:
-> ```bash
-> docker exec mailyte-prometheus promtool check config /etc/prometheus/prometheus.yml
-> docker exec mailyte-prometheus promtool check rules /etc/prometheus/rules/recording.yml
-> ```
-> A bad config file will prevent Prometheus from reloading and may cause it to fail on next restart.
+Validate before reloading:
+
+```bash
+docker exec prometheus promtool check config /etc/prometheus/prometheus.yml
+docker exec prometheus promtool check rules /etc/prometheus/rules/mail_alerts.yml /etc/prometheus/rules/backup_alerts.yml
+```
 
 ## Verifying Targets
 
-After configuring everything, check that all targets are being scraped successfully:
+1. Open the Prometheus UI — `http://localhost:9090` in development, `ssh -L 9090:127.0.0.1:9090` in production (the port is loopback-bound there).
+2. **Status → Targets** — every worker job should be UP.
+3. Expect `postfix` and `dovecot` DOWN (no exporters), and `analytics`/`rag` DOWN until the port fix above is applied.
 
-1. Open the Prometheus web UI at `http://your-server:9090`.
-2. Go to **Status > Targets**.
-3. Every target should show state **UP** with a recent last scrape time.
-
-If a target shows **DOWN**, check:
-- Is the exporter container running? (`docker ps`)
-- Can Prometheus reach the exporter? (network connectivity within Docker)
-- Is the exporter throwing errors? (`docker logs exporter-name`)
+If a worker target is DOWN: is the container running (`docker compose ps`)? Does `docker exec prometheus wget -qO- http://<service>:<port>/metrics` work from inside the network? Remember metric names come back prefixed with the service name — see [Prometheus Metrics](../reference/prometheus-metrics.md).

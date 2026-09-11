@@ -20,7 +20,6 @@ from urllib.parse import unquote
 
 from fastapi import APIRouter, Query, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
-from services.rate_limiter import RateLimitExceeded
 
 # Ensure project root is on sys.path for shared imports
 _project_root = Path(__file__).parent.parent.parent.parent
@@ -50,10 +49,13 @@ async def track_open(tracking_id: str, request: Request):
         Response: 1x1 transparent PNG pixel
     """
     try:
-        # Rate limiting check
-        try:
-            request.app.rate_limiter.check_rate_limit(request.client.host, "open")
-        except RateLimitExceeded:
+        # Rate limiting check. check_rate_limit()/RateLimitExceeded don't
+        # exist on the real RateLimiter -- it's is_rate_limited(ip) -> bool,
+        # never a raised exception -- so this always threw AttributeError,
+        # caught by the outer try below, which skipped straight to serving
+        # the pixel without ever reaching the tracking_data decode/log below
+        # it. Every real open silently never got logged.
+        if request.app.rate_limiter.is_rate_limited(request.client.host):
             logger.warning(f"Rate limit exceeded for IP {request.client.host}")
             # Still serve pixel but don't log the event
             return _serve_tracking_pixel()
@@ -86,7 +88,16 @@ async def track_open(tracking_id: str, request: Request):
                 Events.TRACKING_OPEN,
                 data={
                     "email_id": tracking_data.get("email_id"),
+                    # Bare ULID for exact correlation (campaign_recipients
+                    # stores it without the @mailyte.local suffix).
+                    "message_id": (tracking_data.get("email_id") or "").split("@", 1)[0] or None,
                     "recipient": tracking_data.get("recipient"),
+                    # Without this the Laravel intake could not attribute the
+                    # event to a tenant (external recipients resolve nothing),
+                    # so every tracking event landed with organization_id NULL
+                    # -- invisible to email logs, deliverability, and campaign
+                    # stats (found live 2026-09-08).
+                    "organization_id": tracking_data.get("tenant_id"),
                     "ip_address": request.client.host,
                     "user_agent": request.headers.get("User-Agent", ""),
                 },
@@ -117,10 +128,8 @@ async def track_click(tracking_id: str, request: Request, url: str = Query(defau
         Response: HTTP redirect to original URL
     """
     try:
-        # Rate limiting check
-        try:
-            request.app.rate_limiter.check_rate_limit(request.client.host, "click")
-        except RateLimitExceeded:
+        # Rate limiting check (see track_open's comment -- same bug, same fix)
+        if request.app.rate_limiter.is_rate_limited(request.client.host):
             logger.warning(f"Rate limit exceeded for IP {request.client.host}")
             # Still redirect but don't log the event
             if url:
@@ -171,7 +180,10 @@ async def track_click(tracking_id: str, request: Request, url: str = Query(defau
                 Events.TRACKING_CLICK,
                 data={
                     "email_id": tracking_data.get("email_id"),
+                    "message_id": (tracking_data.get("email_id") or "").split("@", 1)[0] or None,
                     "recipient": tracking_data.get("recipient"),
+                    # Tenant attribution -- see the open dispatch above.
+                    "organization_id": tracking_data.get("tenant_id"),
                     "url": original_url,
                     "ip_address": request.client.host,
                     "user_agent": request.headers.get("User-Agent", ""),
@@ -221,18 +233,30 @@ async def track_bounce(request: Request):
         # Extract tracking information if available
         tracking_info = data.get("tracking_info", {})
 
-        # Create bounce event data
-        bounce_event = {
+        # log_bounce_event() doesn't exist on DatabaseService and never has
+        # -- every real bounce webhook 500'd before reaching suppression at
+        # all. log_tracking_event() is the real method (same one
+        # track_complaint uses below); it needs email_id/tenant_id/domain_id
+        # in tracking_data and a timestamp in request_info, neither of which
+        # bounce_event/tracking_info reliably carries, so both are built
+        # with safe fallbacks rather than assumed present.
+        tracking_data = {
+            "email_id": tracking_info.get("email_id", data["recipient"]),
             "recipient": data["recipient"],
-            "event_type": "BOUNCED",
-            "bounce_type": data["bounce_type"],
-            "bounce_reason": data["bounce_reason"],
-            "timestamp": datetime.utcnow(),
-            "additional_data": tracking_info,
+            "tenant_id": tracking_info.get("organization_id", "default"),
+            "domain_id": tracking_info.get("domain_id"),
         }
+        request_info = {"timestamp": datetime.utcnow()}
 
-        # Log bounce event
-        success = request.app.database_service.log_bounce_event(bounce_event)
+        success = request.app.database_service.log_tracking_event(
+            "bounced",
+            tracking_data,
+            request_info,
+            additional_data={
+                "bounce_type": data["bounce_type"],
+                "bounce_reason": data["bounce_reason"],
+            },
+        )
 
         if success:
             # Add to suppression list if needed
@@ -250,6 +274,7 @@ async def track_bounce(request: Request):
                     "recipient": data["recipient"],
                     "bounce_type": data["bounce_type"],
                     "bounce_reason": data["bounce_reason"],
+                    "organization_id": tracking_info.get("organization_id"),
                 },
                 source_service="tracking",
             )
@@ -272,16 +297,27 @@ async def track_complaint(request: Request):
         if not data or "recipient" not in data:
             return JSONResponse({"error": "Missing recipient"}, status_code=400)
 
-        # Log complaint event
-        complaint_event = {
+        # Same shape requirement as track_bounce above: tracking_data needs
+        # email_id/tenant_id/domain_id and request_info needs a timestamp,
+        # or _log_tracking_event_sync KeyErrors on the first one it reads
+        # (confirmed live: a real complaint webhook 500'd on 'email_id').
+        tracking_data = {
+            "email_id": data.get("email_id", data["recipient"]),
             "recipient": data["recipient"],
-            "event_type": "COMPLAINED",
-            "complaint_type": data.get("complaint_type", "spam"),
-            "timestamp": datetime.utcnow(),
-            "additional_data": data.get("additional_data", {}),
+            "tenant_id": data.get("organization_id", "default"),
+            "domain_id": data.get("domain_id"),
         }
+        request_info = {"timestamp": datetime.utcnow()}
 
-        success = request.app.database_service.log_tracking_event("complained", complaint_event, {})
+        success = request.app.database_service.log_tracking_event(
+            "complained",
+            tracking_data,
+            request_info,
+            additional_data={
+                "complaint_type": data.get("complaint_type", "spam"),
+                **data.get("additional_data", {}),
+            },
+        )
 
         if success:
             # Add to suppression list
@@ -297,6 +333,7 @@ async def track_complaint(request: Request):
                 data={
                     "recipient": data["recipient"],
                     "complaint_type": data.get("complaint_type", "spam"),
+                    "organization_id": data.get("organization_id"),
                 },
                 source_service="tracking",
             )

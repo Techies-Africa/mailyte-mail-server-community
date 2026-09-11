@@ -1,6 +1,6 @@
 # Worker Services
 
-The Mailyte Mail Server's worker services provide the core processing, API management, and advanced features that extend beyond basic mail transfer. These microservices work together to create a comprehensive email platform with enterprise-grade capabilities.
+The Enterprise Mail Server's worker services provide the core processing, API management, and advanced features that extend beyond basic mail transfer. These microservices work together to create a comprehensive email platform with enterprise-grade capabilities.
 
 ## Architecture Overview
 

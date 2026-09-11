@@ -1,4 +1,7 @@
-FROM python:3.9-slim
+# 3.11-slim to match every other Python service (and pyproject's
+# requires-python >= 3.11). This was a 3.9 straggler, which meant production
+# migrations executed on an EOL interpreter the rest of the stack never runs.
+FROM python:3.11-slim
 
 WORKDIR /app
 

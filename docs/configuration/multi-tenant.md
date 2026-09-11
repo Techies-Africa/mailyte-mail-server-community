@@ -1,223 +1,135 @@
 # Multi-Tenant Configuration
 
-> **Enterprise Edition** — This feature is available in [Mailyte Enterprise](https://mailyte.com). The Community Edition does not include this functionality.
-
-
-Per-organization settings, quota defaults, rate limit defaults, and webhook configuration per tenant.
+Per-organization settings, quotas, rate limits, SMTP credentials, and webhook routing.
 
 ---
 
-Mailyte supports multiple organizations on a single server. Each tenant gets their own domains, mailboxes, and configuration — but they all share the same infrastructure. This page covers how to set up and manage per-tenant settings.
+Mailyte supports multiple organizations on a single server. Each tenant gets their own domains, mailboxes, and configuration — but they all share the same infrastructure.
 
 ## How Multi-Tenancy Works
 
-Every tenant in Mailyte is an **organization**. An organization owns one or more domains, and each domain has mailboxes and aliases. The hierarchy looks like this:
+Every tenant is an **organization**. An organization owns one or more domains, and each domain has mailboxes, aliases, and SMTP credentials:
 
 ```
 Organization (tenant)
-  └── Domain (yourdomain.com)
-        ├── Mailbox (user@yourdomain.com)
-        ├── Mailbox (admin@yourdomain.com)
-        └── Alias  (info@yourdomain.com → admin@yourdomain.com)
+  └── Domain (acme.com)
+        ├── Mailbox (user@acme.com)
+        ├── Alias   (info@acme.com → user@acme.com)
+        └── SMTP credential (acme-com-smtp-a1b2c3d4)
 ```
 
-All tenant data lives in MySQL. Postfix and Dovecot query the database for every lookup, so tenant isolation happens at the data layer — there's no need for separate config files per tenant.
+All tenant data lives in MySQL. Postfix and Dovecot query the database for every lookup, so tenant isolation happens at the data layer — there's no per-tenant config file anywhere.
+
+The API is reached with an `X-API-Key` header. Keys are scoped: an **organization-scoped** key sees only its own tenant's resources (cross-tenant lookups return 404, never 403), while a **platform-scoped** key (and platform operators) can manage all tenants.
 
 ## Creating an Organization
 
-Use the Mailyte API to provision new tenants:
-
 ```bash
-curl -X POST http://localhost:5000/api/v1/organizations \
+curl -X POST https://api.yourdomain.com/api/v1/organizations/ \
   -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $API_TOKEN" \
+  -H "X-API-Key: $PLATFORM_API_KEY" \
   -d '{
+    "id": "acme-corp",
     "name": "Acme Corp",
-    "slug": "acme-corp",
-    "plan": "business",
-    "admin_email": "admin@acme.com"
+    "admin_email": "admin@acme.com",
+    "external_id": "billing-4711"
   }'
 ```
 
-The `plan` field determines default quotas and rate limits (see below).
+Creating tenants requires an admin/platform-scoped key. For first-time setup on a fresh install, use `./scripts/setup-first-user.sh`, which drives `POST /api/v1/bootstrap`.
 
 ## Per-Organization Quotas
 
-Each organization has a quota configuration that controls how much storage their users get by default.
+Storage quotas live at three levels, all in the database:
 
-### Default Quotas by Plan
-
-| Plan | Default Mailbox Quota | Max Mailboxes | Total Storage |
-|------|----------------------|---------------|---------------|
-| `starter` | 1 GB | 10 | 10 GB |
-| `business` | 5 GB | 100 | 200 GB |
-| `enterprise` | 25 GB | Unlimited | Unlimited |
-
-These defaults are applied when a new mailbox is created. You can override the quota for individual mailboxes.
-
-### Setting Organization Quotas
+- `organizations.storage_quotas` (JSON) — org-wide quotas
+- `domains.max_quota` (default 10 GB) — per-mailbox cap within a domain
+- `email_accounts.storage_quota` (default 1 GB) — per-mailbox quota, enforced live by Dovecot through the SQL `user_query`
 
 ```bash
-curl -X PATCH http://localhost:5000/api/v1/organizations/acme-corp/quota \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $API_TOKEN" \
-  -d '{
-    "default_mailbox_quota_mb": 5120,
-    "max_mailboxes": 200,
-    "total_storage_mb": 512000
-  }'
-```
-
-### Per-Mailbox Quota Override
-
-```bash
-curl -X PATCH http://localhost:5000/api/v1/mailboxes/ceo@acme.com/quota \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $API_TOKEN" \
-  -d '{
-    "quota_mb": 25600
-  }'
+# Update an organization's quotas and rate limits
+curl -X PUT https://api.yourdomain.com/api/v1/organizations/acme-corp/quotas \
+  -H "Content-Type: application/json" -H "X-API-Key: $ADMIN_KEY" \
+  -d '{"storage_quotas": {"total_storage_mb": 512000}, "rate_limits": {"outbound_hourly": 2000}}'
 ```
 
 > [!NOTE]
-> The per-mailbox quota override flows into Dovecot through the MySQL `user_query`. When Dovecot checks a user's quota, it gets the value from the database, which includes any overrides. No config file changes needed.
+> A quota write by a human operator sets an **override flag** on the organization; automated plan-sync writes are then refused with 409 until the override is cleared via `POST /api/v1/organizations/{id}/quotas/clear-override`. This keeps a hand-set quota from being silently reverted by billing sync.
+
+Per-mailbox overrides go through the mailbox endpoints (`PUT /api/v1/mailboxes/email-accounts/{account_id}` with `storage_quota`, or the dedicated `.../email-accounts/{account_id}/quotas`); Dovecot picks the new value up on the next login — no reload needed.
 
 ## Per-Organization Rate Limits
 
-Rate limits prevent any single tenant from overwhelming the server or harming the sender reputation of other tenants.
+Rate limits are enforced by the `rate_limiter` service, consulted by Postfix's policy daemon at DATA time. Limits resolve through a hierarchy — organization → domain → mailbox (or SMTP credential) — with database values overriding environment defaults:
 
-### Default Rate Limits by Plan
+| Level | Outbound hourly default | Env var family |
+|-------|------------------------|----------------|
+| Organization | 10,000 | `ORG_{INBOUND,OUTBOUND}_{SECOND,MINUTE,HOURLY,DAILY,MONTHLY,BURST}_DEFAULT` |
+| Domain | 2,000 | `DOMAIN_*_DEFAULT` |
+| Mailbox | 200 | `MAILBOX_*_DEFAULT` |
 
-| Plan | Messages/Hour | Messages/Day | Recipients/Message |
-|------|--------------|-------------|-------------------|
-| `starter` | 100 | 500 | 50 |
-| `business` | 1,000 | 10,000 | 200 |
-| `enterprise` | 10,000 | 100,000 | 500 |
-
-### Setting Organization Rate Limits
+Manage limits through the API gateway:
 
 ```bash
-curl -X PATCH http://localhost:5000/api/v1/organizations/acme-corp/rate-limits \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $API_TOKEN" \
-  -d '{
-    "messages_per_hour": 2000,
-    "messages_per_day": 20000,
-    "recipients_per_message": 300
-  }'
+# Read / set domain limits
+curl -H "X-API-Key: $KEY" https://api.yourdomain.com/api/v1/rate-limiter/rate-limits/domain/acme.com
+curl -X POST -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
+  https://api.yourdomain.com/api/v1/rate-limiter/rate-limits/domain/acme.com \
+  -d '{"outbound_hourly": 5000}'
+
+# Same shape for a mailbox
+.../api/v1/rate-limiter/rate-limits/mailbox/user@acme.com
 ```
 
-Rate limits are enforced in two places:
+**SMTP credentials carry their own per-key limits** (`hourly_limit` / `daily_limit` on the credential; `NULL` = inherit the organization's limits). An authenticated sender without an `@` in its SASL username is resolved as an SMTP credential and checked as organization → domain → credential.
 
-1. **API layer** — The FastAPI server checks limits in Redis before accepting a send request. This catches most overages early.
-2. **Postfix layer** — SMTP-level rate limits act as a safety net for users who send directly through Postfix (via their email client).
+When a limit trips, the send is deferred at SMTP time and a `rate_limit.exceeded` webhook fires; warning/critical thresholds (80% / 95%) fire `rate_limit.threshold_breach`.
 
 > [!TIP]
-> Start with conservative rate limits for new tenants. It's much easier to increase limits for a good sender than to recover your IP reputation after a tenant sends spam.
+> Start with conservative rate limits for new tenants. It's much easier to raise limits for a good sender than to recover IP reputation after a tenant sends spam.
+
+## Per-Organization SMTP Credentials
+
+Each domain can have any number of SMTP API keys (`/api/v1/smtp-credentials/`): create, rotate, revoke, enable, per-key IP allowlists, expiry, and per-key rate limits — with an append-only audit trail (`GET .../events`) and usage reporting (`GET .../usage`, backed by `mail_logs.sasl_username`). The secret is returned exactly once at create/rotate. Authentication is enforced by Dovecot directly against the `smtp_credentials` table, so revocation applies at the next AUTH (the API flushes Dovecot's auth cache via doveadm when `DOVEADM_API_KEY` is configured).
 
 ## Per-Organization Webhooks
 
-Each organization can receive webhook notifications for events that happen in their domain.
+Two layers:
 
-### Configuring Webhooks
+1. **Global** — the `WEBHOOK_URLS` environment endpoint receives every event, signed with `WEBHOOK_SECRET` (the canonical dispatcher; see [Webhook Events](../reference/webhook-events.md)).
+2. **Per-organization endpoints** — rows in `webhook_urls`, managed via the API:
 
 ```bash
-curl -X POST http://localhost:5000/api/v1/organizations/acme-corp/webhooks \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $API_TOKEN" \
+curl -X POST https://api.yourdomain.com/api/v1/webhooks/endpoints \
+  -H "Content-Type: application/json" -H "X-API-Key: $KEY" \
   -d '{
+    "name": "Acme app",
     "url": "https://app.acme.com/webhooks/email",
-    "events": ["delivery", "bounce", "spam_complaint", "open", "click"],
-    "secret": "org-specific-webhook-secret"
+    "event_types": ["email.delivered", "email.bounced", "tracking.open", "tracking.click"],
+    "webhook_secret": "org-specific-webhook-secret"
   }'
 ```
 
-### Webhook Events
-
-| Event | Description |
-|-------|-------------|
-| `delivery` | Message was accepted by the recipient's server |
-| `bounce` | Message bounced (hard or soft) |
-| `spam_complaint` | Recipient marked the message as spam |
-| `open` | Recipient opened the message (requires tracking) |
-| `click` | Recipient clicked a link (requires tracking) |
-| `deferred` | Delivery was temporarily delayed |
-
-### Webhook Payload Format
-
-Every webhook request includes:
-
-- **`X-Mailyte-Signature`** header — HMAC-SHA256 signature of the payload, using the organization's webhook secret.
-- **`X-Mailyte-Event`** header — The event type.
-
-```json
-{
-  "event": "delivery",
-  "timestamp": "2026-03-25T10:30:00Z",
-  "organization": "acme-corp",
-  "message_id": "<abc123@acme.com>",
-  "from": "sales@acme.com",
-  "to": "customer@example.com",
-  "details": {
-    "smtp_response": "250 OK",
-    "remote_server": "mx.example.com"
-  }
-}
-```
-
-### Global vs. Per-Organization Webhooks
-
-The `WEBHOOK_URLS` environment variable defines global webhooks that receive events for all organizations. Per-organization webhooks (configured through the API) only receive events for that specific organization.
-
-Both fire independently. If a global webhook and an org webhook are configured, both get notified.
+Endpoint CRUD lives at `/api/v1/webhooks/endpoints[/{id}]`, with `POST /api/v1/webhooks/endpoints/{id}/test` to fire a test event. Deliveries are signed with the endpoint's own secret in the `X-Webhook-Signature: sha256=<hex>` header; event names use the dotted catalogue (`email.delivered`, `tracking.open`, …), not legacy short names.
 
 > [!WARNING]
-> Webhook URLs must use HTTPS. HTTP endpoints are rejected to prevent webhook secrets from leaking in transit.
+> Use HTTPS webhook URLs. The signature protects integrity, not confidentiality — payloads include message metadata.
+
+## Per-Organization Spam Policy
+
+Each organization's `settings.spam_policy` JSON (thresholds, quarantine, sender white/blacklists) is synced into Redis for Rspamd by `scripts/sync_rspamd_settings.py` — see [Rspamd Configuration](rspamd-configuration.md#per-organization-overrides).
 
 ## Per-Organization DKIM
 
-Each organization's domain needs its own DKIM key. When you add a domain through the API, Mailyte generates a DKIM key automatically and returns the DNS record the tenant needs to add.
-
-```bash
-curl -X POST http://localhost:5000/api/v1/organizations/acme-corp/domains \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $API_TOKEN" \
-  -d '{
-    "domain": "acme.com"
-  }'
-```
-
-Response:
-
-```json
-{
-  "domain": "acme.com",
-  "status": "pending_verification",
-  "dkim_record": {
-    "type": "TXT",
-    "name": "mail._domainkey.acme.com",
-    "value": "v=DKIM1; k=rsa; p=MIIBIjANBg..."
-  },
-  "spf_record": "v=spf1 include:mail.yourdomain.com -all",
-  "mx_record": "10 mail.yourdomain.com"
-}
-```
-
-The API returns the exact DNS records the tenant needs to configure. Once they're in place, use the verification endpoint to confirm:
-
-```bash
-curl -X POST http://localhost:5000/api/v1/organizations/acme-corp/domains/acme.com/verify \
-  -H "Authorization: Bearer $API_TOKEN"
-```
+Adding a domain generates its DKIM key automatically (RSA-2048, selector `default`) and the API returns the DNS records to publish; verification is `POST /api/v1/domains/{domain_id}/verify-dns`. See [DNS Setup](dns-setup.md).
 
 ## Tenant Isolation
 
-Even though all tenants share the same Postfix and Dovecot instances, they're isolated in several ways:
-
-- **Database-level:** Each query filters by domain, which is tied to an organization.
-- **Filesystem-level:** Maildir storage is organized by domain (`/var/mail/vhosts/domain.com/user/`).
-- **Rate-limit-level:** Each organization has independent rate limits tracked in Redis.
-- **Quota-level:** Each organization's total storage is tracked independently.
+- **Database-level:** every API query is scoped by the key's `organization_id`; cross-tenant IDs return 404.
+- **Filesystem-level:** Maildir storage is per-domain (`/var/mail/vhosts/domain.com/user/`).
+- **Sender-level:** Postfix's `smtpd_sender_login_maps` stops one tenant's credentials from sending as another tenant's addresses (`reject_sender_login_mismatch` on 587/465).
+- **Rate-limit-level:** independent counters per org/domain/mailbox/credential in Redis.
+- **Quota-level:** storage tracked per organization, domain, and mailbox.
 
 > [!NOTE]
-> Mailyte does not provide process-level isolation between tenants. If you need full isolation (separate Postfix/Dovecot instances per tenant), you'll need to deploy separate Mailyte stacks. For most use cases, database and quota isolation is sufficient.
+> Mailyte does not provide process-level isolation between tenants. If you need fully separate Postfix/Dovecot instances per tenant, deploy separate stacks. For most use cases, data-layer isolation plus sender-login enforcement is sufficient.

@@ -64,7 +64,7 @@ Moving from another email provider? These guides cover the full process — expo
 
     ---
 
-    Export sending domains and templates, switch to Mailyte, and validate SPF/DKIM.
+    Export sending domains and suppression lists, switch sending to SMTP credentials, and validate SPF/DKIM.
 
     [:octicons-arrow-right-24: SendGrid Migration](migrating-from-sendgrid.md)
 
@@ -76,21 +76,35 @@ Moving from another email provider? These guides cover the full process — expo
 |-------|---------------|------------|
 | [Setting Up DKIM](setting-up-dkim.md) | Generate keys, add DNS records, configure Rspamd signing | Beginner |
 | [Improving Deliverability](improving-deliverability.md) | SPF, DKIM, DMARC alignment, IP warm-up, reputation management | Intermediate |
-| [Domain Configuration](domain-configuration.md) | Adding domains, DNS verification, catch-all aliases, per-domain settings | Beginner |
-| [Managing Organizations](organization-management.md) | Bulk operations, quota management, billing integration hooks | Intermediate |
+| [Domain Configuration](domain-configuration.md) | Adding domains, DNS verification, aliases, per-domain settings | Beginner |
+| [Managing Organizations](organization-management.md) | Bulk operations, quota management, billing integration via external IDs | Intermediate |
 
 !!! tip "New to email infrastructure?"
     Start with [Domain Configuration](domain-configuration.md), then [Setting Up DKIM](setting-up-dkim.md), then [Improving Deliverability](improving-deliverability.md). This order builds on each previous step.
+
+## Marketing & Bulk Sending
+
+Relay marketing and bulk campaigns through Mailyte using the campaign tool you already have. Mailyte is the pipe, suppression, unsubscribe compliance, and billing — bring your own contacts and scheduling.
+
+| Guide | What It Covers | Difficulty |
+|-------|---------------|------------|
+| [Send Marketing & Bulk Email](sending-marketing-email.md) | What SMTP Send is, sending requirements, bounce/complaint limits, and warm-up | Beginner |
+| [Connect Sendy](connect-sendy.md) | Point Sendy's SMTP sending server at Mailyte | Beginner |
+| [Connect MailWizz](connect-mailwizz.md) | Add Mailyte as an SMTP delivery server in MailWizz | Beginner |
+| [Connect WordPress](connect-wordpress.md) | Route WP Mail SMTP and MailPoet through Mailyte | Beginner |
+
+!!! tip "Read the requirements first"
+    Marketing senders must clear the gates in [Send Marketing & Bulk Email](sending-marketing-email.md) — verified domain, accepted AUP, opt-in lists, prepaid credits — before a live sending credential is issued.
 
 ## Infrastructure
 
 | Guide | What It Covers | Difficulty |
 |-------|---------------|------------|
-| [Scaling to Millions](scaling-to-millions.md) | Queue optimization, multiple Postfix instances, database sharding | Advanced |
-| [Monitoring Setup](monitoring-setup.md) | End-to-end monitoring stack from scratch | Intermediate |
-| [Prometheus Configuration](prometheus-configuration.md) | Detailed Prometheus config for every Mailyte service | Intermediate |
-| [Grafana Dashboards](grafana-setup.md) | Import pre-built dashboards, create custom panels, set up alerting | Intermediate |
-| [Backup Automation](backup-automation.md) | Automated scripts, S3 sync, retention policies, restore testing | Intermediate |
+| [Scaling to Millions](scaling-to-millions.md) | Postfix/MySQL/Redis tuning, worker replicas, and what's architecture work | Advanced |
+| [Monitoring Setup](monitoring-setup.md) | The built-in Prometheus/Grafana/Alertmanager stack and how to reach it | Intermediate |
+| [Prometheus Configuration](prometheus-configuration.md) | The shipped scrape jobs and alert rules, and how to extend them | Intermediate |
+| [Grafana Dashboards](grafana-setup.md) | Provisioned dashboards, custom panels, and Grafana alerting | Intermediate |
+| [Backup Automation](backup-automation.md) | backup.sh, systemd timers, age encryption, S3 offsite, restore drills | Intermediate |
 | [Custom Integrations](custom-integrations.md) | Webhooks for CRM/ticketing systems, API automation patterns | Intermediate |
 
 ## Troubleshooting

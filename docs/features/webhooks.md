@@ -1,81 +1,89 @@
 # Webhooks
 
-**Get real-time HTTP notifications whenever something happens to an email -- sent, delivered, bounced, opened, clicked, or complained about.**
+**Get HTTP notifications when something happens to an email — delivered, bounced, opened, clicked, or when platform objects change.**
 
-The webhook service (port `8081`) is the nervous system of Mailyte. Almost every feature dispatches events through it. You configure a URL for your organization, and the service POSTs JSON payloads to it with retry logic, HMAC signing for security, and automatic cleanup of old delivery records.
+All events in Mailyte flow through one shared dispatcher (`shared/webhook_dispatcher.py`). Every service imports `dispatch_event()` and fires events into it; the dispatcher signs, queues, delivers, retries, logs, and dead-letters them.
+
+!!! warning "One global webhook URL"
+    The dispatcher delivers **every event to a single globally configured URL** (`WEBHOOK_URL`, mapped from the `WEBHOOK_URLS` env value in docker-compose). If that variable is unset, `dispatch_event()` is a silent no-op and **no webhooks are delivered anywhere**.
+
+    The API's webhook *endpoint management* routes (`/api/v1/webhooks/endpoints`) store per-organization endpoint registrations in the `webhook_urls` table, but as of 2026-08-30 the dispatcher does not fan events out to those registered endpoints — delivery goes to the global URL only. Even "test endpoint" fires a `webhook.test` event to the global URL, not to the endpoint being tested. Treat per-endpoint delivery as not yet implemented.
 
 ## How it works
 
 ```mermaid
 sequenceDiagram
     participant Service as Any Mailyte Service
-    participant Dispatcher as Webhook Dispatcher
-    participant Queue as Webhook Queue
-    participant Workers as Worker Threads (5)
-    participant Your as Your Application
+    participant Dispatcher as Webhook Dispatcher (shared)
+    participant Queue as In-memory Queue (10,000)
+    participant Workers as Worker Threads (4)
+    participant Your as Global Webhook URL
 
-    Service->>Dispatcher: dispatch_event(event_type, data)
-    Dispatcher->>Queue: Enqueue payload
+    Service->>Dispatcher: dispatch_event(event_type, data, org_id, ...)
+    Dispatcher->>Queue: Enqueue signed envelope
     Workers->>Queue: Dequeue
-    Workers->>Your: POST /your-webhook-url
+    Workers->>Your: POST (HMAC-signed JSON)
     alt Success (2xx)
         Your-->>Workers: 200 OK
-        Workers->>Workers: Mark delivered
-    else Failure (5xx / timeout)
-        Your-->>Workers: 500 Error
-        Workers->>Workers: Schedule retry with backoff
+        Workers->>Workers: Log to webhook_delivery_logs
+    else HTTP 406
+        Your-->>Workers: 406
+        Workers->>Workers: Permanent stop, no retry, no DLQ
+    else Failure (other / timeout)
+        Your-->>Workers: 500
+        Workers->>Workers: Retry: 10m, 10m, 15m, 30m, 1h, 2h, 4h
+        Workers->>Workers: After 7 attempts: write to webhook_dead_letters
     end
 ```
 
 ### Event flow
 
-1. A Mailyte service (tracking, rate limiter, storage, etc.) calls `dispatch_event()` from the shared webhook dispatcher.
-2. The event is enriched with timestamp, organization ID, and source service metadata.
-3. The payload is queued in an in-memory queue (max 10,000 events).
-4. A pool of worker threads (default: 5) picks up events and delivers them to your webhook URL.
-5. Failed deliveries are retried with exponential backoff.
+1. A service calls `dispatch_event()` with a dotted event type, a data payload, and optional org/domain context, tags, and user variables.
+2. The dispatcher builds a standard envelope — unique `id`, `event`, `timestamp`, `source`, `org_id`, `domain`, `tags`, `user_variables`, `data`, `metadata`, and an inline `signature` block.
+3. The envelope is queued in-memory (max 10,000 events) and delivered by a pool of 4 worker threads. Services without their own worker pool (e.g. Postfix scripts) can publish via Redis pub/sub (`mailyte:webhooks` channel) for the webhooks container's dispatcher to pick up.
+4. Failed deliveries follow a Mailgun-style retry schedule: immediate, then 10m, 10m, 15m, 30m, 1h, 2h, 4h — **7 retries over roughly 8 hours**.
+5. An endpoint that responds `HTTP 406` permanently stops delivery of that event (no retry, no dead letter).
+6. Every attempt is logged to the `webhook_delivery_logs` table; events that exhaust all retries land in `webhook_dead_letters` for operator triage and replay.
 
-### HMAC signing
+### Verifying a webhook
 
-Every webhook payload is signed with your organization's webhook secret using HMAC-SHA256. The signature is sent in the `X-Webhook-Signature` header. To verify:
+Every request carries two complementary mechanisms:
+
+**1. `X-Webhook-Signature` header** — HMAC-SHA256 of the full JSON body:
 
 ```python
-import hmac
-import hashlib
+import hmac, hashlib
 
 
-def verify_webhook(payload_bytes, signature, secret):
+def verify_webhook(payload_bytes, signature_header, secret):
     expected = hmac.new(secret.encode("utf-8"), payload_bytes, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(f"sha256={expected}", signature)
+    return hmac.compare_digest(f"sha256={expected}", signature_header)
 ```
 
-!!! warning "Always verify signatures"
-    Without verification, anyone who discovers your webhook URL can send fake events. The HMAC signature proves the payload came from your Mailyte instance.
+**2. Inline signature block** in `payload["signature"]` for replay protection:
+
+```json
+{"timestamp": 1756500000, "token": "<hex nonce>", "signature": "<hmac>"}
+```
+
+Verify `hmac(secret, str(timestamp) + token) == signature`, and reject payloads whose timestamp is more than 15 minutes old.
+
+Requests also carry `X-Webhook-Id`, `X-Webhook-Event`, `X-Webhook-Source`, `X-Webhook-Timestamp`, and `User-Agent: Mailyte-Webhook/2.0`.
 
 ## Configuration
 
-### Core settings
+### Dispatcher (read by every service)
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `WEBHOOK_URLS` | *(required)* | Comma-separated list of webhook URLs |
-| `WEBHOOK_SECRET` | *(required)* | Secret key for HMAC signing |
-| `WEBHOOK_ENCRYPTION_KEY` | *(optional)* | 32-char key for payload encryption |
-| `WEBHOOK_TIMEOUT` | `30` | Seconds before a delivery attempt times out |
-| `WEBHOOK_BATCH_SIZE` | `50` | Max events per batch delivery |
-| `DEFAULT_WEBHOOK_URL` | *(optional)* | Fallback URL if org has none configured |
+| `WEBHOOK_URL` | *(unset — mapped from `WEBHOOK_URLS` in compose)* | The single global delivery URL. **Required for any delivery to happen** |
+| `WEBHOOK_SECRET` | *(empty)* | HMAC signing key. Without it, signatures are empty strings |
+| `WEBHOOK_TIMEOUT` | `15` | Seconds per delivery attempt |
+| `WEBHOOK_MAX_RETRIES` | `7` | Delivery attempts before dead-lettering |
+| `WEBHOOK_WORKERS` | `4` | Dispatcher worker threads per process |
+| `WEBHOOK_QUEUE_SIZE` | `10000` | In-memory queue capacity; full queue drops new events |
 
-### Retry settings
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `WEBHOOK_MAX_RETRY_ATTEMPTS` | `3` | Max retries per event |
-| `WEBHOOK_RETRY_BASE_DELAY` | `5` | Initial retry delay in seconds |
-| `WEBHOOK_RETRY_BACKOFF_MULTIPLIER` | `2.0` | Multiply delay by this each retry |
-| `WEBHOOK_RETRY_MAX_DELAY` | `3600` | Max delay between retries (1 hour) |
-| `WEBHOOK_RETRY_ON_HTTP_CODES` | `500,502,503,504,429` | HTTP codes that trigger a retry |
-
-### Cleanup settings
+### Cleanup (webhooks service, port 8081)
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -85,139 +93,84 @@ def verify_webhook(payload_bytes, signature, secret):
 | `WEBHOOK_FAILED_RETENTION_HOURS` | `72` | Keep failed deliveries for 3 days |
 | `WEBHOOK_CLEANUP_BATCH_SIZE` | `1000` | Records to delete per cleanup batch |
 
-### Event filtering
+## Management API
 
-```bash
-# Only receive specific events (comma-separated)
-WEBHOOK_ENABLED_EVENTS=email.smtp.inbound,email.smtp.outbound,email.imap.read,dovecot.auth.success
-```
+These live on the platform API (`/api/v1/webhooks/...`, authenticated with `X-API-Key`):
 
-If `WEBHOOK_ENABLED_EVENTS` is empty or not set, all events are delivered.
+| Endpoint | Purpose |
+|----------|---------|
+| `GET/POST /api/v1/webhooks/endpoints` | List / register endpoint records (stored, not yet used for delivery — see warning above) |
+| `GET/PUT/DELETE /api/v1/webhooks/endpoints/{id}` | Manage an endpoint record |
+| `POST /api/v1/webhooks/endpoints/{id}/test` | Dispatch a `webhook.test` event (delivered to the **global** URL) |
+| `GET /api/v1/webhooks/deliveries` | Read the delivery log (`webhook_delivery_logs`) |
+| `GET /api/v1/webhooks/dead-letters` | List dead-lettered events |
+| `GET /api/v1/webhooks/dead-letters/{id}` | Inspect one dead letter, including its original envelope |
+| `POST /api/v1/webhooks/dead-letters/{id}/replay` | Re-queue the original envelope through the normal dispatch path |
+| `POST /api/v1/webhooks/dead-letters/replay` | Bulk replay |
 
-## API endpoints
+## Event types actually emitted today
 
-### Receive inbound email event
+The full constant catalog lives in `shared/webhook_dispatcher.py` (`Events` class). These are the ones with live producers as of 2026-08-30:
 
-```
-POST /webhook/email/inbound
-```
+| Event | Source | When |
+|-------|--------|------|
+| `email.delivered` / `email.bounced` / `email.deferred` / `email.rejected` | log_ingestor | Parsed from the Postfix mail log per message (producer built 2026-08-22) |
+| `tracking.open` / `tracking.click` / `tracking.unsubscribe` | tracking | Pixel loads, click redirects, unsubscribes |
+| `delivery.complaint`, `delivery.bounce.hard`, `delivery.bounce.soft` | tracking / bounce handler | Complaints and processed bounces |
+| `rate_limit.exceeded` / `rate_limit.threshold_breach` / `rate_limit.reset` | rate_limiter | Limits hit / approached / reconfigured |
+| `storage.quota.warning` / `storage.quota.exceeded` / `storage.usage.report` / `storage.cleanup` | storage_usage | Quota thresholds and reports |
+| `org.*`, `domain.*`, `mailbox.*`, `alias.*`, `filter.*`, `transport_rule.*`, `shared_mailbox.*` | api | CRUD lifecycle events |
+| `domain.verified` | api | DNS verification passes |
+| `auth.login.success` / `auth.login.failure`, `security.brute_force`, `security.ip.blocked` | dovecot auth policy / security services | Authentication and abuse events |
+| `migration.started/progress/completed/failed/cancelled` | migration | Mailbox migration lifecycle |
+| `optimizer.domain.throttled` / `optimizer.reputation.changed` / `optimizer.ip.warmed` / `optimizer.fbl.received` | delivery_optimizer | Throttling, reputation, warmup, FBL |
+| `archive.stored` / `archive.restored` | archiver | Archive writes and retrievals |
+| `encryption.key.generated` / `encryption.key.imported` | encryption | PGP key lifecycle |
+| `health.service.down/up`, `health.recovery`, `health.system.alert`, `health.check.failed` | monitoring | Auto-healing and system alerts |
+| `queue.flushed/held/released`, `queue.message.failed` | queue_manager | Mail queue operations |
+| `rag.*`, `compliance.*`, `whitelabel.*`, `reseller.*` | rag / api | AI and admin operations |
+| `webhook.test` | api | Endpoint test |
 
-Used internally by Postfix to notify the webhook service about incoming mail. Not typically called by external applications.
-
-### Receive outbound email event
-
-```
-POST /webhook/email/outbound
-```
-
-### IMAP event
-
-```
-POST /webhook/email/imap
-```
-
-### POP3 event
-
-```
-POST /webhook/email/pop3
-```
-
-### Test your webhook
-
-```bash
-curl -X POST http://localhost:8081/webhook/test \
-  -H "Content-Type: application/json" \
-  -d '{"message": "Hello from Mailyte!"}'
-```
-
-This sends a `test.webhook` event to all configured URLs -- useful for verifying your endpoint is reachable.
-
-### Service status
-
-```bash
-curl http://localhost:8081/webhook/status
-```
-
-```json
-{
-  "status": "active",
-  "queue_size": 3,
-  "webhook_urls_configured": 2,
-  "timestamp": "2026-03-25T14:30:00Z"
-}
-```
-
-### Cleanup management
-
-```bash
-# Get cleanup stats
-curl http://localhost:8081/cleanup/stats
-
-# Trigger immediate cleanup
-curl -X POST http://localhost:8081/cleanup/now
-
-# View cleanup config
-curl http://localhost:8081/cleanup/config
-
-# Update cleanup config
-curl -X PUT http://localhost:8081/cleanup/config \
-  -H "Content-Type: application/json" \
-  -d '{"successful_retention_hours": 48}'
-```
-
-## Event types
-
-Here's a sampling of the events your webhook URL will receive:
-
-| Event | Source | Description |
-|-------|--------|-------------|
-| `email.smtp.inbound` | Postfix | New email received |
-| `email.smtp.outbound` | Postfix | Email sent |
-| `email.imap.read` | Dovecot | Email read via IMAP |
-| `email.imap.delete` | Dovecot | Email deleted via IMAP |
-| `tracking.open` | Tracking | Recipient opened email |
-| `tracking.click` | Tracking | Recipient clicked link |
-| `email.bounced` | Tracking | Delivery bounced |
-| `delivery.complaint` | Tracking | Spam complaint received |
-| `rate_limit.exceeded` | Rate Limiter | Rate limit hit |
-| `rate_limit.threshold` | Rate Limiter | Approaching rate limit |
-| `storage.warning` | Storage | Storage threshold crossed |
-
-For the full event catalog, see the [Webhook Events Reference](../reference/webhook-events.md).
+!!! note "Defined but not emitted"
+    Many constants in the catalog have **no producer wired up yet** — notably the per-message IMAP/POP3 user-action events (`email.read`, `email.deleted`, `email.moved`, `pop3.*`, `folder.*`). The webhooks service (port 8081) exposes ingestion endpoints (`POST /webhook/email/inbound|outbound|imap|pop3`) and Postfix's `master.cf` defines a `webhook-filter` pipe service for them, but nothing currently routes mail or Dovecot events into those producers. Do not build on those event types until a producer ships.
 
 ## Example payload
 
 ```json
 {
-  "event": "email.smtp.inbound",
-  "timestamp": "2026-03-25T14:30:00.000Z",
-  "source_service": "postfix",
+  "id": "9f0d5c9e-...",
+  "event": "email.delivered",
+  "timestamp": "2026-08-30T14:30:00+00:00",
+  "source": "log_ingestor",
+  "org_id": "01J5X...",
+  "domain": "yourdomain.com",
+  "tags": [],
+  "user_variables": {},
   "data": {
     "message_id": "<abc123@example.com>",
-    "from": "sender@external.com",
-    "to": "user@yourdomain.com",
-    "subject": "Meeting tomorrow",
-    "size": 15234,
-    "has_attachments": false,
-    "spam_score": 1.2,
-    "tls_used": true,
-    "spf_result": "pass",
-    "dkim_result": "pass",
-    "dmarc_result": "pass"
-  }
+    "queue_id": "4bXyz...",
+    "sender": "you@yourdomain.com",
+    "recipient": "user@example.com",
+    "status": "delivered",
+    "relay": "gmail-smtp-in.l.google.com...",
+    "dsn": "2.0.0",
+    "subject": "Meeting tomorrow"
+  },
+  "metadata": {},
+  "signature": {"timestamp": 1756563000, "token": "…", "signature": "…"}
 }
 ```
 
 ## Things to know
 
-- **The queue has a size limit.** If your webhook endpoint is down for an extended period, the in-memory queue (max 10,000 events) will fill up. Once full, new events are dropped. Monitor the queue size via the status endpoint and set up alerts.
+- **Configure `WEBHOOK_URLS` and `WEBHOOK_SECRET` or nothing fires.** The dispatcher silently skips dispatch when no URL is configured — by design, so services never block on webhooks.
 
-- **Retry backoff is exponential.** First retry after 5 seconds, then 10, then 20, up to a maximum of 1 hour. After 3 failed attempts, the event is marked as failed and kept for 72 hours (for debugging).
+- **The queue is in-memory and per-process.** If the receiving endpoint is down for hours, retries hold worker threads and the 10,000-event queue can fill; further events are dropped (and counted in dispatcher stats). Long outages surface in `webhook_dead_letters`.
 
-- **Cleanup runs automatically.** Successful deliveries are purged after 24 hours, failed ones after 72 hours. You can adjust this via the cleanup config API or env vars.
+- **HTTP 406 is a contract.** Respond `406 Not Acceptable` from your endpoint to tell Mailyte to permanently stop delivering that event — useful for events you never want, without burning 8 hours of retries.
 
-- **Multiple webhook URLs are supported.** Set `WEBHOOK_URLS` to a comma-separated list, and each event will be sent to all of them. This is useful for sending events to both your application and a logging/analytics service.
+- **Dead letters are replayable and idempotent-friendly.** Replay resends the *original* envelope including its original `id`, so your idempotency check can recognize duplicates.
 
-- **Webhook events are fire-and-forget from the source service's perspective.** The tracking service, rate limiter, etc. call `dispatch_event()` and move on. They don't wait for delivery confirmation. This keeps the main email pipeline fast.
+- **Delivery logs power `GET /api/v1/webhooks/deliveries`.** Every attempt (success, retry, failure) writes a row to `webhook_delivery_logs` with status, HTTP code, and attempt count.
 
-- **Events include EML content for email events.** Inbound and outbound email events include the full EML content (base64-encoded) and extracted attachments. If this makes payloads too large for your endpoint, you can process just the metadata fields and ignore the `eml_file` key.
+- **Events are fire-and-forget for the emitting service.** `dispatch_event()` returns immediately; the mail path never waits on webhook delivery.

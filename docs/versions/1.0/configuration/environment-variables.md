@@ -1,7 +1,7 @@
 
 # Environment Variables Reference
 
-This document provides a complete reference for all environment variables used to configure the Mailyte Mail Server. All configuration is managed through environment variables, making deployment flexible across different environments.
+This document provides a complete reference for all environment variables used to configure the Enterprise Mail Server. All configuration is managed through environment variables, making deployment flexible across different environments.
 
 ## Configuration File Location
 
@@ -222,7 +222,7 @@ Environment variables are typically stored in the `.env` file at the root of you
     SMTP_PORT=25
     SUBMISSION_PORT=587
     SMTPS_PORT=465
-    SMTP_BANNER="$myhostname ESMTP Mailyte Mail Server"
+    SMTP_BANNER="$myhostname ESMTP Enterprise Mail Server"
     SMTP_MAX_CONNECTIONS=200
     
     # IMAP/POP3 Configuration

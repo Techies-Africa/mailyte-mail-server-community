@@ -40,6 +40,20 @@ import os
 import sys
 from pathlib import Path
 
+from schemas.common import ErrorResponse, SimpleMessageResponse
+from schemas.mailbox import (
+    MailboxAddResponse,
+    MailboxDetailResponse,
+    MailboxEditResponse,
+    MailboxGetLegacyResponse,
+    MailboxLegacyQuotaResponse,
+    MailboxLegacyQuotaUpdateResponse,
+    MailboxListResponse,
+    MailboxQuotaResponse,
+    MailboxQuotaUpdateResponse,
+    MailboxStatsResponse,
+    MailboxWriteResponse,
+)
 from sqlalchemy import create_engine, or_
 from sqlalchemy.orm import sessionmaker
 from utils.auth import (
@@ -51,6 +65,13 @@ from utils.auth import (
 )
 from utils.database import get_db_connection
 
+# The doveadm auth-cache flush the SMTP-credential routes already use.
+# Dovecot caches successful auth for up to auth_cache_ttl (1 hour), so a
+# suspended/deleted/password-changed mailbox keeps authenticating from cache
+# unless the entry is flushed (see utils/smtp_credentials.flush_auth_cache).
+from utils.smtp_credentials import flush_auth_cache
+
+from database.models.authentication import MailboxSession
 from database.models.core import Domain, EmailAccount, Organization
 from database.models.enums import AccountStatus
 
@@ -173,6 +194,11 @@ _SORT_DIRECTIONS = ("asc", "desc")
     description="Retrieve a paginated list of email accounts, searchable by address or display "
     "name and filterable by domain, organization, or status. Sortable by email, creation date, "
     "storage used or last login. Includes domain and organization context for each account.",
+    response_model=MailboxListResponse,
+    responses={
+        422: {"model": ErrorResponse, "description": "Unknown sort key/direction or status"},
+        500: {"model": ErrorResponse, "description": "Failed to retrieve email accounts"},
+    },
 )
 @require_api_key("read")
 async def list_email_accounts(
@@ -323,6 +349,11 @@ async def list_email_accounts(
     "/email-accounts/{account_id}",
     summary="Get email account details",
     description="Retrieve detailed information for a specific email account by ID, including its associated domain and organization data. Sensitive fields like password are excluded.",
+    response_model=MailboxDetailResponse,
+    responses={
+        404: {"model": ErrorResponse, "description": "Email account not found"},
+        500: {"model": ErrorResponse, "description": "Failed to retrieve email account"},
+    },
 )
 @require_api_key("read")
 async def get_email_account(account_id: str, request: Request):
@@ -369,6 +400,16 @@ async def get_email_account(account_id: str, request: Request):
     "/email-accounts",
     summary="Create a new email account",
     description="Provision a new email account. The password is bcrypt-hashed and the mailbox is immediately usable via IMAP/POP3/SMTP. Storage quota defaults to 1GB. Validates email format, password strength, and domain existence.",
+    response_model=MailboxWriteResponse,
+    responses={
+        400: {
+            "model": ErrorResponse,
+            "description": "No data provided / validation failed / domain user limit reached",
+        },
+        404: {"model": ErrorResponse, "description": "Domain not found"},
+        409: {"model": ErrorResponse, "description": "Email account or external_id already exists"},
+        500: {"model": ErrorResponse, "description": "Failed to create email account"},
+    },
 )
 @require_api_key("write")
 async def create_email_account(request: Request):
@@ -521,6 +562,13 @@ async def create_email_account(request: Request):
     "/email-accounts/{account_id}",
     summary="Update an email account",
     description="Update properties of an existing email account such as name, status, storage quota, forwarding settings, and vacation auto-responder. Password changes are re-hashed automatically.",
+    response_model=MailboxWriteResponse,
+    responses={
+        400: {"model": ErrorResponse, "description": "No data provided / validation failed"},
+        404: {"model": ErrorResponse, "description": "Email account not found"},
+        409: {"model": ErrorResponse, "description": "external_id already exists"},
+        500: {"model": ErrorResponse, "description": "Failed to update email account"},
+    },
 )
 @require_api_key("write")
 async def update_email_account(account_id: str, request: Request):
@@ -589,8 +637,28 @@ async def update_email_account(account_id: str, request: Request):
         if "vacation_message" in data:
             account.vacation_message = data["vacation_message"]
 
+        # Billing-owned fields. Laravel decides these from what the customer
+        # bought; the mail server stores and enforces them and never derives
+        # them itself (ADR-001). `ai_monthly_quota` NULL means "fall back to
+        # the organization's value", which is what every mailbox billing has
+        # not touched should keep doing.
+        if "ai_monthly_quota" in data:
+            quota = data["ai_monthly_quota"]
+            account.ai_monthly_quota = int(quota) if quota is not None else None
+        if "billing_tier" in data:
+            account.billing_tier = data["billing_tier"] or None
+
         account.updated_at = datetime.now()
         session.commit()
+
+        # A suspend/deactivate or password change must bite on the NEXT
+        # IMAP/SMTP AUTH attempt, not after Dovecot's 1h auth-cache TTL --
+        # same doveadm flush the SMTP-credential routes do. Runs after the
+        # commit: the mutation is already durable, so a flush failure only
+        # degrades to the TTL window (the helper logs it) and never fails
+        # the request.
+        if "password" in data or "status" in data:
+            flush_auth_cache(account.email)
 
         dispatch_event(
             Events.MAILBOX_UPDATED,
@@ -624,6 +692,13 @@ async def update_email_account(account_id: str, request: Request):
     "/email-accounts/{account_id}",
     summary="Delete an email account",
     description="Permanently delete an email account and update the associated domain counters (total accounts and storage used). This action cannot be undone.",
+    response_model=SimpleMessageResponse,
+    responses={
+        204: {
+            "description": "Already absent (never existed, or belongs to another org) -- idempotent delete-retry-safe (phase-04 task 4.3)"
+        },
+        500: {"model": ErrorResponse, "description": "Failed to delete email account"},
+    },
 )
 @require_api_key("write")
 async def delete_email_account(account_id: str, request: Request):
@@ -657,6 +732,11 @@ async def delete_email_account(account_id: str, request: Request):
         session.delete(account)
         session.commit()
 
+        # The deleted mailbox must stop authenticating now, not after the
+        # auth-cache TTL (see update_email_account above). Best-effort after
+        # the commit -- a flush failure is logged, never a request failure.
+        flush_auth_cache(account_email_val)
+
         dispatch_event(
             Events.MAILBOX_DELETED,
             data={
@@ -684,6 +764,11 @@ async def delete_email_account(account_id: str, request: Request):
     "/email-accounts/{account_id}/quotas",
     summary="Get account quota and usage",
     description="Retrieve detailed storage quota and usage information for an email account, including attachment and email storage breakdown, usage percentage, rate limits, and whether the account is over threshold.",
+    response_model=MailboxQuotaResponse,
+    responses={
+        404: {"model": ErrorResponse, "description": "Email account not found"},
+        500: {"model": ErrorResponse, "description": "Failed to retrieve quota information"},
+    },
 )
 @require_api_key("read")
 async def get_account_quotas(account_id: str, request: Request):
@@ -738,6 +823,12 @@ async def get_account_quotas(account_id: str, request: Request):
     "/email-accounts/{account_id}/quotas",
     summary="Update account quota settings",
     description="Update storage quota, rate limits, and storage quota sub-settings for an email account. Allows fine-grained control over account resource allocation.",
+    response_model=MailboxQuotaUpdateResponse,
+    responses={
+        400: {"model": ErrorResponse, "description": "No quota data provided"},
+        404: {"model": ErrorResponse, "description": "Email account not found"},
+        500: {"model": ErrorResponse, "description": "Failed to update quotas"},
+    },
 )
 @require_api_key("write")
 async def update_account_quotas(account_id: str, request: Request):
@@ -794,10 +885,168 @@ async def update_account_quotas(account_id: str, request: Request):
         session.close()
 
 
+class MailboxPasswordReset(BaseModel):
+    new_password: str = Field(
+        ...,
+        description="New password (utils.auth.validate_password_strength's policy: 12+ chars, "
+        "letters and numbers, not on the common list). bcrypt-hashed, never echoed back.",
+        example="Welcome-Temp-2026",
+    )
+    temporary: bool = Field(
+        False,
+        description="When true the holder must set their own password on next sign-in: the "
+        "webmail/mobile session is issued but every /api/v1/mailbox/* route except "
+        "POST /security/password and logout answers 403 password_change_required.",
+    )
+    reason: str = Field(
+        "temporary",
+        description="Recorded as password_change_reason when temporary=true: "
+        "`temporary` (onboarding) or `admin_reset` (support-driven reset). Ignored otherwise.",
+    )
+
+
+# What an admin may record as the reason for a forced change. `expired` is
+# also a valid column value but is reserved for a future expiry sweep -- an
+# operator resetting a password by hand is never that.
+_ADMIN_PASSWORD_CHANGE_REASONS = ("temporary", "admin_reset")
+
+
+@router.post(
+    "/email-accounts/{account_id}/reset-password",
+    summary="Reset an email account's password",
+    description="Set a new password for a mailbox on the holder's behalf. bcrypt-hashes it, "
+    "flushes Dovecot's auth cache so IMAP/SMTP honour the change immediately, and signs out "
+    "every webmail/mobile session of the mailbox. With `temporary: true` the holder is forced "
+    "to choose their own password at next sign-in (see POST /api/v1/mailbox/security/password). "
+    "Organization scope may only reset its own mailboxes; cross-org is 404.",
+    responses={
+        400: {
+            "model": ErrorResponse,
+            "description": "Weak password (`error_code: weak_password`, `msg` carries the "
+            "failed rule) or unknown reason",
+        },
+        404: {"model": ErrorResponse, "description": "Email account not found"},
+        500: {"model": ErrorResponse, "description": "Failed to reset password"},
+    },
+)
+@require_api_key("write")
+async def reset_email_account_password(
+    account_id: str, body: MailboxPasswordReset, request: Request
+):
+    """Admin-side counterpart of the holder's own POST /api/v1/mailbox/security/password."""
+    ctx = request.state.auth_context
+
+    # Same policy as every other password in the system (phase-07 H7). 400
+    # rather than 422 to match this module's neighbours, but with the same
+    # error_code the holder-facing endpoint uses so clients branch once.
+    valid_password, password_msg = validate_password(body.new_password)
+    if not valid_password:
+        return JSONResponse(
+            content=create_api_response("error", password_msg, error_code="weak_password"),
+            status_code=400,
+        )
+
+    reason = (body.reason or "temporary").strip().lower()
+    if reason not in _ADMIN_PASSWORD_CHANGE_REASONS:
+        return JSONResponse(
+            content=create_api_response(
+                "error", f"reason must be one of {', '.join(_ADMIN_PASSWORD_CHANGE_REASONS)}"
+            ),
+            status_code=400,
+        )
+
+    session = get_db_session()
+    try:
+        account = session.query(EmailAccount).filter_by(id=account_id).first()
+        # Platform scope may reset any org's mailbox (ADR-002 SS8); organization
+        # scope only its own, and cross-org stays 404 (conventions SS8).
+        if not account or (
+            ctx["scope"] == "organization" and account.organization_id != ctx["organization_id"]
+        ):
+            return JSONResponse(
+                content=create_api_response("error", "Email account not found"), status_code=404
+            )
+
+        now = datetime.now()
+        account.password = hash_password(body.new_password)
+        account.must_change_password = bool(body.temporary)
+        account.password_change_reason = reason if body.temporary else None
+        account.password_changed_at = now
+        account.updated_at = now
+
+        # An admin reset means the old credential is no longer trusted -- a
+        # compromised account, a departed employee, an onboarding handover.
+        # Every existing webmail/mobile session goes with it; the holder
+        # signs in again with the password the admin just set.
+        sessions_revoked = (
+            session.query(MailboxSession)
+            .filter(
+                MailboxSession.email_account_id == account.id,
+                MailboxSession.revoked_at.is_(None),
+            )
+            .update({MailboxSession.revoked_at: now}, synchronize_session=False)
+        )
+        session.commit()
+
+        account_email = account.email
+        account_org_id = account.organization_id
+
+        # After the commit, same as update_email_account: the new hash is
+        # durable, so a flush failure only degrades to the 1h cache TTL and
+        # is reported, never turned into a failed request.
+        cache_flushed = flush_auth_cache(account_email)
+
+        dispatch_event(
+            Events.MAILBOX_PASSWORD_CHANGED,
+            data={
+                "account_id": account.id,
+                "email": account_email,
+                "organization_id": account_org_id,
+                "changed_by": "admin",
+                "temporary": bool(body.temporary),
+                "sessions_revoked": int(sessions_revoked or 0),
+            },
+            org_id=account_org_id,
+            source_service="api",
+        )
+
+        return create_api_response(
+            "success",
+            "Password reset",
+            {
+                "account_id": account.id,
+                "email": account_email,
+                "must_change_password": bool(body.temporary),
+                "password_change_reason": reason if body.temporary else None,
+                "password_changed_at": now.isoformat(),
+                "sessions_revoked": int(sessions_revoked or 0),
+                "cache_flushed": cache_flushed,
+            },
+        )
+
+    except Exception as e:
+        session.rollback()
+        logger.error(f"Reset email account password error: {e}")
+        return JSONResponse(
+            content=create_api_response("error", "Failed to reset password"), status_code=500
+        )
+    finally:
+        session.close()
+
+
 @router.post(
     "/add",
     summary="Add a new mailbox (legacy)",
     description="Provision a new mailbox using the legacy raw-SQL path. Requires local_part, domain, and password. Validates email format, password strength, and domain existence. Supports TLS enforcement, quarantine settings, and rate limiting.",
+    response_model=MailboxAddResponse,
+    responses={
+        400: {
+            "model": ErrorResponse,
+            "description": "Missing/invalid field, invalid local_part, email/domain mismatch, invalid email, weak password, or domain not found/inactive",
+        },
+        409: {"model": ErrorResponse, "description": "MAILBOX_ALREADY_EXISTS"},
+        500: {"model": ErrorResponse, "description": "Failed to add mailbox"},
+    },
 )
 @require_api_key("write")
 async def add_mailbox(request: Request):
@@ -890,9 +1139,7 @@ async def add_mailbox(request: Request):
         domain_id = domain_row["id"] if isinstance(domain_row, dict) else domain_row[0]
         # The new mailbox's org is the domain's org, never a caller-supplied
         # value -- a platform caller has no org of its own to fall back on.
-        org_id = (
-            domain_row["organization_id"] if isinstance(domain_row, dict) else domain_row[1]
-        )
+        org_id = domain_row["organization_id"] if isinstance(domain_row, dict) else domain_row[1]
 
         # Check if mailbox already exists (email addresses are globally
         # unique, not per-org)
@@ -967,7 +1214,10 @@ async def add_mailbox(request: Request):
                 status_code=409,
             )
 
-        user_id = cursor.lastrowid
+        # email_accounts.id is a CHAR(26) ULID -- cursor.lastrowid only
+        # tracks AUTO_INCREMENT columns, so it reads 0 here. Return the ULID
+        # this handler generated and inserted, not a constant 0.
+        user_id = mailbox_id
 
         dispatch_event(
             Events.MAILBOX_CREATED,
@@ -993,6 +1243,8 @@ async def add_mailbox(request: Request):
     "/get/{mailbox_id}",
     summary="Get mailbox information (legacy)",
     description="Retrieve mailbox details by email address or ID using the legacy raw-SQL path. Pass 'all' to list all active mailboxes. Includes message statistics, login history, and quota usage percentage.",
+    response_model=MailboxGetLegacyResponse,
+    responses={500: {"model": ErrorResponse, "description": "Failed to retrieve mailboxes"}},
 )
 @require_api_key("read")
 async def get_mailboxes(mailbox_id: str, request: Request):
@@ -1076,6 +1328,11 @@ async def get_mailboxes(mailbox_id: str, request: Request):
     "/edit",
     summary="Edit mailbox settings (legacy)",
     description="Batch-update one or more mailboxes using the legacy raw-SQL path. Accepts an items array of mailbox emails and an attr object with fields to update (name, storage_quota, password, TLS, quarantine, rate limits, etc.).",
+    response_model=MailboxEditResponse,
+    responses={
+        400: {"model": ErrorResponse, "description": "Invalid request format"},
+        500: {"model": ErrorResponse, "description": "Failed to edit mailbox"},
+    },
 )
 @require_api_key("write")
 async def edit_mailbox(request: Request):
@@ -1132,23 +1389,31 @@ async def edit_mailbox(request: Request):
                         continue
                     update_fields.append(f"{key} = %s")
                     update_values.append(hash_password(value))
-                elif key in [
-                    "name",
-                    "quota",
-                    "active",
-                    "force_pw_update",
-                    "tls_enforce_in",
-                    "tls_enforce_out",
-                    "quarantine_notification",
-                    "quarantine_category",
-                    "rl_value",
-                    "rl_frame",
-                ]:
-                    update_fields.append(f"{key} = %s")
+                elif key == "name":
+                    update_fields.append("name = %s")
+                    update_values.append(sanitize_text(value))
+                elif key == "quota":
+                    # email_accounts has no `quota` column -- the storage
+                    # quota lives in storage_quota (bytes). Writing `quota`
+                    # raised "Unknown column" and 500'd the whole batch.
+                    update_fields.append("storage_quota = %s")
                     update_values.append(value)
+                elif key == "active":
+                    # No `active` column either: it maps onto the status
+                    # enum (truthy -> 'active', falsy -> 'inactive').
+                    update_fields.append("status = %s")
+                    update_values.append("active" if value in (1, True, "1") else "inactive")
+                # The remaining mailcow-era attrs this endpoint used to
+                # accept (force_pw_update, tls_enforce_*, quarantine_*,
+                # rl_value/rl_frame) exist on no email_accounts column --
+                # writing them raised "Unknown column" and failed the whole
+                # batch, so they are ignored rather than half-applied.
 
             if update_fields:
-                update_fields.append("modified = %s")
+                # The audit stamp is `updated_at` (database/models/core.py);
+                # `modified` exists on no table in this schema, so the
+                # unconditional write below made EVERY edit 500.
+                update_fields.append("updated_at = %s")
                 update_values.extend([datetime.now(), mailbox, mailbox_org_id])
 
                 cursor.execute(
@@ -1161,6 +1426,11 @@ async def edit_mailbox(request: Request):
                 )
 
                 if cursor.rowcount > 0:
+                    # Password / active changes must bite on the next AUTH
+                    # attempt, not after Dovecot's 1h auth-cache TTL. Flush
+                    # failures are logged by the helper, never fatal.
+                    if "password" in data["attr"] or "active" in data["attr"]:
+                        flush_auth_cache(mailbox)
                     dispatch_event(
                         Events.MAILBOX_UPDATED,
                         data={
@@ -1200,6 +1470,14 @@ async def edit_mailbox(request: Request):
     "/delete",
     summary="Delete mailbox(es) (legacy)",
     description="Delete one or more mailboxes and all associated data (aliases, sender restrictions, login records, messages) using the legacy raw-SQL path. Accepts an array of mailbox email addresses. Each deletion is wrapped in a transaction.",
+    response_model=MailboxEditResponse,
+    responses={
+        400: {
+            "model": ErrorResponse,
+            "description": "Invalid request format -- array of mailboxes expected",
+        },
+        500: {"model": ErrorResponse, "description": "Failed to delete mailboxes"},
+    },
 )
 @require_api_key("write")
 async def delete_mailbox(request: Request):
@@ -1275,6 +1553,10 @@ async def delete_mailbox(request: Request):
 
                 if user_deleted > 0:
                     cursor.execute("COMMIT")
+                    # The deleted mailbox must stop authenticating now, not
+                    # after Dovecot's 1h auth-cache TTL. Best-effort after
+                    # the commit; the helper logs failures.
+                    flush_auth_cache(mailbox)
                     dispatch_event(
                         Events.MAILBOX_DELETED,
                         data={
@@ -1329,7 +1611,15 @@ async def delete_mailbox(request: Request):
 @router.get(
     "/get/quota/{mailbox}",
     summary="Get mailbox quota details (legacy)",
-    description="Retrieve detailed quota information for a mailbox using the legacy raw-SQL path, including total quota, usage, available space, usage percentage, and a per-folder size breakdown.",
+    description=(
+        "Retrieve detailed quota information for a mailbox using the legacy raw-SQL path, "
+        "including total quota, usage, available space, usage percentage, and a per-folder size breakdown."
+    ),
+    response_model=MailboxLegacyQuotaResponse,
+    responses={
+        404: {"model": ErrorResponse, "description": "Mailbox not found"},
+        500: {"model": ErrorResponse, "description": "Failed to retrieve quota information"},
+    },
 )
 @require_api_key("read")
 async def get_mailbox_quota(mailbox: str, request: Request):
@@ -1371,19 +1661,13 @@ async def get_mailbox_quota(mailbox: str, request: Request):
                 content=create_api_response("error", "Mailbox not found"), status_code=404
             )
 
-        # Get quota breakdown by folder
-        cursor.execute(
-            """
-            SELECT folder, COUNT(*) as message_count, SUM(size) as folder_size
-            WHERE mailbox = %s
-            GROUP BY folder
-            ORDER BY folder_size DESC
-        """,
-            (mailbox,),
-        )
-
-        folder_breakdown = cursor.fetchall()
-        quota_info["folder_breakdown"] = folder_breakdown
+        # Per-folder sizes live in the Maildir on disk (Dovecot owns them);
+        # no table in this schema tracks folder-level usage. The previous
+        # query here had no FROM clause at all -- it selected columns
+        # (folder, size, mailbox) that exist on no table, so this endpoint
+        # 500'd on every call. An empty list is the honest answer the
+        # database can give (cf. get_mailbox_stats's unread_messages).
+        quota_info["folder_breakdown"] = []
 
         return create_api_response(
             "success", "Quota information retrieved successfully", quota_info
@@ -1402,7 +1686,16 @@ async def get_mailbox_quota(mailbox: str, request: Request):
 @router.post(
     "/edit/quota",
     summary="Update mailbox quota (legacy)",
-    description="Update the storage quota for a mailbox using the legacy raw-SQL path. Requires the mailbox email address and the new quota value.",
+    description=(
+        "Update the storage quota for a mailbox using the legacy raw-SQL "
+        "path. Requires the mailbox email address and the new quota value."
+    ),
+    response_model=MailboxLegacyQuotaUpdateResponse,
+    responses={
+        400: {"model": ErrorResponse, "description": "Missing required fields: mailbox, quota"},
+        404: {"model": ErrorResponse, "description": "Mailbox not found"},
+        500: {"model": ErrorResponse, "description": "Failed to update quota"},
+    },
 )
 @require_api_key("write")
 async def edit_mailbox_quota(request: Request):
@@ -1412,6 +1705,21 @@ async def edit_mailbox_quota(request: Request):
     if not data or "mailbox" not in data or "quota" not in data:
         return JSONResponse(
             content=create_api_response("error", "Missing required fields: mailbox, quota"),
+            status_code=400,
+        )
+
+    # Quota is a byte count on email_accounts.storage_quota (BIGINT) -- a
+    # non-numeric or negative value is the caller's mistake, not a 500.
+    try:
+        quota_bytes = int(data["quota"])
+    except (TypeError, ValueError):
+        return JSONResponse(
+            content=create_api_response("error", "quota must be an integer number of bytes"),
+            status_code=400,
+        )
+    if quota_bytes < 0:
+        return JSONResponse(
+            content=create_api_response("error", "quota must be non-negative"),
             status_code=400,
         )
 
@@ -1433,13 +1741,17 @@ async def edit_mailbox_quota(request: Request):
         cursor.close()
         cursor = conn.cursor()
 
+        # Real column names (database/models/core.py EmailAccount): the
+        # storage quota is `storage_quota` (bytes) and the audit stamp is
+        # `updated_at` -- the previous `quota`/`modified` names exist on no
+        # table in this schema, so every call 500'd.
         cursor.execute(
             """
             UPDATE email_accounts
-            SET quota = %s, modified = %s
+            SET storage_quota = %s, updated_at = %s
             WHERE email = %s
         """,
-            (data["quota"], datetime.now(), data["mailbox"]),
+            (quota_bytes, datetime.now(), data["mailbox"]),
         )
 
         if cursor.rowcount > 0:
@@ -1461,7 +1773,15 @@ async def edit_mailbox_quota(request: Request):
 @router.get(
     "/get/stats/{mailbox}",
     summary="Get mailbox statistics (legacy)",
-    description="Retrieve comprehensive statistics for a mailbox using the legacy raw-SQL path, including message counts, unread counts, average/largest message sizes, oldest/newest message dates, and 30-day login activity with unique IP counts.",
+    description=(
+        "Retrieve comprehensive statistics for a mailbox using the legacy raw-SQL path, including message counts, unread "
+        "counts, average/largest message sizes, oldest/newest message dates, and 30-day login activity with unique IP counts."
+    ),
+    response_model=MailboxStatsResponse,
+    responses={
+        404: {"model": ErrorResponse, "description": "Mailbox not found"},
+        500: {"model": ErrorResponse, "description": "Failed to retrieve mailbox statistics"},
+    },
 )
 @require_api_key("read")
 async def get_mailbox_stats(mailbox: str, request: Request):
@@ -1484,9 +1804,11 @@ async def get_mailbox_stats(mailbox: str, request: Request):
         # Basic mailbox info
         cursor.execute(
             """
-            -- created_at AS created: the column is created_at; `created` does
-            -- not exist, so this raised "Unknown column 'created'". Aliased so
-            -- the response keeps the key its consumers read.
+            -- created_at AS created: the column is created_at (0001_baseline);
+            -- `created` does not exist, so this query raised
+            -- "Unknown column 'created' in 'field list'" and the endpoint
+            -- returned 500 on every call. Aliased rather than renamed so the
+            -- response keeps the key its consumers already read.
             SELECT email, created_at AS created, last_login, storage_quota, storage_used
             FROM email_accounts
             WHERE email = %s
@@ -1504,13 +1826,13 @@ async def get_mailbox_stats(mailbox: str, request: Request):
         #
         # The previous query had no FROM clause at all -- it selected from
         # nothing, against columns (seen, received, mailbox) that exist on no
-        # table in this schema, so this endpoint always returned 500.
+        # table in this schema, so this endpoint has always returned 500.
         #
         # mail_logs is the delivery record and the only per-recipient message
         # data the database holds. unread_messages is deliberately null rather
-        # than 0: read state lives in the Maildir on disk (dovecot owns it), so
-        # the database cannot answer it, and 0 would be a confident wrong
-        # answer rather than an honest absence.
+        # than 0: read state lives in the Maildir on disk (dovecot owns it),
+        # so the database cannot answer it, and reporting 0 would be a
+        # confident wrong answer rather than an honest absence.
         cursor.execute(
             """
             SELECT
@@ -1528,13 +1850,13 @@ async def get_mailbox_stats(mailbox: str, request: Request):
         message_stats = cursor.fetchone() or {}
         message_stats["unread_messages"] = None
 
-        # Login statistics. Same defect -- no FROM, and against columns
-        # (login_time, ip_address, username) that user_logins does not use. Its
-        # real columns are user_email / client_ip / logged_at.
+        # Login statistics. Same defect as above -- no FROM, and against
+        # columns (login_time, ip_address, username) that user_logins does not
+        # use. Its real columns are user_email / client_ip / logged_at.
         #
         # success = 1 because "how many times did this mailbox log in" should
-        # not be inflated by failed attempts; those live in
-        # failed_auth_attempts and surface on the auth-security screen.
+        # not be inflated by failed attempts; those are tracked separately in
+        # failed_auth_attempts and shown on the auth-security screen.
         cursor.execute(
             """
             SELECT

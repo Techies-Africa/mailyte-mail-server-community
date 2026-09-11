@@ -1,0 +1,13 @@
+[Unit]
+Description=Nightly Mailyte web server full backup
+
+[Timer]
+# 02:00 UTC, half an hour before the mail server's full backup, so the two
+# hosts never contend for the same upload bandwidth or the same S3 prefix.
+OnCalendar=*-*-* 02:00:00
+Persistent=true
+AccuracySec=1min
+Unit=mailyte-backup-web-full.service
+
+[Install]
+WantedBy=timers.target

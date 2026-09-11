@@ -22,19 +22,55 @@ import hashlib
 import json
 import logging
 import os
+import sys
+import time
 from html.parser import HTMLParser
 from io import StringIO
+from pathlib import Path
 from typing import Any
 
 import mysql.connector
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.responses import PlainTextResponse
 from jinja2 import BaseLoader, Environment, TemplateSyntaxError, UndefinedError
 from pydantic import BaseModel, Field
+
+# Add shared directory to path. Import explicitly from shared: /app precedes
+# the appended shared path on sys.path, so a bare `from metrics import ...`
+# can silently resolve to the wrong local module -- always use shared.metrics.
+project_root = Path(__file__).parent.parent.parent
+sys.path.append(str(project_root / "shared"))
+from shared.metrics import get_metrics
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Email Templates Service", version="1.0.0")
+
+# Initialize metrics
+metrics = get_metrics("templates")
+
+
+@app.middleware("http")
+async def metrics_middleware(request: Request, call_next):
+    start_time = time.time()
+    response = await call_next(request)
+    duration = time.time() - start_time
+    metrics.record_request(
+        method=request.method,
+        path=request.url.path,
+        status_code=response.status_code,
+        duration=duration,
+    )
+    return response
+
+
+@app.get("/metrics")
+async def prometheus_metrics():
+    """Prometheus metrics endpoint"""
+    metrics_data = metrics.get_prometheus_metrics()
+    return PlainTextResponse(metrics_data)
+
 
 # ---------------------------------------------------------------------------
 # Config

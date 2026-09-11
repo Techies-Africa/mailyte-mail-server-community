@@ -1,9 +1,12 @@
 # Storage Management
 
-> **Enterprise Edition** — This feature is available in [Mailyte Enterprise](https://mailyte.com). The Community Edition does not include this functionality.
+Monitor storage usage and manage quota configuration at the domain and mailbox
+level. The per-entity routes proxy to the internal storage service; the summary is
+served straight from the database.
 
-
-Monitor storage usage and manage quotas at the domain and mailbox level.
+Reads verify that the domain or mailbox belongs to your organization (`404`
+otherwise). Storage figures are as fresh as the storage service's last calculation
+pass.
 
 ## Domain Storage Usage
 
@@ -13,249 +16,211 @@ Get storage usage details for a domain.
 GET /api/v1/storage/usage/domain/{domain}
 ```
 
-**Path Parameters**
+**Query Parameters**
 
-| Parameter | Type | Description |
-|---|---|---|
-| `domain` | string | Domain name (e.g., `acme.com`) |
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `force_calculate` | string | `false` | `true` forces a fresh recalculation instead of returning the cached figure |
 
 **Example Request**
 
 ```bash
 curl -H "X-API-Key: YOUR_KEY" \
-  http://your-server:5000/api/v1/storage/usage/domain/acme.com
+  http://your-server:8083/api/v1/storage/usage/domain/acme.com
 ```
 
 **Example Response**
 
 ```json
 {
-  "domain": "acme.com",
-  "storage": {
-    "total_used_bytes": 3221225472,
-    "total_quota_bytes": 10737418240,
-    "usage_percentage": 30.0,
-    "mailbox_count": 20,
-    "breakdown": {
-      "emails": 2684354560,
-      "attachments": 536870912
-    }
-  }
+  "success": true,
+  "entity_type": "domain",
+  "identifier": "acme.com",
+  "usage": { ... },
+  "timestamp": "2026-08-30T10:30:00Z"
 }
 ```
 
-## Mailbox Storage Usage
+The `usage` object is the storage service's calculation record for the entity,
+passed through verbatim. `404` (`{"error": "Usage data not found"}`) when no usage
+has been calculated yet.
 
-Get storage usage details for a specific mailbox.
+## Mailbox Storage Usage
 
 ```
 GET /api/v1/storage/usage/mailbox/{email}
 ```
 
-**Example Request**
+Same shape as the domain read, with `entity_type: "mailbox"`.
 
-```bash
-curl -H "X-API-Key: YOUR_KEY" \
-  http://your-server:5000/api/v1/storage/usage/mailbox/john@acme.com
-```
+## Storage Quota Configuration
 
-**Example Response**
-
-```json
-{
-  "email": "john@acme.com",
-  "storage": {
-    "used_bytes": 104857600,
-    "quota_bytes": 1073741824,
-    "usage_percentage": 9.77,
-    "breakdown": {
-      "inbox": 52428800,
-      "sent": 26214400,
-      "drafts": 5242880,
-      "attachments": 20971520
-    }
-  }
-}
-```
-
-## Domain Storage Quotas
-
-### Get Quotas
+### Get quota configuration
 
 ```
 GET /api/v1/storage/quotas/domain/{domain}
-```
-
-**Example Request**
-
-```bash
-curl -H "X-API-Key: YOUR_KEY" \
-  http://your-server:5000/api/v1/storage/quotas/domain/acme.com
-```
-
-**Example Response**
-
-```json
-{
-  "domain": "acme.com",
-  "quotas": {
-    "total_quota_bytes": 10737418240,
-    "default_mailbox_quota_bytes": 1073741824,
-    "max_mailbox_quota_bytes": 5368709120,
-    "warning_threshold_percent": 80,
-    "critical_threshold_percent": 95
-  }
-}
-```
-
-### Set Quotas
-
-```
-POST /api/v1/storage/quotas/domain/{domain}
-```
-
-**Request Body**
-
-| Field | Type | Description |
-|---|---|---|
-| `total_quota_bytes` | integer | Total domain storage quota in bytes |
-| `default_mailbox_quota_bytes` | integer | Default quota for new mailboxes |
-| `max_mailbox_quota_bytes` | integer | Maximum allowed mailbox quota |
-| `warning_threshold_percent` | integer | Send alert at this usage percentage |
-| `critical_threshold_percent` | integer | Send critical alert at this percentage |
-
-**Example Request**
-
-```bash
-curl -X POST -H "X-API-Key: YOUR_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "total_quota_bytes": 21474836480,
-    "default_mailbox_quota_bytes": 2147483648,
-    "warning_threshold_percent": 85
-  }' \
-  http://your-server:5000/api/v1/storage/quotas/domain/acme.com
-```
-
-## Mailbox Storage Quotas
-
-### Get Quotas
-
-```
 GET /api/v1/storage/quotas/mailbox/{email}
 ```
 
-**Example Request**
+Returns the effective quota rule for the entity (with inheritance --
+mailbox falls back to domain, domain to organization):
 
-```bash
-curl -H "X-API-Key: YOUR_KEY" \
-  http://your-server:5000/api/v1/storage/quotas/mailbox/john@acme.com
+```json
+{
+  "success": true,
+  "entity_type": "domain",
+  "identifier": "acme.com",
+  "quota_configuration": {
+    "total_storage_limit": 10737418240,
+    "attachment_storage_limit": 5368709120,
+    "max_file_size": 26214400,
+    "max_attachment_size": 26214400,
+    "max_email_size": 52428800,
+    "enforce_limits": true,
+    "warning_threshold": 80,
+    "critical_threshold": 95,
+    "allowed_file_types": null,
+    "blocked_file_types": null
+  },
+  "timestamp": "2026-08-30T10:30:00Z"
+}
 ```
 
-### Set Quotas
+### Set quota configuration
 
 ```
+POST /api/v1/storage/quotas/domain/{domain}
 POST /api/v1/storage/quotas/mailbox/{email}
 ```
 
-**Request Body**
+**Auth:** platform scope, operator role `admin` or higher (operator console
+session).
+
+**Domain request body**
 
 | Field | Type | Description |
 |---|---|---|
-| `quota_bytes` | integer | Storage quota in bytes |
-| `warning_threshold_percent` | integer | Alert threshold |
+| `default_mailbox_quota_mb` | integer | Default per-mailbox quota in **MB** for newly created mailboxes |
+| `domain_quota_mb` | integer | Total storage cap in **MB** for the entire domain |
+| `warning_threshold_percent` | integer | Usage percentage that triggers a warning (default 80) |
 
-**Example Request**
+**Mailbox request body**
 
-```bash
-curl -X POST -H "X-API-Key: YOUR_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "quota_bytes": 5368709120,
-    "warning_threshold_percent": 90
-  }' \
-  http://your-server:5000/api/v1/storage/quotas/mailbox/john@acme.com
-```
+| Field | Type | Description |
+|---|---|---|
+| `quota_mb` | integer | Storage quota for this mailbox in **MB** |
+| `warning_threshold_percent` | integer | Warning threshold (default 80) |
+
+Writes merge into the entity's `storage_quotas` configuration (fields not
+mentioned are left untouched). The MB-denominated fields are stored
+canonically: `domain_quota_mb`/`quota_mb` become `total_storage_limit` in
+**bytes** and `warning_threshold_percent` becomes `warning_threshold`, so the
+quota **read** endpoints above reflect the change immediately.
+`default_mailbox_quota_mb` is stored as given for mailbox provisioning.
+
+Responds `500` (`"Failed to update configuration"`) when the domain/mailbox
+does not exist or a value is out of range (thresholds must be 1-100, sizes
+positive).
+
+!!! note "Fixed 2026-08-30"
+    These writes previously failed with `500` on every request -- the storage
+    service called a configuration-update operation that did not exist. The
+    operation is now implemented (`update_storage_quota_config` in
+    `worker/storage_usage/services/config_service.py`).
 
 ## Usage Summary
 
-Get an overall storage usage summary across all domains and mailboxes.
+Aggregated storage usage. Served from the database (the same
+`domains`/`email_accounts` columns the storage service writes after each
+calculation pass).
 
 ```
-GET /api/v1/usage/summary
+GET /api/v1/storage/usage/summary
 ```
 
-**Query Parameters**
-
-| Parameter | Type | Description |
-|---|---|---|
-| `organization_id` | string | Filter by organization |
-
-**Example Request**
-
-```bash
-curl -H "X-API-Key: YOUR_KEY" \
-  "http://your-server:5000/api/v1/usage/summary?organization_id=acme"
-```
+**Auth:** platform scope, operator role `support` or higher.
 
 **Example Response**
 
 ```json
 {
-  "organization_id": "acme",
-  "summary": {
-    "total_domains": 3,
-    "total_mailboxes": 45,
-    "total_storage_used_bytes": 5368709120,
-    "total_quota_bytes": 32212254720,
-    "usage_percentage": 16.67,
-    "domains_over_warning": 1,
-    "mailboxes_over_warning": 3
-  }
+  "total_storage_used": 5368709120,
+  "total_quota": 32212254720,
+  "usage_percentage": 16.67,
+  "domain_count": 3,
+  "account_count": 45,
+  "top_domains": [
+    {"domain": "acme.com", "storage_used": 3221225472, "max_quota": 10737418240}
+  ],
+  "top_accounts": [
+    {"email": "john@acme.com", "storage_used": 104857600, "storage_quota": 1073741824}
+  ]
 }
 ```
 
+`top_domains` and `top_accounts` list the ten largest consumers.
+
 ## Storage Cleanup
 
-Trigger storage cleanup operations (remove expired messages, compress old data).
+Trigger a cleanup pass in the storage service.
 
 ```
 POST /api/v1/storage/cleanup
 ```
 
+**Auth:** platform scope, operator role `operator` or higher.
+
 **Request Body**
 
-| Field | Type | Description |
-|---|---|---|
-| `domain` | string | Domain to clean up (optional, all domains if omitted) |
-| `older_than_days` | integer | Remove messages older than this many days |
-| `dry_run` | boolean | Preview what would be deleted without actually deleting |
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `domain` | string | -- | Limit cleanup to a specific domain |
+| `older_than_days` | integer | `30` | Age threshold |
+| `target` | string | `trash` | `trash`, `spam`, `expired`, or `all` |
+| `dry_run` | boolean | `false` | Preview without deleting |
 
-**Example Request**
+All four fields are honored (fixed 2026-08-30 -- the service previously read
+only a `days_to_keep` value and ignored every documented field, including
+`dry_run`):
 
-```bash
-curl -X POST -H "X-API-Key: YOUR_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "domain": "acme.com",
-    "older_than_days": 365,
-    "dry_run": true
-  }' \
-  http://your-server:5000/api/v1/storage/cleanup
-```
+- `older_than_days` sets the age threshold (legacy `days_to_keep` is still
+  accepted; `older_than_days` wins when both are present)
+- `domain` limits the pass to that domain's records (the domain entity and its
+  `user@domain` mailboxes)
+- `dry_run: true` counts matching records without deleting anything (reported
+  as `matched_records`; `cleaned_records` stays `0`)
+- `target` is validated (`400` on other values)
 
 **Example Response**
 
 ```json
 {
-  "status": "preview",
-  "domain": "acme.com",
-  "would_delete": {
-    "messages": 1250,
-    "bytes_freed": 524288000
-  }
+  "success": true,
+  "dry_run": false,
+  "older_than_days": 30,
+  "target": "trash",
+  "domain": null,
+  "cleaned_records": 14,
+  "matched_records": 12,
+  "cache_entries": 2,
+  "days_to_keep": 30,
+  "note": "Cleanup purges this service's storage-calculation records; mail data is never deleted.",
+  "timestamp": "2026-08-30T10:30:00Z"
 }
 ```
 
-!!! tip "Always dry-run first"
-    Use `"dry_run": true` to see what would be cleaned up before running the actual cleanup.
+!!! warning "Scope of cleanup"
+    Whatever the `target`, cleanup purges the storage service's own
+    **storage-calculation records** (plus expired cache entries on a real run).
+    It never deletes mail from mailboxes -- there is no mail-deletion engine
+    behind this endpoint, and the response says so in its `note` field.
+
+## Errors
+
+| Status | Meaning |
+|---|---|
+| `400` | Cleanup body invalid (`target` not one of the allowed values, or `older_than_days` not a positive integer) |
+| `404` | Domain/mailbox not found or not owned by your organization, or no usage data calculated yet |
+| `422` | Request body failed validation |
+| `500` | Database connection failed during the ownership check, a quota write to a nonexistent entity or with out-of-range values, or a storage-service internal error |
+| `503` | Storage service unreachable (`{"error": "Storage service unavailable"}`) |

@@ -15,15 +15,16 @@ This module provides a complete Postfix configuration for handling inbound and o
 ## Key Features
 
 ### Mail Processing Pipeline
-- **Inbound Mail**: External MTA → Postfix → Processing → Storage
-- **Outbound Mail**: User → API → Tracking Injection → Postfix → External MTA
-- **Two-Stage Delivery**: Tracking injection with post-processing delivery
+- **Inbound Mail**: External MTA → postscreen/smtpd (:25) → Rspamd milter → LMTP → Dovecot storage
+- **Outbound Mail**: Client (587/465 with SASL) or webmail/API (internal :10587, `permit_mynetworks`) → `tracking-filter` content filter → re-injection on 127.0.0.1:10026 → Rspamd DKIM signing → remote MTA
+- **Rate limiting**: consulted once per message at DATA phase via the `policy-rate-limit` spawn service, which delegates to the `rate_limiter` worker over HTTP
+- **Logging**: `/var/log/postfix/mail.log` (bind-mounted to `./logs/mailer/postfix/`) is tailed by the `log_ingestor` container -- the sole producer of `mail_logs` rows and delivery webhooks
 
 ### Security & Anti-Abuse
 - **Rate Limiting**: Per-domain, per-user, and global limits
 - **Authentication**: SASL authentication for submission
 - **TLS Encryption**: Enforced encryption for all authenticated connections
-- **Fail2ban Integration**: Automatic blocking of malicious IPs
+- **Fail2ban Integration**: Automatic blocking of malicious IPs (host-side install -- see `mailer/intrusion_detection/`)
 
 ## Configuration Files
 
@@ -45,10 +46,13 @@ This module provides a complete Postfix configuration for handling inbound and o
 - **Content Filtering**: Rspamd integration for spam protection
 
 ### Submission Services (Port 587/465)
-- **Authenticated Submission**: Requires SASL authentication
+- **Authenticated Submission**: Requires SASL authentication (Dovecot at `inet:dovecot:24100`; mailbox passwords or SMTP API keys)
+- **Sender ownership**: `reject_sender_login_mismatch` runs on these two ports only -- never in the global sender restrictions, where it broke all inbound mail on 2026-08-22 (see main.cf's comments)
 - **TLS Enforcement**: Mandatory encryption for all connections
-- **Rate Limited**: Configurable per-user sending limits
-- **Tracking Integration**: Automatic tracking injection for outbound mail
+- **Tracking Integration**: `content_filter=tracking-filter:` on both
+
+### Internal Submission (Port 10587, compose network only)
+- Trusted in-stack senders (webmail/API) that cannot SASL-authenticate; `permit_mynetworks` gated, carries the tracking filter, never published to the host
 
 ### Content Filtering Pipeline
 ```
@@ -62,14 +66,14 @@ Email → Tracking Filter → Processing → Final Delivery
 ## Scripts & Tools
 
 ### Core Scripts
-- `tracking_injector.py` - Email tracking injection service
-- `webhook_sender.py` - Real-time webhook notifications
-- `rate_limit_policy.py` - Dynamic rate limiting engine
-- `bounce_handler.py` - Bounce message processing
+- `tracking_injector.py` - Content filter behind `tracking-filter`: tracking injection, delivery-optimizer checks, outbound archiving. **Must never write to stderr at volume** -- Postfix captures stderr, and a chatty stderr once made CPython exit 120 on shutdown, which Postfix turned into a bounce after delivery (fixed 2026-08-22; the logger and an atexit hook now enforce this). It reads its config from `/etc/postfix/runtime.env` (written by `entrypoint.sh`), because `pipe(8)` passes a hardcoded minimal environment
+- `rate_limit_policy.py` - Postfix policy protocol → HTTP bridge to the `rate_limiter` worker; `DEFER_IF_PERMIT 4.7.1` on over-quota, fail-open `DUNNO` on outage
+- `ip_access_policy.py` - Per-organization IP allowlist policy service
+- `bounce_handler.py` - Bounce message processing (posts to the tracking worker)
+- `webhook_sender.py` - **Dead config**: defined in `master.cf` as `webhook-filter` but referenced by no `content_filter`; delivery webhooks come from `mailer/log_ingestor/` instead
 
 ### Management Tools
 - `postfix_tracking_setup.sh` - Initial tracking setup
-- Configuration validation and testing utilities
 
 ## Performance Tuning
 
@@ -110,8 +114,8 @@ postqueue -p
 # Test configuration
 postfix check
 
-# Monitor real-time logs
-tail -f /var/log/mail.log
+# Monitor real-time logs (inside the container; ./logs/mailer/postfix/ on the host)
+tail -f /var/log/postfix/mail.log
 ```
 
 ## Dependencies
