@@ -1,11 +1,15 @@
 [Unit]
 Description=Nightly Mailyte full backup
+Documentation=file:///var/www/mailyte-email-server/current/docs/operations/disaster-recovery.md
 
 [Timer]
-# 02:30 local time. Change with `systemctl edit mailyte-backup-full.timer`.
+# 02:30 UTC: after the nightly log rotation and well clear of business-hours
+# mail volume, leaving the 26 h "no full backup" alert threshold comfortable
+# room before it fires.
 OnCalendar=*-*-* 02:30:00
-# A machine that was off at 02:30 still gets its backup when it comes back,
-# rather than silently skipping a day.
+# A server that was down at 02:30 still gets its backup when it comes back,
+# rather than silently skipping a day -- the exact gap the absence alert is
+# meant to catch, so do not create it deliberately.
 Persistent=true
 AccuracySec=1min
 Unit=mailyte-backup-full.service

@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 # Generates the Key Encryption Key (KEK) that protects DKIM/PGP/S-MIME
 # private keys at rest (phase-07 C2). Run once per environment, before the
-# api service first needs to encrypt or rotate a key.
+# api or migrate services first need to encrypt or rotate a key.
 #
 # The KEK lives as a mounted file, never an env var and never a DB row
-# (H6) -- mount secrets/encryption_kek into the services that need it,
-# read-only, at /run/secrets/encryption_kek (or point ENCRYPTION_KEK_PATH
-# somewhere else).
+# (H6) -- docker-compose.yml mounts secrets/encryption_kek into the
+# services that need it, read-only.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

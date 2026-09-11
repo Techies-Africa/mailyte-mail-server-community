@@ -1,346 +1,377 @@
 #!/usr/bin/env python3
 """
-DKIM Key Generator
+DKIM key sync -- host-side orchestrator.
 
-Generates RSA DKIM key pairs for email domains.
-- Stores keys in MySQL (dkim_keys table)
-- Writes private keys to filesystem for Rspamd
-- Updates the Rspamd selector map
-- Outputs DNS TXT record for domain configuration
+The actual DKIM logic lives in worker/api/utils/dkim_sync.py and runs inside
+the `api` container (the only service with MySQL access AND the envelope-
+encryption KEK). This script is the docker-host glue that this repo's layout
+makes necessary:
 
-Private keys are envelope-encrypted before storage (phase-07 C2) -- the
-dkim_keys.private_key plaintext column is never written by this script. The
-KEK must exist first: run scripts/generate_dkim_kek.sh once per environment.
+  - MySQL is not published on the host, so nothing here talks to the DB;
+  - the rspamd image ships no Python, so nothing runs in that container
+    beyond bash;
+  - only the rspamd container mounts storage/dkim_keys AND the baked
+    /etc/rspamd/dkim_selectors.map, so the files must be materialised inside
+    it (docker-compose.yml documents this on the rspamd service).
 
-Usage:
-    python3 generate_dkim.py <domain> [--selector default] [--key-size 2048]
-    python3 generate_dkim.py --all                 # Generate for all active domains
-    python3 generate_dkim.py --rotate <domain>     # Rotate key for domain
-    python3 generate_dkim.py --rotate-all          # Rotate every active key (C2 remediation)
-    python3 generate_dkim.py --dns <domain>        # Show DNS record for domain
+So this wrapper asks the api container for the desired state (decrypted in
+the api process, streamed over the docker exec pipe -- never written to the
+host disk, never passed via argv/env), then writes each key file and the
+selector map inside the rspamd container, owned by _rspamd with 0600/0644
+modes. Rspamd picks up new key files on first use (the signing path template
+is resolved per message) and re-reads the selector map on its own map watch
+interval; --reload forces it via SIGHUP (brief restart through supervisord).
+
+Usage (run on the docker host, stack running):
+    python3 scripts/generate_dkim.py sync [--prune] [--reload]
+    python3 scripts/generate_dkim.py backfill            # mint keys for keyless domains + sync
+    python3 scripts/generate_dkim.py dns <domain>        # print the DNS TXT record
+    ./start.sh dkim [args...]                            # same thing via mailyte-ctl
+
+Key generation/rotation for a domain that already has a key is deliberately
+NOT here: use the API's two-step flow (POST /api/v1/domains/{id}/dkim/rotate,
+then .../dkim/{selector}/activate) so signing never moves to a selector whose
+DNS record has not propagated.
 """
 
 import argparse
+import json
 import os
+import re
+import shutil
+import subprocess
 import sys
-import textwrap
-from datetime import datetime
-from pathlib import Path
 
-import mysql.connector
-from cryptography.hazmat.backends import default_backend
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
+def _resolve_container(env_var, *patterns):
+    """The container name to exec into.
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from shared.envelope_encryption import encrypt_private_key
-from shared.ulid_utils import generate_ulid
-
-# Configuration from environment
-DB_CONFIG = {
-    "host": os.getenv("DB_HOST", "mysql"),
-    "port": int(os.getenv("DB_PORT", 3306)),
-    "database": os.getenv("DB_NAME", "mailserver"),
-    "user": os.getenv("DB_USER", "mailuser"),
-    "password": os.getenv("DB_PASSWORD", "mailpassword"),
-}
-
-# Where Rspamd reads DKIM keys
-DKIM_KEY_DIR = os.getenv("DKIM_KEY_DIR", "/var/lib/rspamd/dkim")
-
-# Rspamd selector map file
-SELECTOR_MAP_PATH = os.getenv("DKIM_SELECTOR_MAP", "/etc/rspamd/dkim_selectors.map")
-
-
-def get_db():
-    return mysql.connector.connect(**DB_CONFIG)
-
-
-def generate_key_pair(key_size=2048):
-    """Generate an RSA key pair and return (private_pem, public_pem)."""
-    private_key = rsa.generate_private_key(
-        public_exponent=65537, key_size=key_size, backend=default_backend()
-    )
-
-    private_pem = private_key.private_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.TraditionalOpenSSL,
-        encryption_algorithm=serialization.NoEncryption(),
-    ).decode("utf-8")
-
-    public_pem = (
-        private_key.public_key()
-        .public_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo,
-        )
-        .decode("utf-8")
-    )
-
-    return private_pem, public_pem
-
-
-def public_pem_to_dns_value(public_pem):
-    """Extract the base64 key data from a PEM public key for DNS TXT record."""
-    lines = public_pem.strip().split("\n")
-    # Remove BEGIN/END lines
-    key_data = "".join(line for line in lines if not line.startswith("-----"))
-    return key_data
-
-
-def generate_dkim_for_domain(domain, selector="default", key_size=2048):
-    """Generate DKIM keys for a domain and store them."""
-    conn = get_db()
-    cursor = conn.cursor(dictionary=True)
-
-    # Look up domain_id
-    cursor.execute("SELECT id FROM domains WHERE domain = %s AND active = 1", (domain,))
-    row = cursor.fetchone()
-    if not row:
-        print(f"Error: Domain '{domain}' not found or not active in database")
-        cursor.close()
-        conn.close()
-        return False
-
-    domain_id = row["id"]
-
-    # Generate key pair
-    private_pem, public_pem = generate_key_pair(key_size)
-    dns_value = public_pem_to_dns_value(public_pem)
-
-    # Deactivate existing keys for this domain/selector, and null any
-    # plaintext they still hold (phase-07 C2: rotation, not merely
-    # encrypt-in-place, is required for keys assumed already compromised --
-    # deactivating a key without also nulling its plaintext would leave the
-    # exact key material this rotation exists to invalidate still sitting
-    # in the table, just marked inactive).
-    cursor.execute(
-        "UPDATE dkim_keys SET active = 0, private_key = NULL "
-        "WHERE domain_id = %s AND selector = %s",
-        (domain_id, selector),
-    )
-
-    # Insert new key -- private_key stays NULL; only the encrypted columns
-    # are written (phase-07 C2). private_pem is held in memory just long
-    # enough to encrypt it and write it to disk for Rspamd below.
-    encrypted = encrypt_private_key(private_pem)
-    now = datetime.now()
-    # id is CHAR(26) with no default and no AUTO_INCREMENT (0001_baseline) --
-    # this schema uses ULID primary keys throughout, so the column has to be
-    # supplied explicitly. It was omitted before, which made this INSERT fail
-    # outright; noticed because C2 required rewriting this exact statement.
-    cursor.execute(
-        "INSERT INTO dkim_keys "
-        "(id, domain_id, selector, private_key, private_key_ciphertext, private_key_nonce, "
-        "key_version, public_key, active, created_at, updated_at) "
-        "VALUES (%s, %s, %s, NULL, %s, %s, %s, %s, 1, %s, %s)",
-        (
-            generate_ulid(),
-            domain_id,
-            selector,
-            encrypted.ciphertext,
-            encrypted.nonce,
-            encrypted.key_version,
-            public_pem,
-            now,
-            now,
-        ),
-    )
-    conn.commit()
-
-    # Write private key to filesystem for Rspamd
-    key_dir = Path(DKIM_KEY_DIR)
-    key_dir.mkdir(parents=True, exist_ok=True)
-
-    key_file = key_dir / f"{domain}.{selector}.key"
-    key_file.write_text(private_pem)
-    key_file.chmod(0o640)
-
-    # Update selector map
-    update_selector_map(domain, selector)
-
-    cursor.close()
-    conn.close()
-
-    # Output DNS record
-    dns_record = format_dns_record(domain, selector, dns_value)
-    print(f"DKIM key generated for {domain} (selector: {selector})")
-    print()
-    print("Add this DNS TXT record:")
-    print(dns_record)
-    print()
-
-    return True
-
-
-def format_dns_record(domain, selector, dns_value):
-    """Format a DKIM DNS TXT record."""
-    # Split into 255-char chunks for DNS TXT record compliance
-    chunks = textwrap.wrap(dns_value, 255)
-    txt_value = " ".join(f'"{chunk}"' for chunk in chunks)
-
-    record_name = f"{selector}._domainkey.{domain}"
-    record_value = f'"v=DKIM1; k=rsa; p={dns_value}"'
-
-    return f"{record_name} IN TXT {record_value}"
-
-
-def update_selector_map(domain=None, selector=None):
-    """Update the Rspamd DKIM selector map from database."""
-    conn = get_db()
-    cursor = conn.cursor(dictionary=True)
-
-    cursor.execute("""
-        SELECT d.domain, dk.selector
-        FROM dkim_keys dk
-        JOIN domains d ON dk.domain_id = d.id
-        WHERE dk.active = 1 AND d.active = 1
-    """)
-
-    map_path = Path(SELECTOR_MAP_PATH)
-    map_path.parent.mkdir(parents=True, exist_ok=True)
-
-    with open(map_path, "w") as f:
-        f.write("# DKIM selector map — auto-generated by generate_dkim.py\n")
-        f.write(f"# Updated: {datetime.now().isoformat()}\n")
-        for row in cursor.fetchall():
-            f.write(f"{row['domain']} {row['selector']}\n")
-
-    cursor.close()
-    conn.close()
-
-
-def show_dns_record(domain):
-    """Show the DNS TXT record for a domain's active DKIM key."""
-    conn = get_db()
-    cursor = conn.cursor(dictionary=True)
-
-    cursor.execute(
-        """
-        SELECT dk.selector, dk.public_key
-        FROM dkim_keys dk
-        JOIN domains d ON dk.domain_id = d.id
-        WHERE d.domain = %s AND dk.active = 1
-        ORDER BY dk.created_at DESC LIMIT 1
-    """,
-        (domain,),
-    )
-
-    row = cursor.fetchone()
-    cursor.close()
-    conn.close()
-
-    if not row:
-        print(f"No active DKIM key found for {domain}")
-        return False
-
-    dns_value = public_pem_to_dns_value(row["public_key"])
-    print(format_dns_record(domain, row["selector"], dns_value))
-    return True
-
-
-def generate_all():
-    """Generate DKIM keys for all active domains that don't have one."""
-    conn = get_db()
-    cursor = conn.cursor(dictionary=True)
-
-    cursor.execute("""
-        SELECT d.domain
-        FROM domains d
-        WHERE d.active = 1
-        AND d.id NOT IN (
-            SELECT domain_id FROM dkim_keys WHERE active = 1
-        )
-    """)
-
-    domains = [row["domain"] for row in cursor.fetchall()]
-    cursor.close()
-    conn.close()
-
-    if not domains:
-        print("All active domains already have DKIM keys")
-        return
-
-    print(f"Generating DKIM keys for {len(domains)} domains...")
-    for domain in domains:
-        generate_dkim_for_domain(domain)
-        print("---")
-
-
-def rotate_key(domain, selector="default"):
-    """Rotate DKIM key for a domain (generates new key, deactivates old)."""
-    print(f"Rotating DKIM key for {domain}...")
-    return generate_dkim_for_domain(domain, selector)
-
-
-def rotate_all():
-    """Rotate every domain's active DKIM key (phase-07 C2).
-
-    For remediating a plaintext-key exposure: every key existing before
-    encryption shipped must be assumed compromised, so encrypting them
-    in place isn't sufficient -- each needs genuinely new key material.
-    Rotation is customer-visible (a new DNS TXT record per domain) --
-    this prints every record it changes; publish them before the old
-    keys are needed again for anything relying on DKIM alignment.
+    A bare compose stack names the service 'api'/'rspamd', but a project-scoped
+    deploy with replicas names it 'mailyte-prod-api-1' etc., so the old
+    hardcoded 'api' could never be exec'd in production (DKIM keys were stored
+    in the DB but never materialised into rspamd -- found 2026-09-06). Honor an
+    explicit override first, then the literal name, then the first RUNNING
+    container whose name contains a pattern (so replicas resolve automatically).
     """
-    conn = get_db()
-    cursor = conn.cursor(dictionary=True)
-    cursor.execute("""
-        SELECT DISTINCT d.domain, dk.selector
-        FROM dkim_keys dk
-        JOIN domains d ON dk.domain_id = d.id
-        WHERE dk.active = 1 AND d.active = 1
-    """)
-    targets = [(row["domain"], row["selector"]) for row in cursor.fetchall()]
-    cursor.close()
-    conn.close()
+    override = os.getenv(env_var)
+    if override:
+        return override
+    docker = shutil.which("docker") or "docker"
+    try:
+        running = subprocess.run(
+            [docker, "ps", "--format", "{{.Names}}"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+        ).stdout.split()
+    except Exception:
+        running = []
+    for pat in patterns:
+        if pat in running:  # exact name wins (e.g. 'rspamd')
+            return pat
+    for pat in patterns:
+        for name in running:
+            # a service token, not a substring of an unrelated name
+            if name == pat or f"-{pat}-" in name or name.endswith(f"-{pat}") or name.startswith(f"{pat}-"):
+                return name
+    return patterns[0]  # fall back to the literal; _check_containers reports clearly
 
-    if not targets:
-        print("No active DKIM keys to rotate.")
-        return
 
-    print(f"Rotating {len(targets)} DKIM key(s)...")
-    for domain, selector in targets:
-        rotate_key(domain, selector)
-        print("---")
+API_CONTAINER = _resolve_container("MAILYTE_API_CONTAINER", "api")
+RSPAMD_CONTAINER = _resolve_container("MAILYTE_RSPAMD_CONTAINER", "rspamd")
+RSPAMD_KEY_DIR = "/var/lib/rspamd/dkim"
+RSPAMD_MAP_PATHS = (
+    # The path dkim_signing.conf actually reads. Baked into the image layer,
+    # so it resets on every container recreate -- re-run `sync` after deploys.
+    "/etc/rspamd/dkim_selectors.map",
+    # Persistent copy on the shared storage/dkim_keys mount, so the host and
+    # future config (selector_map pointed here) keep a durable version.
+    f"{RSPAMD_KEY_DIR}/dkim_selectors.map",
+)
+
+# Mirrors utils/dkim_sync.py: domain = dot-separated LDH labels, selector =
+# a single label with no dots. Both become path components inside rspamd.
+_DOMAIN_RE = re.compile(
+    r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$", re.I
+)
+_SELECTOR_RE = re.compile(r"^[a-z0-9]([a-z0-9_-]{0,61}[a-z0-9])?$", re.I)
+
+# Exit codes utils/dkim_sync.py's CLI uses
+EXIT_KEY_DIR_UNAVAILABLE = 3
+
+
+def _docker():
+    for candidate in ("docker",):
+        if shutil.which(candidate):
+            return candidate
+    sys.exit("error: docker CLI not found on PATH -- this script runs on the docker host")
+
+
+def _exec(container, argv, input_bytes=None, capture=True):
+    """docker exec into a running container. Returns CompletedProcess."""
+    cmd = [_docker(), "exec", "-i", container] + argv
+    return subprocess.run(
+        cmd,
+        input=input_bytes,
+        stdout=subprocess.PIPE if capture else None,
+        stderr=subprocess.PIPE,
+    )
+
+
+def _check_containers():
+    for name in (API_CONTAINER, RSPAMD_CONTAINER):
+        probe = subprocess.run(
+            [_docker(), "exec", name, "true"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        if probe.returncode != 0:
+            sys.exit(
+                f"error: cannot exec into the '{name}' container -- is the stack running? "
+                "(./start.sh status)"
+            )
+
+
+def _module(args, input_bytes=None):
+    """Run python -m utils.dkim_sync <args> inside the api container."""
+    return _exec(API_CONTAINER, ["python", "-m", "utils.dkim_sync"] + args, input_bytes)
+
+
+def _safe_pair(domain, selector):
+    return bool(_DOMAIN_RE.match(domain or "") and _SELECTOR_RE.match(selector or ""))
+
+
+def _write_key_in_rspamd(domain, selector, pem):
+    """Write one key file inside the rspamd container: 0600, _rspamd-owned,
+    atomic rename. The PEM travels only over the exec stdin pipe."""
+    # Two ordering hazards, both because the rspamd container has CAP_CHOWN but
+    # NOT CAP_FOWNER, so uid-0 can chmod only files it OWNS:
+    #   1. chmod must come BEFORE chown -- once the tmp is chowned to _rspamd,
+    #      root can no longer chmod it (EPERM). Set the mode while root owns it.
+    #   2. rm any stale .tmp first -- a half-finished prior run leaves an
+    #      _rspamd-owned .tmp that `cat >` truncates without re-owning, so the
+    #      writer would again be chmod-ing a file it does not own.
+    script = (
+        "set -euo pipefail; umask 077; "
+        f'f="{RSPAMD_KEY_DIR}/$1.$2.key"; '
+        'rm -f "$f.tmp"; cat > "$f.tmp"; chmod 0600 "$f.tmp"; chown _rspamd:_rspamd "$f.tmp"; '
+        'mv -f "$f.tmp" "$f"'
+    )
+    result = _exec(
+        RSPAMD_CONTAINER,
+        ["bash", "-c", script, "dkim-sync", domain, selector],
+        input_bytes=pem.encode(),
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"writing {domain}.{selector}.key failed: {result.stderr.decode().strip()}"
+        )
+
+
+def _write_map_in_rspamd(map_content):
+    for path in RSPAMD_MAP_PATHS:
+        # Same CAP_FOWNER constraint as _write_key_in_rspamd: chmod BEFORE
+        # chown (root can only chmod a file it owns), and clear any stale tmp
+        # so the writer always owns it.
+        script = (
+            "set -euo pipefail; umask 022; "
+            f'rm -f "{path}.tmp"; cat > "{path}.tmp"; chmod 0644 "{path}.tmp"; '
+            f'chown _rspamd:_rspamd "{path}.tmp" 2>/dev/null || true; mv -f "{path}.tmp" "{path}"'
+        )
+        result = _exec(RSPAMD_CONTAINER, ["bash", "-c", script], input_bytes=map_content.encode())
+        if result.returncode != 0:
+            raise RuntimeError(f"writing {path} failed: {result.stderr.decode().strip()}")
+
+
+def _fix_ownership():
+    """Chown any key file the api container's write-through left behind (it
+    writes as uid 10001; rspamd reads as _rspamd)."""
+    script = (
+        f'find {RSPAMD_KEY_DIR} -maxdepth 1 -name "*.key" '
+        "-exec chown _rspamd:_rspamd {} + -exec chmod 0600 {} + 2>/dev/null || true"
+    )
+    _exec(RSPAMD_CONTAINER, ["bash", "-c", script])
+
+
+def _list_rspamd_keys():
+    result = _exec(RSPAMD_CONTAINER, ["bash", "-c", f"ls -1 {RSPAMD_KEY_DIR} 2>/dev/null || true"])
+    names = []
+    for name in result.stdout.decode().splitlines():
+        name = name.strip()
+        if not name.endswith(".key"):
+            continue
+        body = name[: -len(".key")]
+        domain, _, selector = body.rpartition(".")
+        if domain and _safe_pair(domain, selector):
+            names.append((domain, selector))
+    return names
+
+
+def _export_state():
+    result = _module(["export", "--with-private-keys"])
+    if result.returncode != 0:
+        sys.exit(
+            "error: exporting DKIM state from the api container failed:\n"
+            + result.stderr.decode().strip()
+        )
+    try:
+        return json.loads(result.stdout.decode())
+    except json.JSONDecodeError:
+        sys.exit("error: unexpected output from utils.dkim_sync export")
+
+
+def cmd_sync(prune=False, reload_rspamd=False):
+    _check_containers()
+    state = _export_state()
+
+    desired = set()
+    written = 0
+    for key in state["keys"]:
+        domain, selector = key["domain"], key["selector"]
+        if not _safe_pair(domain, selector):
+            print(f"  skipping unsafe pair {domain!r}/{selector!r}", file=sys.stderr)
+            continue
+        _write_key_in_rspamd(domain, selector, key["private_key_pem"])
+        desired.add((domain, selector))
+        written += 1
+
+    removed = 0
+    if prune:
+        for domain, selector in _list_rspamd_keys():
+            if (domain, selector) in desired:
+                continue
+            _exec(
+                RSPAMD_CONTAINER,
+                ["rm", "-f", "--", f"{RSPAMD_KEY_DIR}/{domain}.{selector}.key"],
+            )
+            removed += 1
+
+    _write_map_in_rspamd(state["map_content"])
+    _fix_ownership()
+
+    for line in state.get("skipped", []):
+        print(f"  skipped (no exportable key material): {line}", file=sys.stderr)
+
+    print(
+        f"DKIM sync complete: {written} key file(s) written, {removed} pruned, "
+        f"selector map has {state['map_entries']} entr(y/ies)."
+    )
+    print(
+        "Rspamd loads new key files on first use and re-reads the selector map on its "
+        "map watch interval (about a minute)."
+    )
+
+    if reload_rspamd:
+        result = subprocess.run(
+            [_docker(), "kill", "--signal=HUP", RSPAMD_CONTAINER],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        if result.returncode == 0:
+            print(
+                "Sent SIGHUP to rspamd (supervisord restarts its programs -- expect a "
+                "few seconds of scanning downtime)."
+            )
+        else:
+            print(f"warning: SIGHUP failed: {result.stderr.decode().strip()}", file=sys.stderr)
+
+
+def cmd_backfill(prune=False, reload_rspamd=False):
+    _check_containers()
+    result = _module(["generate-missing", "--json"])
+    # exit 3 = keys were minted/stored, but the api container has no key dir
+    # mounted -- expected; the sync below materialises the files via rspamd.
+    if result.returncode not in (0, EXIT_KEY_DIR_UNAVAILABLE):
+        sys.exit(
+            "error: generate-missing failed inside the api container:\n"
+            + result.stderr.decode().strip()
+        )
+    try:
+        created = json.loads(result.stdout.decode()).get("created", [])
+    except json.JSONDecodeError:
+        created = []
+
+    if created:
+        print(f"Minted {len(created)} new DKIM key(s). Publish these DNS records:")
+        for record in created:
+            print(f"\n  {record['domain']} (selector {record['selector']}):")
+            print(f'  {record["record_name"]} IN TXT "{record["record_value"]}"')
+        print()
+    else:
+        print("All active dkim_enabled domains already have DKIM keys.")
+
+    cmd_sync(prune=prune, reload_rspamd=reload_rspamd)
+
+
+def cmd_dns(domain):
+    _check_containers()
+    result = _module(["dns", domain])
+    sys.stdout.write(result.stdout.decode())
+    sys.stderr.write(result.stderr.decode())
+    sys.exit(result.returncode)
+
+
+ROTATE_GUIDANCE = (
+    "Per-domain generation/rotation moved to the API so it can be done without a\n"
+    "no-DNS-yet signing window:\n"
+    "  1. POST /api/v1/domains/{domain_id}/dkim/rotate   -> mints a key under a new selector\n"
+    "  2. publish the returned TXT record, wait for propagation\n"
+    "  3. POST /api/v1/domains/{domain_id}/dkim/{selector}/activate\n"
+    "The API write-through (plus `generate_dkim.py sync`) exports the files to rspamd.\n"
+    "For domains that have NO key at all, `generate_dkim.py backfill` mints one safely."
+)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="DKIM Key Generator for Mailyte")
-    parser.add_argument("domain", nargs="?", help="Domain to generate DKIM key for")
-    parser.add_argument("--selector", default="default", help='DKIM selector (default: "default")')
-    parser.add_argument("--key-size", type=int, default=2048, help="RSA key size (default: 2048)")
-    parser.add_argument(
-        "--all", action="store_true", help="Generate keys for all active domains without one"
+    parser = argparse.ArgumentParser(
+        description="Sync DKIM keys from MySQL to rspamd (host-side orchestrator).",
+        epilog="Legacy flags (--all, --update-map, --rotate, --dns) are mapped or refused "
+        "with guidance; see the module docstring.",
     )
-    parser.add_argument("--rotate", metavar="DOMAIN", help="Rotate DKIM key for domain")
     parser.add_argument(
-        "--rotate-all",
+        "command", nargs="?", default="sync", help="sync (default) | backfill | dns <domain>"
+    )
+    parser.add_argument("domain", nargs="?", help="domain for the dns command")
+    parser.add_argument(
+        "--prune",
         action="store_true",
-        help="Rotate every domain with an active DKIM key (phase-07 C2 remediation)",
+        help="delete key files that no longer match an active, dkim-enabled domain",
     )
-    parser.add_argument("--dns", metavar="DOMAIN", help="Show DNS record for domain")
     parser.add_argument(
-        "--update-map", action="store_true", help="Rebuild the selector map from database"
+        "--reload",
+        action="store_true",
+        help="SIGHUP the rspamd container afterwards (brief restart; only needed "
+        "if an existing key file was replaced in place)",
     )
-
+    # Legacy compatibility
+    parser.add_argument("--all", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--update-map", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--rotate", metavar="DOMAIN", help=argparse.SUPPRESS)
+    parser.add_argument("--rotate-all", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--dns", metavar="DOMAIN", help=argparse.SUPPRESS)
+    parser.add_argument("--selector", help=argparse.SUPPRESS)
+    parser.add_argument("--key-size", help=argparse.SUPPRESS)
     args = parser.parse_args()
 
+    if args.rotate or args.rotate_all:
+        sys.exit(ROTATE_GUIDANCE)
+    if args.dns:
+        return cmd_dns(args.dns)
     if args.all:
-        generate_all()
-    elif args.rotate_all:
-        rotate_all()
-    elif args.rotate:
-        rotate_key(args.rotate, args.selector)
-    elif args.dns:
-        show_dns_record(args.dns)
-    elif args.update_map:
-        update_selector_map()
-        print(f"Selector map updated: {SELECTOR_MAP_PATH}")
-    elif args.domain:
-        generate_dkim_for_domain(args.domain, args.selector, args.key_size)
-    else:
-        parser.print_help()
+        return cmd_backfill(prune=args.prune, reload_rspamd=args.reload)
+    if args.update_map:
+        return cmd_sync(prune=args.prune, reload_rspamd=args.reload)
+
+    if args.command == "sync":
+        return cmd_sync(prune=args.prune, reload_rspamd=args.reload)
+    if args.command == "backfill":
+        return cmd_backfill(prune=args.prune, reload_rspamd=args.reload)
+    if args.command == "dns":
+        if not args.domain:
+            sys.exit("usage: generate_dkim.py dns <domain>")
+        return cmd_dns(args.domain)
+
+    # Anything else (including the legacy bare `generate_dkim.py <domain>`)
+    if _DOMAIN_RE.match(args.command):
+        sys.exit(f"Refusing to mint a key for {args.command} directly.\n\n" + ROTATE_GUIDANCE)
+    sys.exit(f"unknown command {args.command!r} -- expected sync | backfill | dns <domain>")
 
 
 if __name__ == "__main__":

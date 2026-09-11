@@ -1,0 +1,297 @@
+--- a/shared/metrics.py
++++ b/shared/metrics.py
+@@ -1,249 +1,71 @@
+ #!/usr/bin/env python3
+ """
+-Shared Prometheus Metrics Utility
++Metrics stub for Community Edition.
+ 
+-Provides a standardized way for all services to expose metrics
+-for Prometheus collection via the monitoring service.
+-"""
++Enterprise Edition exports full Prometheus metrics. CE ships no Prometheus, so
++this module answers the same calls and does nothing with them.
+ 
+-import threading
+-import time
+-from collections import defaultdict
++THE INTERFACE IS IMPLEMENTED BY __getattr__, NOT BY ENUMERATION -- deliberately.
++The previous stub hand-listed five methods and claimed to "provide the same
++interface", but the names did not even match EE's: it defined increment/gauge/
++histogram where PrometheusMetrics defines increment_counter/set_gauge/
++observe_histogram, and it omitted set_info, record_database_operation,
++record_webhook_delivery and time_function entirely. Any CE service reaching one
++of those raised AttributeError at runtime -- worker/webhooks/app.py does exactly
++that, and it is a service CE ships.
+ 
+-import psutil
++A hand-listed stub drifts silently every time EE's metrics class grows a method.
++This one cannot: unknown attributes resolve to a no-op callable, so the failure
++mode is "a metric is not recorded", which is what CE promises, rather than "the
++webhooks service crashes".
++"""
+ 
++from typing import Any, Callable
+ 
+-class PrometheusMetrics:
+-    """
+-    Centralized metrics collection for Prometheus export.
+ 
+-    All services can use this class to register and update metrics
+-    that will be collected by the monitoring service.
+-    """
++class _NoOpMetrics:
++    """No-op metrics collector -- CE does not ship Prometheus integration."""
+ 
+-    def __init__(self, service_name: str):
+-        """Initialize metrics collector for a service."""
++    def __init__(self, service_name: str = ""):
+         self.service_name = service_name
+-        self._metrics = defaultdict(float)
+-        self._counters = defaultdict(int)
+-        self._histograms = defaultdict(list)
+-        self._gauges = defaultdict(float)
+-        self._info = {}
+-        self._lock = threading.Lock()
+ 
+-        # Initialize common metrics
+-        self._init_common_metrics()
+-
+-    def _init_common_metrics(self):
+-        """Initialize common metrics for all services."""
+-        self._metrics["service_up"] = 1
+-        self._metrics["service_start_time"] = time.time()
+-
+-    def increment_counter(self, name: str, value: float = 1, labels: dict[str, str] = None):
+-        """Increment a counter metric."""
+-        with self._lock:
+-            metric_key = self._format_metric_name(name, labels)
+-            self._counters[metric_key] += value
+-
+-    def set_gauge(self, name: str, value: float, labels: dict[str, str] = None):
+-        """Set a gauge metric."""
+-        with self._lock:
+-            metric_key = self._format_metric_name(name, labels)
+-            self._gauges[metric_key] = value
+-
+-    def observe_histogram(self, name: str, value: float, labels: dict[str, str] = None):
+-        """Add an observation to a histogram metric."""
+-        with self._lock:
+-            metric_key = self._format_metric_name(name, labels)
+-            self._histograms[metric_key].append(value)
+-
+-            # Keep only last 1000 observations
+-            if len(self._histograms[metric_key]) > 1000:
+-                self._histograms[metric_key] = self._histograms[metric_key][-1000:]
+-
+-    def set_info(self, name: str, info: dict[str, str]):
+-        """Set info metric with labels."""
+-        with self._lock:
+-            self._info[name] = info
+-
+-    def _format_metric_name(self, name: str, labels: dict[str, str] = None) -> str:
+-        """Format metric name with labels."""
+-        if not labels:
+-            return f"{self.service_name}_{name}"
+-
+-        label_str = ",".join([f'{k}="{v}"' for k, v in sorted(labels.items())])
+-        return f"{self.service_name}_{name}{{{label_str}}}"
+-
+     def get_prometheus_metrics(self) -> str:
+-        """Generate Prometheus format metrics."""
+-        lines = []
++        # Explicit because callers use the RETURN VALUE -- the /metrics
++        # endpoint serves it as a body. A generic no-op returning None would
++        # surface as a 500 rather than an honest empty scrape.
++        return "# Prometheus metrics available in Mailyte Enterprise Edition\n"
+ 
+-        with self._lock:
+-            # Add service info
+-            lines.append(f"# HELP {self.service_name}_info Service information")
+-            lines.append(f"# TYPE {self.service_name}_info gauge")
+-            lines.append(
+-                f'{self.service_name}_info{{version="1.0.0",service="{self.service_name}"}} 1'
+-            )
++    def __getattr__(self, name: str) -> Callable[..., None]:
++        """Accept any recording call PrometheusMetrics defines, and drop it.
+ 
+-            # Add uptime
+-            uptime = time.time() - self._metrics["service_start_time"]
+-            lines.append(f"# HELP {self.service_name}_uptime_seconds Service uptime in seconds")
+-            lines.append(f"# TYPE {self.service_name}_uptime_seconds counter")
+-            lines.append(f"{self.service_name}_uptime_seconds {uptime}")
+-
+-            # Counters, gauges and histograms are keyed by their FULLY
+-            # FORMATTED name, labels included -- so `_emit_family` has to group
+-            # them back by base name before writing TYPE lines. See its
+-            # docstring for why this is not cosmetic.
+-            self._emit_family(lines, self._counters, "counter")
+-            self._emit_family(lines, self._gauges, "gauge")
+-
+-            # Histograms (simplified as summary)
+-            histogram_bases = set()
+-            for metric_name, observations in self._histograms.items():
+-                if not observations:
+-                    continue
+-                base, labels = self._split_name(metric_name)
+-                if base not in histogram_bases:
+-                    lines.append(f"# TYPE {base} summary")
+-                    histogram_bases.add(base)
+-
+-                # _count and _sum are suffixes on the METRIC NAME, so they go
+-                # before the label set, not after it.
+-                lines.append(f"{base}_count{labels} {len(observations)}")
+-                lines.append(f"{base}_sum{labels} {sum(observations)}")
+-
+-                sorted_obs = sorted(observations)
+-                if sorted_obs:
+-                    inner = labels[1:-1] + "," if labels else ""
+-                    for q, idx in (
+-                        ("0.5", int(len(sorted_obs) * 0.5)),
+-                        ("0.95", int(len(sorted_obs) * 0.95)),
+-                        ("0.99", int(len(sorted_obs) * 0.99)),
+-                    ):
+-                        idx = min(idx, len(sorted_obs) - 1)
+-                        lines.append(f'{base}{{{inner}quantile="{q}"}} {sorted_obs[idx]}')
+-
+-            # Add system metrics
+-            self._add_system_metrics(lines)
+-
+-        return "\n".join(lines)
+-
+-    @staticmethod
+-    def _split_name(formatted: str) -> tuple[str, str]:
+-        """Split `name{a="b"}` into ("name", '{a="b"}'); no labels -> ("name", "")."""
+-        brace = formatted.find("{")
+-        if brace == -1:
+-            return formatted, ""
+-        return formatted[:brace], formatted[brace:]
+-
+-    def _emit_family(self, lines: list, series: dict, metric_type: str) -> None:
+-        """Write one TYPE line per metric family, then every labelled series.
+-
+-        This is not cosmetic. The previous version emitted
+-        `# TYPE name{label="x"} gauge` for each series, which is invalid
+-        exposition format twice over: TYPE takes a bare metric name, and a
+-        family may only be declared once. Prometheus rejects the ENTIRE scrape
+-        on a malformed TYPE line, so every labelled metric this platform
+-        produced was silently absent from Prometheus -- the dashboards and
+-        alerts built on them could never have fired. Found while checking that
+-        the backup absence alerts matched a real series; they matched nothing.
++        Only reached for attributes not defined above, so the explicit members
++        keep their behaviour. Names beginning with an underscore are refused so
++        that copy/pickle protocol probes and `hasattr(m, "_lock")` style checks
++        still fail honestly instead of returning a function.
+         """
+-        grouped: dict[str, list[tuple[str, float]]] = {}
+-        for formatted, value in series.items():
+-            base, labels = self._split_name(formatted)
+-            grouped.setdefault(base, []).append((labels, value))
++        if name.startswith("_"):
++            raise AttributeError(name)
+ 
+-        for base, entries in grouped.items():
+-            lines.append(f"# TYPE {base} {metric_type}")
+-            for labels, value in entries:
+-                lines.append(f"{base}{labels} {value}")
++        def _noop(*args: Any, **kwargs: Any) -> None:
++            return None
+ 
+-    def _add_system_metrics(self, lines: list):
+-        """Add system-level metrics."""
+-        try:
+-            # CPU usage
+-            cpu_percent = psutil.cpu_percent(interval=0.1)
+-            lines.append(f"# TYPE {self.service_name}_cpu_usage_percent gauge")
+-            lines.append(f"{self.service_name}_cpu_usage_percent {cpu_percent}")
++        _noop.__name__ = name
++        return _noop
+ 
+-            # Memory usage
+-            memory = psutil.virtual_memory()
+-            lines.append(f"# TYPE {self.service_name}_memory_usage_percent gauge")
+-            lines.append(f"{self.service_name}_memory_usage_percent {memory.percent}")
+ 
+-            lines.append(f"# TYPE {self.service_name}_memory_usage_bytes gauge")
+-            lines.append(f"{self.service_name}_memory_usage_bytes {memory.used}")
++def get_metrics(service_name: str = "") -> _NoOpMetrics:
++    """Get a metrics collector instance (no-op in Community Edition)."""
++    return _NoOpMetrics(service_name)
+ 
+-        except Exception:
+-            # Silently ignore system metrics errors
+-            pass
+ 
+-    def record_request(self, method: str, path: str, status_code: int, duration: float):
+-        """Record HTTP request metrics."""
+-        labels = {"method": method, "path": path, "status_code": str(status_code)}
+-
+-        self.increment_counter("http_requests_total", labels=labels)
+-        self.observe_histogram(
+-            "http_request_duration_seconds", duration, labels={"method": method, "path": path}
+-        )
+-
+-        # Track error rate
+-        if status_code >= 400:
+-            self.increment_counter("http_errors_total", labels=labels)
+-
+-    def record_database_operation(self, operation: str, duration: float, success: bool = True):
+-        """Record database operation metrics."""
+-        labels = {"operation": operation, "status": "success" if success else "error"}
+-
+-        self.increment_counter("database_operations_total", labels=labels)
+-        self.observe_histogram(
+-            "database_operation_duration_seconds", duration, labels={"operation": operation}
+-        )
+-
+-    def record_webhook_delivery(self, url: str, status_code: int, duration: float):
+-        """Record webhook delivery metrics."""
+-        labels = {"url": url, "status_code": str(status_code)}
+-
+-        self.increment_counter("webhook_deliveries_total", labels=labels)
+-        self.observe_histogram("webhook_delivery_duration_seconds", duration)
+-
+-        if status_code >= 400:
+-            self.increment_counter("webhook_delivery_errors_total", labels=labels)
+-
+-
+-# Global metrics instances for each service
+-_metrics_instances = {}
+-
+-
+-def get_metrics(service_name: str) -> PrometheusMetrics:
+-    """Get or create metrics instance for a service."""
+-    if service_name not in _metrics_instances:
+-        _metrics_instances[service_name] = PrometheusMetrics(service_name)
+-    return _metrics_instances[service_name]
+-
+-
+-# Decorator for timing functions
+ def time_function(metric_name: str = None, service_name: str = None):
+-    """Decorator to time function execution."""
++    """Pass-through form of EE's timing decorator.
+ 
++    Absent from the previous CE stub altogether, so `@time_function(...)` on any
++    ported code would have failed at import time -- before a single request.
++    """
++
+     def decorator(func):
+-        def wrapper(*args, **kwargs):
+-            start_time = time.time()
+-            try:
+-                result = func(*args, **kwargs)
+-                success = True
+-                return result
+-            except Exception:
+-                success = False
+-                raise
+-            finally:
+-                duration = time.time() - start_time
+-                if service_name and metric_name:
+-                    metrics = get_metrics(service_name)
+-                    metrics.observe_histogram(metric_name, duration)
++        return func
+ 
+-        return wrapper
+-
+     return decorator

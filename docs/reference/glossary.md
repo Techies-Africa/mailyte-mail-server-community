@@ -127,11 +127,20 @@ Email has a lot of jargon. This page explains all of it in plain English.
 **Worker**
 :   A background service that handles a specific job — tracking events, sending webhooks, calculating analytics, managing the queue, etc. Workers run as separate Docker containers.
 
+**SMTP Credential**
+:   A domain-scoped API key for sending mail over SMTP (ports 587/465) without a mailbox. Looks like `acme-com-smtp-a1b2c3d4` plus a secret shown once at creation. Authenticated by Dovecot directly against the `smtp_credentials` table, with optional per-key IP allowlists, expiry, and rate limits, and a full audit trail. Live since 2026-08-27.
+
+**Log Ingestor**
+:   The service that tails Postfix's mail log and turns each delivery attempt into a `mail_logs` row and an `email.delivered`/`bounced`/`deferred`/`rejected` webhook. It is where "email logs" in the UIs come from (since 2026-08-22).
+
+**Transport Cutover Map**
+:   A Postfix `transport_maps` file (`config/mailer/postfix/transport_cutover`) listing domains provisioned here whose MX still points elsewhere, so their mail routes out by public MX instead of delivering into an unread local mailbox. Entries must be removed at MX cutover or inbound mail loop-bounces.
+
 **RAG (Retrieval-Augmented Generation)**
-:   Mailyte's AI-powered email search. Emails are converted to vector embeddings and stored in Qdrant. When you search, the query is compared against these vectors to find semantically similar emails — even if the exact words don't match.
+:   Mailyte's AI-powered email search. Emails are converted to vector embeddings (locally by default, via sentence-transformers) and stored in Qdrant. When you search, the query is compared against these vectors to find semantically similar emails — even if the exact words don't match.
 
 **Qdrant**
 :   The vector database used for RAG search. It stores mathematical representations of email content, enabling "meaning-based" search rather than keyword matching.
 
 **cert_manager**
-:   Mailyte's built-in service that handles Let's Encrypt certificate issuance and renewal. It also manages SNI (Server Name Indication) for serving different certificates per domain.
+:   Mailyte's built-in service that handles Let's Encrypt certificate issuance and renewal (certbot webroot HTTP-01). It also generates the SNI (Server Name Indication) maps that let Postfix, Dovecot, and Traefik serve each domain its own certificate.

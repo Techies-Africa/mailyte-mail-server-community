@@ -16,7 +16,7 @@ Architecture:
     replay-attack prevention, similar to Mailgun's webhook authentication
   - Automatic retries with Mailgun-style schedule (7 attempts over ~8 hours)
   - HTTP 406 response from endpoint permanently stops delivery (no retry, no DLQ)
-  - Failed deliveries are logged to the `webhook_delivery_log` table
+  - Failed deliveries are logged to the `webhook_delivery_logs` table
   - Permanently failed events are written to the `webhook_dead_letters` table
   - Redis pub/sub for cross-container fan-out (services in different
     containers publish to Redis; a single dispatcher process picks them up)
@@ -74,6 +74,12 @@ import uuid
 from datetime import UTC, datetime
 from queue import Empty, Queue
 from typing import Any
+
+# Explicit `shared.` prefix per conventions SS6 -- every consumer of this
+# module already imports it as `shared.webhook_dispatcher`, so the package is
+# on sys.path wherever this runs, and a bare `from ulid_utils import ...`
+# would resolve against whatever happens to sit in the service's own /app.
+from shared.ulid_utils import generate_ulid
 
 logger = logging.getLogger("webhook_dispatcher")
 
@@ -271,8 +277,57 @@ def _deliver(envelope: dict, attempt: int = 1) -> bool | None:
         return False
 
 
+# Envelopes are small (a few KB); anything past this is pathological and
+# indicates a caller stuffing a message body into `data`. The previous code
+# capped the serialised envelope at 50000 chars with a bare slice, which
+# produces INVALID JSON the moment the cap bites -- and `payload` is a
+# `json NOT NULL` column, so MySQL rejects the whole INSERT rather than
+# storing a truncated string. Store a *valid* marker object instead, so the
+# row still exists (an operator needs to know the event was lost) even
+# though it can no longer be replayed verbatim.
+_DLQ_PAYLOAD_MAX_CHARS = 1_000_000
+
+
+def _dlq_payload_json(envelope: dict) -> str:
+    serialised = json.dumps(envelope, default=str)
+    if len(serialised) <= _DLQ_PAYLOAD_MAX_CHARS:
+        return serialised
+    return json.dumps(
+        {
+            "_truncated": True,
+            "_original_bytes": len(serialised),
+            "id": envelope.get("id"),
+            "event": envelope.get("event"),
+            "timestamp": envelope.get("timestamp"),
+            "source": envelope.get("source"),
+            "org_id": envelope.get("org_id"),
+            "domain": envelope.get("domain"),
+        },
+        default=str,
+    )
+
+
 def _write_to_dlq(envelope: dict):
-    """Write a permanently failed webhook event to the dead letter queue table."""
+    """Write a permanently failed webhook event to the dead letter queue table.
+
+    Column names here are the ones `webhook_dead_letters` actually has
+    (alembic/versions/0001_baseline.py -- a mysqldump of the live DB, the
+    authoritative schema; database/models/ has drifted and must not be
+    trusted for this). This INSERT previously named `webhook_url`,
+    `error_message` and `retry_count`, none of which exist on that table --
+    every dead-letter write since the table was created failed with "Unknown
+    column" and was swallowed by the except below, so permanently-failed
+    events vanished silently instead of landing in the queue built to catch
+    them. Real columns: endpoint_url / last_error / attempt_count.
+
+    `id` is BIGINT AUTO_INCREMENT on this table (unlike webhook_urls and
+    webhook_delivery_logs, which were converted to CHAR(26) ULIDs by
+    009_ulid_safe.sql) -- deliberately not supplied.
+
+    `status` starts at 'pending': the enum is
+    ('pending','retrying','resolved','abandoned') and a fresh dead letter is
+    awaiting operator triage, not resolved.
+    """
     try:
         import mysql.connector
 
@@ -288,13 +343,13 @@ def _write_to_dlq(envelope: dict):
         cursor.execute(
             """
             INSERT INTO webhook_dead_letters
-                (event_type, payload, webhook_url, error_message,
-                 organization_id, retry_count, created_at)
-            VALUES (%s, %s, %s, %s, %s, %s, NOW())
+                (event_type, payload, endpoint_url, last_error,
+                 organization_id, attempt_count, status, created_at, last_attempted_at)
+            VALUES (%s, %s, %s, %s, %s, %s, 'pending', NOW(), NOW())
         """,
             (
                 envelope.get("event", ""),
-                json.dumps(envelope, default=str)[:50000],
+                _dlq_payload_json(envelope),
                 WEBHOOK_URL,
                 f"Failed after {WEBHOOK_MAX_RETRIES} delivery attempts",
                 envelope.get("org_id"),
@@ -355,8 +410,46 @@ def _deliver_with_retries(envelope: dict):
 # ---------------------------------------------------------------------------
 
 
+# `event_data` is a `json NOT NULL` column, so a truncated blob is not a
+# smaller row -- it is a syntax error MySQL rejects outright. Same trap
+# _dlq_payload_json() above already sidesteps for the dead-letter table;
+# this one previously did a bare `[:10000]` slice on the serialised data.
+_LOG_EVENT_DATA_MAX_CHARS = 100_000
+
+
+def _log_event_data_json(envelope: dict) -> str:
+    serialised = json.dumps(envelope.get("data", {}), default=str)
+    if len(serialised) <= _LOG_EVENT_DATA_MAX_CHARS:
+        return serialised
+    return json.dumps(
+        {"_truncated": True, "_original_bytes": len(serialised), "id": envelope.get("id")},
+        default=str,
+    )
+
+
 def _log_delivery(envelope: dict, status_code: int, attempt: int, success: bool, error: str = ""):
-    """Log webhook delivery to database. Non-blocking, best-effort."""
+    """Log webhook delivery to database. Non-blocking, best-effort.
+
+    The table is `webhook_delivery_logs`, PLURAL. This INSERT named
+    `webhook_delivery_log` (singular), which does not exist in the schema at
+    all -- so every delivery-log write since this function was written failed
+    with "Table doesn't exist" and was swallowed by the bare except below.
+    GET /api/v1/webhooks/deliveries reads the real, plural table
+    (worker/api/routes/webhooks.py) and has therefore always returned an
+    empty list no matter how much traffic the dispatcher pushed.
+
+    `id` is CHAR(26) NOT NULL with no DB-side default -- 009_ulid_safe.sql
+    converted this PK away from AUTO_INCREMENT (unlike webhook_dead_letters,
+    which is still BIGINT AUTO_INCREMENT and correctly omits it) -- so the
+    ULID has to be supplied here. Every other column named below was checked
+    against alembic/versions/0001_baseline.py and exists on the table;
+    everything not named is nullable or defaulted.
+
+    `delivery_status` values are lowercase to match the enum as declared
+    ('pending','delivered','failed','retrying','abandoned'). The previous
+    uppercase literals only survived because the column collation is
+    case-insensitive -- not something to keep relying on.
+    """
     try:
         import mysql.connector
 
@@ -371,19 +464,20 @@ def _log_delivery(envelope: dict, status_code: int, attempt: int, success: bool,
         cursor = conn.cursor()
         cursor.execute(
             """
-            INSERT INTO webhook_delivery_log
-                (event_type, event_data, webhook_url, delivery_status,
+            INSERT INTO webhook_delivery_logs
+                (id, event_type, event_data, webhook_url, delivery_status,
                  http_status_code, attempts, error_message,
                  organization_id, created_at, delivered_at)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, NOW(), %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), %s)
         """,
             (
+                generate_ulid(),
                 envelope.get("event", ""),
-                json.dumps(envelope.get("data", {}), default=str)[:10000],
+                _log_event_data_json(envelope),
                 WEBHOOK_URL,
-                "DELIVERED"
+                "delivered"
                 if success
-                else ("FAILED" if attempt >= WEBHOOK_MAX_RETRIES else "RETRYING"),
+                else ("failed" if attempt >= WEBHOOK_MAX_RETRIES else "retrying"),
                 status_code,
                 attempt,
                 error[:2000] if error else None,
@@ -394,8 +488,11 @@ def _log_delivery(envelope: dict, status_code: int, attempt: int, success: bool,
         conn.commit()
         cursor.close()
         conn.close()
-    except Exception:
-        pass  # Never block dispatch over a logging failure
+    except Exception as exc:
+        # Never block dispatch over a logging failure -- but say something.
+        # Logging nothing at all is what let the table-name bug above sit
+        # undetected for the entire life of this function.
+        logger.warning(f"Webhook delivery log write failed: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -599,6 +696,33 @@ def dispatch_event_sync(
     )
     _stats["dispatched"] += 1
     _deliver_with_retries(envelope)
+    return True
+
+
+def requeue_envelope(envelope: dict) -> bool:
+    """Put an already-built envelope back on the normal dispatch path
+    (Console PRD SS12 gap #8b -- dead-letter replay).
+
+    Deliberately NOT a second delivery implementation: it starts the same
+    worker pool and pushes onto the same queue that dispatch_event() uses,
+    so a replayed event goes through _deliver_with_retries -> _deliver with
+    the identical signing, retry schedule, delivery logging and re-DLQ
+    behaviour as a first-time dispatch. The only difference is that the
+    envelope is the *original* one read back out of
+    webhook_dead_letters.payload rather than freshly built -- replaying must
+    resend what was actually lost, including its original event id, so a
+    receiver's idempotency check can recognise the duplicate.
+
+    Returns False when WEBHOOK_URL is unset. This dispatcher delivers to one
+    global endpoint (see this module's header); with no endpoint configured
+    there is nothing to replay *to*, and callers must surface that as a
+    failure rather than reporting a replay that silently went nowhere.
+    """
+    if not WEBHOOK_URL:
+        return False
+    _stats["dispatched"] += 1
+    _ensure_workers()
+    _enqueue(envelope)
     return True
 
 

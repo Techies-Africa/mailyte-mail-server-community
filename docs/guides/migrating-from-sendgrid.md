@@ -1,11 +1,11 @@
 ---
 title: Migrating from SendGrid
-description: Move your sending domains, templates, and email flow from SendGrid to Mailyte step by step.
+description: Move your sending domains, application sending, suppression lists, and event webhooks from SendGrid to Mailyte step by step.
 ---
 
 # Migrating from SendGrid
 
-This guide covers migrating from SendGrid to Mailyte. SendGrid is primarily a transactional/marketing email service, so the migration focuses on sending domains, API integration, and webhook reconfiguration.
+This guide covers migrating from SendGrid to Mailyte. SendGrid is primarily a transactional/marketing email service, so the migration focuses on sending domains, replacing the sending API with SMTP credentials, and webhook reconfiguration.
 
 ## Before You Start
 
@@ -14,10 +14,13 @@ You'll need:
 - A running Mailyte server with API access
 - Admin access to your SendGrid account
 - Access to your DNS provider
-- Your Mailyte API key
+- Your Mailyte API key (see [Authentication](../api/authentication.md))
+
+!!! info "API base URL"
+    Examples use `https://api.yourdomain.com` — in production Traefik publishes the API at `api.<your-domain>`; a dev checkout exposes it at `http://localhost:8083`.
 
 !!! note "SendGrid vs Mailyte"
-    SendGrid is a cloud email API. Mailyte is a full email server — it handles both sending *and* receiving, plus IMAP/POP3 access. You're gaining mailbox hosting, spam filtering, and full control over your infrastructure.
+    SendGrid is a cloud email API. Mailyte is a full email server — it handles both sending *and* receiving, plus IMAP/POP3 access. You're gaining mailbox hosting, spam filtering, and full control over your infrastructure. The one structural difference for your application: Mailyte has no HTTP "send" endpoint — apps send over standard SMTP with a domain-scoped credential.
 
 ## Step 1: Audit Your SendGrid Setup
 
@@ -28,18 +31,11 @@ Log into SendGrid and note:
 - **Webhook endpoints** — Settings > Mail Settings > Event Webhook
 - **IP addresses** — if you have dedicated IPs, note your reputation score
 - **Suppression lists** — bounces, spam reports, unsubscribes
-- **Templates** — if you use SendGrid's template engine
+- **Templates** — if you use SendGrid's template engine, export the HTML; you'll render templates in your own application when sending via SMTP
 
 ### Export Suppression Lists
 
-From the SendGrid dashboard, go to Suppressions and export each list as CSV:
-
-- Bounces
-- Spam Reports
-- Invalid Emails
-- Unsubscribes
-
-Or use the API:
+From the SendGrid dashboard, go to Suppressions and export each list as CSV, or use the API:
 
 ```bash
 # Bounces
@@ -60,8 +56,8 @@ curl -X GET https://api.sendgrid.com/v3/suppression/blocks \
 ### Create Organization and Domain
 
 ```bash
-# Create org
-curl -X POST http://mail.yourdomain.com:8083/api/v1/add/organization \
+# Create org (admin-scoped platform key required)
+curl -X POST https://api.yourdomain.com/api/v1/organizations/ \
   -H "X-API-Key: YOUR_MAILYTE_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -70,8 +66,9 @@ curl -X POST http://mail.yourdomain.com:8083/api/v1/add/organization \
     "admin_email": "admin@mycompany.com"
   }'
 
-# Add domain
-curl -X POST http://mail.yourdomain.com:8083/api/v1/add/domain \
+# Add domain — DKIM keys are generated automatically and the response
+# carries domain_id plus every DNS record to publish
+curl -X POST https://api.yourdomain.com/api/v1/domains/ \
   -H "X-API-Key: YOUR_MAILYTE_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -81,34 +78,40 @@ curl -X POST http://mail.yourdomain.com:8083/api/v1/add/domain \
   }'
 ```
 
+Save the response — `domain_id`, `dns_records`, and `dkim_record` are all needed below.
+
 ### Create Sending Mailboxes
 
-Unlike SendGrid, Mailyte needs actual mailboxes for sending addresses:
+Unlike SendGrid, Mailyte hosts real mailboxes. Create one for each sending address so replies and bounces have somewhere to land:
 
 ```bash
-curl -X POST http://mail.yourdomain.com:8083/api/v1/add/mailbox \
+curl -X POST https://api.yourdomain.com/api/v1/mailboxes/email-accounts \
   -H "X-API-Key: YOUR_MAILYTE_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "local_part": "noreply",
-    "domain": "mycompany.com",
-    "password": "strong-password-here",
-    "name": "No Reply"
+    "email": "noreply@mycompany.com",
+    "password": "Str0ng-Passw0rd-2026",
+    "name": "No Reply",
+    "domain_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV"
   }'
 ```
 
-### Generate DKIM
+### Mint an SMTP Credential for Your Application
+
+This replaces the SendGrid API key (SMTP credentials shipped 2026-08-27):
 
 ```bash
-curl -X POST http://mail.yourdomain.com:8083/api/v1/add/dkim \
+curl -X POST https://api.yourdomain.com/api/v1/smtp-credentials/ \
   -H "X-API-Key: YOUR_MAILYTE_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "domains": "mycompany.com",
-    "dkim_selector": "default",
-    "key_size": "2048"
+    "domain_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    "name": "production app",
+    "daily_limit": 100000
   }'
 ```
+
+The response carries the generated `username` and the plaintext `secret` — **returned exactly once**, so store it in your secrets manager immediately. Credentials support IP allowlists, expiry, hourly/daily limits, rotation (`POST /{id}/rotate`), and instant revocation (`POST /{id}/revoke`).
 
 ## Step 3: Update DNS Records
 
@@ -125,26 +128,31 @@ s2._domainkey.mycompany.com  CNAME  s2.domainkey.u1234567.wl123.sendgrid.net
 
 ### Add Mailyte Records
 
+Publish the records from the `dns_records` array in the domain-creation response — the shape is:
+
 ```
 ; MX record — point incoming mail to Mailyte
 mycompany.com.    IN  MX  10  mail.yourdomain.com.
 
-; SPF — authorize Mailyte
-mycompany.com.    IN  TXT  "v=spf1 mx a:mail.yourdomain.com ip4:YOUR_SERVER_IP -all"
+; SPF — authorize Mailyte (copy the exact include from dns_records)
+mycompany.com.    IN  TXT  "v=spf1 include:spf.mail.yourdomain.com ~all"
 
-; DKIM — use key from Mailyte
+; DKIM — the dkim_record value, at the dkim_dns_name name
 default._domainkey.mycompany.com.  IN  TXT  "v=DKIM1; k=rsa; p=YOUR_PUBLIC_KEY"
 
 ; DMARC — start with monitoring
 _dmarc.mycompany.com.  IN  TXT  "v=DMARC1; p=none; rua=mailto:dmarc@mycompany.com"
 ```
 
+!!! warning "Turn DKIM signing on"
+    The DKIM key created via the API enables the DNS record, but Rspamd signs from key files on disk — follow [Setting Up DKIM](setting-up-dkim.md) or outbound mail goes out unsigned.
+
 !!! tip "Lower TTL first"
     Drop your DNS TTL to 300 seconds the day before migration. This lets you switch back quickly if needed.
 
 ## Step 4: Update Your Application Code
 
-The biggest change is swapping the SendGrid API calls for Mailyte API calls.
+The biggest change: SendGrid API calls become plain SMTP with your new credential.
 
 ### SendGrid SDK (Before)
 
@@ -163,39 +171,68 @@ message = Mail(
 sg.send(message)
 ```
 
-### Mailyte API (After)
+### Mailyte SMTP (After)
 
 ```python
-import requests
+import smtplib
+from email.message import EmailMessage
 
-MAILYTE_API = "http://mail.yourdomain.com:8083/api/v1"
-API_KEY = "YOUR_MAILYTE_API_KEY"
+msg = EmailMessage()
+msg["From"] = "noreply@mycompany.com"
+msg["To"] = "user@example.com"
+msg["Subject"] = "Hello"
+msg.set_content("Hi there")  # text/plain part
+msg.add_alternative("<p>Hi there</p>", subtype="html")
 
-headers = {"X-API-Key": API_KEY, "Content-Type": "application/json"}
-
-resp = requests.post(
-    f"{MAILYTE_API}/send/email",
-    headers=headers,
-    json={
-        "from": "noreply@mycompany.com",
-        "to": "user@example.com",
-        "subject": "Hello",
-        "html": "<p>Hi there</p>",
-    },
-)
-print(resp.json())
+with smtplib.SMTP("mail.yourdomain.com", 587) as smtp:
+    smtp.starttls()
+    smtp.login("mycompany-com-smtp-a1b2c3d4", "YOUR_SMTP_SECRET")
+    smtp.send_message(msg)
 ```
+
+Any framework mailer (Laravel, Rails ActionMailer, Django, Nodemailer) works unchanged — just point it at host `mail.yourdomain.com`, port 587 (STARTTLS) or 465 (TLS), with the credential's username/password.
+
+!!! warning "Sender must match the credential's domain"
+    Sender-login mismatch is enforced on ports 587 and 465 — a credential scoped to `mycompany.com` can only send `From:` addresses at that domain.
 
 ### Quick Reference: API Mapping
 
 | SendGrid | Mailyte | Notes |
 |----------|---------|-------|
-| `POST /v3/mail/send` | `POST /api/v1/send/email` | Different payload format |
-| `GET /v3/stats` | `GET /api/v1/get/status/stats` | Similar data, different structure |
-| `GET /v3/suppression/bounces` | `GET /api/v1/get/bounces` | Per-organization scoping |
-| Event Webhook | Webhook service on `:8081` | Different event names |
+| `POST /v3/mail/send` | SMTP submission on 587/465 with an SMTP credential | No HTTP send endpoint |
+| API key management | `GET/POST /api/v1/smtp-credentials/`, `/{id}/rotate`, `/{id}/revoke` | Per-domain scoping, limits, IP allowlists |
+| `GET /v3/stats` | `GET /api/v1/analytics/email-volume/{domain}`, `GET /api/v1/analytics/deliverability/{domain}` | Per-domain scoping |
+| `GET /v3/suppression/bounces` | `GET /api/v1/tracking/suppressions?suppression_type=BOUNCE` | Filterable, paginated |
+| Event Webhook | Global `WEBHOOK_URL` dispatcher + registered endpoints | Different event names — see below |
+| Message search | `GET /api/v1/message-trace/trace` | Full delivery lifecycle per message |
 
-## Step 5: Migrate Webhook Handling
+## Step 5: Import Suppression Lists
+
+```python
+import json
+import requests
+
+headers = {"X-API-Key": "YOUR_MAILYTE_API_KEY", "Content-Type": "application/json"}
+
+for filename, stype in [
+    ("sg_bounces.json", "BOUNCE"),
+    ("sg_spam_reports.json", "COMPLAINT"),
+    ("sg_blocks.json", "BOUNCE"),
+]:
+    with open(filename) as f:
+        emails = [item["email"] for item in json.load(f)]
+    for chunk in (emails[i : i + 1000] for i in range(0, len(emails), 1000)):
+        resp = requests.post(
+            "https://api.yourdomain.com/api/v1/tracking/suppressions/bulk",
+            headers=headers,
+            json={"emails": chunk, "suppression_type": stype, "reason": "imported from SendGrid"},
+        )
+        print(filename, resp.status_code)
+```
+
+The bulk endpoint takes up to 1000 addresses per call and requires an operator-role credential; per-address failures are reported individually rather than silently dropped.
+
+## Step 6: Migrate Webhook Handling
 
 SendGrid and Mailyte use different webhook formats.
 
@@ -214,32 +251,33 @@ SendGrid and Mailyte use different webhook formats.
 
 ### Mailyte Event Format
 
+Mail-flow events are delivered to the platform-wide `WEBHOOK_URL` with a consistent envelope:
+
 ```json
 {
-  "event": "email.smtp.outbound",
-  "timestamp": "2025-01-15T10:30:00Z",
-  "payload": {
-    "direction": "outbound",
-    "metadata": {
-      "message_id": "<abc@mycompany.com>",
-      "from": "noreply@mycompany.com",
-      "to": "user@example.com"
-    },
-    "delivery_info": {
-      "delivery_status": "sent",
-      "dsn_status": "2.0.0"
-    }
-  }
+  "id": "0d4f6c1e-6a0e-4f3f-9d3c-0b8b1a2c3d4e",
+  "event": "email.delivered",
+  "timestamp": "2026-08-30T10:30:00+00:00",
+  "source": "log_ingestor",
+  "org_id": "my-company",
+  "domain": "mycompany.com",
+  "data": {
+    "message_id": "<abc@mycompany.com>",
+    "recipient": "user@example.com"
+  },
+  "signature": {"timestamp": 1756550000, "token": "…", "signature": "…"}
 }
 ```
 
 Key differences:
 
 - SendGrid sends an array of events; Mailyte sends one event per request
-- Mailyte signs payloads with `X-Webhook-Signature` header (HMAC-SHA256)
-- Event names differ — see [Webhook Events](../reference/webhook-events.md) for the full list
+- Mailyte signs the raw body with an `X-Webhook-Signature: sha256=<hex>` header (HMAC-SHA256) and includes an inline replay-protection signature block
+- Event names differ — `delivered` → `email.delivered`, `bounce` → `email.bounced` / `delivery.bounce.hard`, `open` → `tracking.open`, `click` → `tracking.click`
 
-## Step 6: Warm Up Your IP
+Set `WEBHOOK_URL` and `WEBHOOK_SECRET` on the Mailyte deployment, and see [Custom Integrations](custom-integrations.md) for the full delivery model, verification code, and retry schedule.
+
+## Step 7: Warm Up Your IP
 
 If you were on SendGrid's shared IPs, your Mailyte server IP has no sending reputation. You need to warm it up gradually.
 
@@ -258,13 +296,18 @@ During warm-up:
 - Watch for deferrals from Gmail and Microsoft
 - Check [Google Postmaster Tools](https://postmaster.google.com/) daily
 
-See [Improving Deliverability](improving-deliverability.md) for the full warm-up guide.
+The SMTP credential's `hourly_limit`/`daily_limit` fields are a convenient enforcement mechanism for the ramp — raise them week by week. See [Improving Deliverability](improving-deliverability.md) for the full warm-up guide.
 
-## Step 7: Verify Everything
+## Step 8: Verify Everything
 
 ### DNS Check
 
 ```bash
+# Server-side, all four records at once
+curl https://api.yourdomain.com/api/v1/domains/DOMAIN_ID/verify-dns \
+  -H "X-API-Key: YOUR_MAILYTE_API_KEY"
+
+# Or manually
 DOMAIN="mycompany.com"
 echo "=== MX ===" && dig MX $DOMAIN +short
 echo "=== SPF ===" && dig TXT $DOMAIN +short | grep spf
@@ -274,21 +317,21 @@ echo "=== DMARC ===" && dig TXT _dmarc.$DOMAIN +short
 
 ### Send Test Email
 
-Send to [mail-tester.com](https://www.mail-tester.com/) and aim for a score of 9/10 or higher.
+Send to [mail-tester.com](https://www.mail-tester.com/) using the SMTP credential and aim for a score of 9/10 or higher.
 
 ### Checklist
 
 - [x] MX records point to Mailyte
-- [x] SPF includes Mailyte server IP
-- [x] DKIM key is published and signing works
+- [x] SPF includes the Mailyte SPF host
+- [x] DKIM key is published and signing works (check `dkim=pass` in received headers)
 - [x] DMARC record is present
 - [x] Test emails arrive in inbox (not spam)
-- [x] Application code uses Mailyte API
-- [x] Webhooks are firing to your endpoints
+- [x] Application sends via SMTP with the new credential
+- [x] Webhooks are arriving at your receiver
 - [x] Suppression lists have been imported
 - [x] Bounce handling is working
 
-## Step 8: Decommission SendGrid
+## Step 9: Decommission SendGrid
 
 After 48-72 hours of successful operation:
 

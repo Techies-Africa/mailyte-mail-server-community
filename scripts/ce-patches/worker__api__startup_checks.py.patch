@@ -1,0 +1,206 @@
+--- a/worker/api/startup_checks.py
++++ b/worker/api/startup_checks.py
+@@ -1,67 +1,80 @@
+ #!/usr/bin/env python3
+-"""Fail-closed secrets validation (phase-07 C3).
++"""Fail-closed secrets validation (phase-07 C3, ported from mailyte-email-server).
+ 
+-Nine security-relevant values used to silently fall back to weak,
+-publicly-known defaults (rootpassword, adminpass, tokensecret, admin,
+-webhooksecret, change-me-in-production) if `.env` was missing or
+-incomplete -- a fully functional, internet-facing mail server with
+-`rootpassword` as its database root password (security-model.md C3). This
+-is most dangerous for Community Edition, where a self-hoster runs
+-`docker compose up` and exposes the result to the internet with whatever
+-defaults we hand them.
++Five security-relevant values used to silently fall back to weak,
++publicly-known defaults (rootpassword, mailpassword, adminpass,
++tokensecret, webhooksecret) if `.env` was missing or incomplete -- a fully
++functional, internet-facing mail server with `rootpassword` as its database
++root password (security-model.md C3). That is most dangerous here, in
++Community Edition, where a self-hoster runs `docker compose up` and exposes
++the result to the internet with whatever defaults we hand them.
+ 
+ Deliberately stdlib-only (no cryptography/SQLAlchemy/etc.) so this can run
+ as the very first thing in the compose dependency graph, in a plain
+-python:3-slim container, before mysql or anything else has started --
+-see the `secrets-check` service in docker-compose.yml, which validates the
+-full stack-wide list. Also called from worker/api/app.py's own startup so
+-`api` still fails closed if it's ever run standalone
+-(`docker compose run api ...`), bypassing that gate -- but checking only
+-the subset `api`'s own environment block actually passes through
+-(DB_PASSWORD). It deliberately does NOT receive
+-WEBHOOK_SECRET/OAUTH_TOKEN_SECRET/URL_HMAC_SECRET/DB_ROOT_PASSWORD/
+-GRAFANA_ADMIN_PASSWORD -- it has no use for them, and adding them just to
+-satisfy a check here would mean putting secrets the api container never
+-otherwise touches onto its /proc/self/environ for nothing (H6).
++python:3-slim container, before mysql or anything else has started. Also
++called from worker/api/app.py's own startup so `api` fails closed even when
++run standalone (`docker compose run api ...`) -- but checking only the
++subset `api`'s own environment block actually passes through (API_SECRETS
++below). Demanding a secret the api container never receives would stop every
++CE instance from booting, which is worse than the bug this closes.
+ 
+-Phase-06 correction (ADR-002): ADMIN_PASSWORD/ADMIN_TOKEN_SECRET were
+-removed from `api`'s own environment block -- utils/auth.py's
+-require_admin(), their only consumer inside this service, is deleted in
+-favour of real, individually-revocable operator identities
+-(platform_operators/operator_sessions). Both vars are still required
+-stack-wide (ALL_SECRETS below, unchanged) because worker/monitoring/app.py
+-and worker/jmap/app.py each depend on them for their own separate,
+-pre-existing mechanisms that phase-06 does not touch. monitoring.py's
+-restart/auto-heal/test-webhooks routes still forward a client-supplied
+-X-Admin-Token header straight through to the monitoring service -- that's
+-a pass-through header, not read via os.getenv() in this process, so it
+-needs no entry here.
++CE DIVERGENCE FROM EE -- the secret list. EE's ALL_SECRETS carries eight
++names; three of them do not exist anywhere in this repository and are
++deliberately absent here:
++
++  * OAUTH_TOKEN_SECRET -- CE ships no `worker/oauth` service (ADR-001 Pro
++    column). Zero references repo-wide.
++  * URL_HMAC_SECRET    -- likewise zero references repo-wide.
++  * GRAFANA_ADMIN_PASSWORD -- CE's docker-compose.yml / .dev.yml / .prod.yml
++    define no grafana service; the name survives only as a stale line in
++    .env.production.example.
++
++Requiring any of those would abort startup over a value CE has no consumer
++for. Verified by grepping the whole repo, not inferred from EE's list.
+ """
+ 
+ import os
+ import sys
++from collections.abc import Mapping
+ 
+-# The full stack-wide list -- what `secrets-check` validates before
+-# anything else starts. Keep in sync with scripts/generate-secrets.sh's
+-# REQUIRED_SECRETS.
++# The full stack-wide list -- every secret CE's docker-compose.yml actually
++# interpolates, each verified to have a weak shipped default today:
++#   DB_ROOT_PASSWORD -> rootpassword     DB_PASSWORD    -> mailpassword
++#   WEBHOOK_SECRET   -> webhooksecret    ADMIN_PASSWORD -> adminpass
++#   ADMIN_TOKEN_SECRET -> tokensecret
++# `python3 worker/api/startup_checks.py` validates this whole list; see the
++# note in README/SECURITY about wiring it as a compose `secrets-check`
++# gate, which CE does not yet have.
+ ALL_SECRETS = [
+     "DB_ROOT_PASSWORD",
+     "DB_PASSWORD",
+     "WEBHOOK_SECRET",
+-    "OAUTH_TOKEN_SECRET",
+-    "URL_HMAC_SECRET",
+     "ADMIN_PASSWORD",
+     "ADMIN_TOKEN_SECRET",
+-    "GRAFANA_ADMIN_PASSWORD",
+ ]
+ 
+-# What `api` itself actually receives (see its docker-compose.yml
+-# environment: block) -- the subset its own self-check validates.
+-API_SECRETS = ["DB_PASSWORD"]
++# What `api` itself actually receives -- the exact intersection of
++# ALL_SECRETS with the `api` service's `environment:` block in
++# docker-compose.yml, checked line by line rather than copied from EE.
++#
++# CE DIVERGENCE: EE's API_SECRETS is ["DB_PASSWORD"] alone, because its
++# phase-06 removed ADMIN_PASSWORD/ADMIN_TOKEN_SECRET from `api`'s
++# environment when it deleted require_admin(). CE still ships both to this
++# container (with the weak `adminpass`/`tokensecret` defaults), so they
++# belong in CE's own self-check: they are guaranteed present for every
++# instance running the shipped compose file, and leaving them out would mean
++# the only boot gate CE has silently tolerates two known-weak values.
++#
++# Not included: WEBHOOK_SECRET / DB_ROOT_PASSWORD are never passed to `api`
++# (H6 -- adding them just to satisfy a check would put secrets this process
++# never otherwise touches onto its /proc/self/environ for nothing), and
++# routes/monitoring.py's X-Admin-Token is a client-supplied pass-through
++# header, not an os.getenv() read in this process.
++API_SECRETS = ["DB_PASSWORD", "ADMIN_PASSWORD", "ADMIN_TOKEN_SECRET"]
+ 
+ # Every default this codebase has ever shipped for the values above
+-# (docker-compose.yml git history) plus generic placeholders operators
+-# commonly leave in place. Matched case-insensitively.
++# (docker-compose.yml) plus generic placeholders operators commonly leave in
++# place. Matched case-insensitively.
+ WEAK = {
+     "rootpassword",
+     "adminpass",
+@@ -77,18 +90,20 @@
+     "admin123",
+ }
+ 
+-# Placeholder PREFIXES, not exact values -- .env.example ships things like
+-# `your-webhook-secret-key` and `changeme_root_db_password`, which the exact
+-# WEAK set above doesn't match (right length, not a literal in the set) but
+-# are exactly as unset as `changeme` alone. Caught live: the running stack
+-# had been serving with WEBHOOK_SECRET=your-webhook-secret-key for its
+-# entire uptime -- 23 characters, not in WEAK, so verify_secrets() passed it
+-# -- despite scripts/generate-secrets.sh's bash-side `your-*`/`changeme*`
+-# prefix check existing for exactly this reason. The two checks had drifted;
+-# this brings the Python gate back in line with the bash one so `secrets-check`
+-# (and worker/api/app.py's own startup call) actually catch what
+-# generate-secrets.sh already knows to replace.
+-WEAK_PREFIXES = ("your-", "changeme")
++# Placeholder PREFIXES, not exact values -- an example file ships things
++# that are the right length and not literals in WEAK above, yet are exactly
++# as unset as `changeme` alone.
++#
++# CE DIVERGENCE: EE's prefix tuple is ("your-", "changeme"), which matches
++# EE's own .env.example style. CE's two example files use a different
++# placeholder convention entirely -- `CHANGE_ME_db_password`,
++# `CHANGE_ME_STRONG_PASSWORD_HERE`, `CHANGE_ME_JWT_SECRET_64CHARS` -- none of
++# which start with "changeme" (the underscore breaks it) or "your-". Porting
++# EE's tuple verbatim would have passed every single placeholder CE ships,
++# i.e. the check would have been decorative. The underscore/hyphen variants
++# below are what make it real for this repo; "your-"/"your_" are kept so an
++# operator who copied EE-style docs is caught too.
++WEAK_PREFIXES = ("your-", "your_", "changeme", "change_me", "change-me")
+ 
+ MIN_LENGTH = 16
+ 
+@@ -98,7 +113,7 @@
+     return lowered in WEAK or lowered.startswith(WEAK_PREFIXES)
+ 
+ 
+-def _resolve(env: dict, key: str) -> str:
++def _resolve(env: Mapping[str, str], key: str) -> str:
+     """Return a secret's effective value, honoring the `<KEY>_FILE`
+     convention (H6: some secrets are delivered as a mounted file --
+     e.g. DB_ROOT_PASSWORD_FILE for mysql's own root password -- rather
+@@ -115,23 +130,29 @@
+     return env.get(key, "")
+ 
+ 
+-def verify_secrets(env: dict = None, required: list = None) -> None:
++def verify_secrets(
++    env: Mapping[str, str] | None = None, required: list[str] | None = None
++) -> None:
+     """Abort the process if any required secret is missing, a known-weak
+     value, or too short. Fail closed -- an error here must stop startup,
+-    never just log a warning and continue (security-model.md SS5.1)."""
+-    env = os.environ if env is None else env
+-    required = ALL_SECRETS if required is None else required
+-    resolved = {k: _resolve(env, k) for k in required}
++    never just log a warning and continue (security-model.md §5.1).
+ 
+-    missing = [k for k in required if not resolved[k]]
++    Only ever reports the NAME of an offending variable, never its value:
++    this runs before the log redaction filter is installed, and a startup
++    banner is the last place a secret should surface (H2)."""
++    source = os.environ if env is None else env
++    names = ALL_SECRETS if required is None else required
++    resolved = {k: _resolve(source, k) for k in names}
++
++    missing = [k for k in names if not resolved[k]]
+     if missing:
+         sys.exit(f"FATAL: required secrets unset: {', '.join(missing)}")
+ 
+-    weak = [k for k in required if _is_weak(resolved[k])]
++    weak = [k for k in names if _is_weak(resolved[k])]
+     if weak:
+         sys.exit(f"FATAL: known-weak default secret in use for: {', '.join(weak)}")
+ 
+-    short = [k for k in required if len(resolved[k]) < MIN_LENGTH]
++    short = [k for k in names if len(resolved[k]) < MIN_LENGTH]
+     if short:
+         sys.exit(f"FATAL: secret too short (<{MIN_LENGTH} chars): {', '.join(short)}")
+ 

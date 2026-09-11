@@ -13,25 +13,22 @@ These three DNS records are the foundation. Without all three, major providers (
 
 ### SPF (Sender Policy Framework)
 
-SPF tells receiving servers which IPs are allowed to send email for your domain.
+SPF tells receiving servers which IPs are allowed to send email for your domain. Mailyte generates the record for you at domain creation — it uses an `include:` for the platform SPF host:
 
 ```
-example.com.  IN  TXT  "v=spf1 mx a:mail.example.com ip4:203.0.113.1 -all"
+example.com.  IN  TXT  "v=spf1 include:spf.mail.yourdomain.com ~all"
 ```
 
-- `mx` — servers in your MX records can send
-- `a:mail.example.com` — your mail server specifically
-- `ip4:203.0.113.1` — explicit IP authorization
-- `-all` — hard fail everything else
+Publish the value from the `dns_records` array returned by `POST /api/v1/domains/` rather than composing your own — the include hostname comes from the server's `MAIL_SPF_HOST` setting and must match a record that actually exists.
 
 !!! warning "Common SPF mistakes"
     - **Too many lookups** — SPF allows 10 DNS lookups max. Each `include:` counts as one. If you exceed 10, SPF breaks silently.
     - **Using `+all`** — this allows anyone to send as your domain. Never do this.
-    - **Forgetting `~all` vs `-all`** — use `~all` (soft fail) during testing, `-all` (hard fail) in production.
+    - **A second SPF record** — a domain may have exactly one `v=spf1` TXT record; two is a permerror. Merge, don't add.
 
 ### DKIM (DomainKeys Identified Mail)
 
-DKIM cryptographically signs your email. See the [full DKIM setup guide](setting-up-dkim.md) for detailed instructions.
+DKIM cryptographically signs your email. See the [full DKIM setup guide](setting-up-dkim.md) — including the step that gets the signing key onto disk for Rspamd, without which mail goes out unsigned.
 
 Quick check:
 
@@ -70,6 +67,13 @@ graph LR
     C --> D[Strict alignment<br/>adkim=s aspf=s]
 ```
 
+### Verify all four server-side
+
+```bash
+curl https://api.yourdomain.com/api/v1/domains/DOMAIN_ID/verify-dns \
+  -H "X-API-Key: YOUR_API_KEY"
+```
+
 ## IP Warm-Up Strategy
 
 A new IP address has zero reputation. Sending a burst of email from it will trigger spam filters. You need to ramp up gradually.
@@ -92,21 +96,27 @@ A new IP address has zero reputation. Sending a burst of email from it will trig
 - **Monitor bounce rates** — if they spike above 2%, slow down
 - **Watch for deferrals** — 4xx responses mean "try again later," not "rejected"
 - **Don't send to old lists** — stale addresses bounce, killing your reputation
+- **Enforce the ramp** — SMTP credentials support `hourly_limit`/`daily_limit`; raise them week by week rather than relying on your application to throttle
 
 ### Monitoring During Warm-Up
 
 Check these daily:
 
 ```bash
-# Check bounce rate via the API
-curl http://mail.yourdomain.com:8083/api/v1/get/status/stats \
+# Deliverability stats per domain
+curl https://api.yourdomain.com/api/v1/analytics/deliverability/example.com \
   -H "X-API-Key: YOUR_API_KEY"
 
-# Check Postfix queue for deferrals
-docker exec -it postfix postqueue -p | tail -5
+# Reputation summary (domains, IPs, complaint feedback loops)
+curl https://api.yourdomain.com/api/v1/reputation/summary \
+  -H "X-API-Key: YOUR_API_KEY"
 
-# Check Rspamd for outbound rejections
-docker exec -it rspamd rspamc stat
+# Mail queue status — a growing deferred queue means receivers are throttling you
+curl https://api.yourdomain.com/api/v1/queue/queue/status \
+  -H "X-API-Key: YOUR_API_KEY"
+
+# Or straight from Postfix
+docker exec postfix postqueue -p | tail -5
 ```
 
 ## Bounce Rate Management
@@ -120,15 +130,27 @@ Bounces destroy your reputation faster than almost anything else. Keep your boun
 | Hard bounce (5xx) | Address doesn't exist | Remove immediately, never retry |
 | Soft bounce (4xx) | Temporary issue (full mailbox, server down) | Retry 3 times, then suppress |
 
-### Automatic Suppression
+### The Suppression List
 
-Mailyte tracks bounces in the `email_suppressions` table and automatically suppresses hard bounces:
+Suppressed addresses are recorded in the `email_suppressions` table and managed through the tracking API:
 
 ```bash
-# Check suppression list
-curl http://mail.yourdomain.com:8083/api/v1/get/suppressions/example.com \
+# List suppressions (filterable by type, date, substring; paginated)
+curl "https://api.yourdomain.com/api/v1/tracking/suppressions?suppression_type=BOUNCE" \
+  -H "X-API-Key: YOUR_API_KEY"
+
+# Suppress one address
+curl -X POST https://api.yourdomain.com/api/v1/tracking/suppress \
+  -H "X-API-Key: YOUR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"email": "gone@example.org", "reason": "hard bounce"}'
+
+# Remove a suppression
+curl -X DELETE https://api.yourdomain.com/api/v1/tracking/suppress/gone@example.org \
   -H "X-API-Key: YOUR_API_KEY"
 ```
+
+Bulk imports (up to 1000 addresses per call, operator role) go through `POST /api/v1/tracking/suppressions/bulk` with `suppression_type` set to `BOUNCE`, `COMPLAINT`, `UNSUBSCRIBE`, or `MANUAL`.
 
 ### Clean Your Lists
 
@@ -148,23 +170,23 @@ Before sending to a list:
 | [Google Postmaster Tools](https://postmaster.google.com/) | Domain/IP reputation with Gmail |
 | [Microsoft SNDS](https://sendersupport.olc.protection.outlook.com/snds/) | IP reputation with Outlook |
 | [MXToolbox Blacklist Check](https://mxtoolbox.com/blacklists.aspx) | Whether you're on any blacklists |
-| Mailyte Analytics API | Your own sending stats and bounce rates |
+| Mailyte Reputation API | `GET /api/v1/reputation/domains`, `/ips`, `/feedback-loops`, `/summary` |
 
 ### Check Blacklists
 
+Run from any machine with `dig` (the mail server host works):
+
 ```bash
-# Quick check against major blacklists
-docker exec -it postfix bash -c '
-  IP="203.0.113.1"
-  for bl in zen.spamhaus.org b.barracudacentral.org bl.spamcop.net; do
-    result=$(dig +short $(echo $IP | awk -F. "{print \$4\".\"\$3\".\"\$2\".\"\$1}").$bl)
-    if [ -z "$result" ]; then
-      echo "$bl: CLEAN"
-    else
-      echo "$bl: LISTED ($result)"
-    fi
-  done
-'
+IP="203.0.113.1"
+for bl in zen.spamhaus.org b.barracudacentral.org bl.spamcop.net; do
+  reversed=$(echo $IP | awk -F. '{print $4"."$3"."$2"."$1}')
+  result=$(dig +short ${reversed}.${bl})
+  if [ -z "$result" ]; then
+    echo "$bl: CLEAN"
+  else
+    echo "$bl: LISTED ($result)"
+  fi
+done
 ```
 
 ### If You Get Blacklisted
@@ -211,11 +233,17 @@ These are newer standards that improve transport security.
 
 ### MTA-STS
 
-Forces other mail servers to use TLS when sending to you:
+Forces other mail servers to use TLS when sending to you. Two pieces:
 
 ```
-_mta-sts.example.com.  IN  TXT  "v=STSv1; id=20260325T000000"
+; The policy discovery record
+_mta-sts.example.com.  IN  TXT  "v=STSv1; id=20260830T000000"
+
+; The policy host — Mailyte's autoconfig service serves the policy file
+mta-sts.example.com.   IN  CNAME  mail.yourdomain.com.
 ```
+
+Since 2026-08-27 the autoconfig service answers `https://mta-sts.<domain>/.well-known/mta-sts.txt` for every hosted domain, so publishing the CNAME plus the `_mta-sts` TXT record is all a domain needs.
 
 ### TLSRPT
 
@@ -228,12 +256,12 @@ _smtp._tls.example.com.  IN  TXT  "v=TLSRPTv1; rua=mailto:tls-reports@example.co
 ## Deliverability Checklist
 
 - [x] PTR record matches hostname
-- [x] SPF record published with `-all`
-- [x] DKIM key generated and DNS record published
+- [x] SPF record published (the exact value the API returned)
+- [x] DKIM key generated, key file on disk, DNS record published
 - [x] DMARC policy set (start with `p=none`)
 - [x] MTA-STS configured
 - [x] TLSRPT configured
-- [x] IP warm-up plan in place
+- [x] IP warm-up plan in place (with SMTP credential limits enforcing it)
 - [x] Bounce handling active
 - [x] Suppression lists maintained
 - [x] Google Postmaster Tools set up

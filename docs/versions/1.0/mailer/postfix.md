@@ -1,7 +1,7 @@
 
 # Postfix SMTP Server Implementation
 
-Postfix serves as the primary Mail Transfer Agent (MTA) in the Mailyte Mail Server, handling all inbound and outbound SMTP operations with advanced tracking, rate limiting, and security features.
+Postfix serves as the primary Mail Transfer Agent (MTA) in the Enterprise Mail Server, handling all inbound and outbound SMTP operations with advanced tracking, rate limiting, and security features.
 
 ## Architecture Overview
 
@@ -683,4 +683,4 @@ TLS_CERT_FILE=/etc/ssl/certs/mail.crt
 TLS_KEY_FILE=/etc/ssl/private/mail.key
 ```
 
-This comprehensive Postfix implementation provides enterprise-grade email routing with advanced tracking, security, and monitoring capabilities, forming the foundation of the Mailyte Mail Server's email infrastructure.
+This comprehensive Postfix implementation provides enterprise-grade email routing with advanced tracking, security, and monitoring capabilities, forming the foundation of the Enterprise Mail Server's email infrastructure.

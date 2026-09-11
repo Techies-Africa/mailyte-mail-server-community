@@ -3,3 +3,9 @@ mysql-connector-python==9.4.0
 requests==2.32.5
 redis==5.0.1
 python-dotenv==1.2.1
+# tracking_injector.py imports pymysql specifically (not mysql.connector,
+# which every other script in this codebase uses) -- confirmed live: it
+# was never installed, so every tracking-injected outbound message logged
+# "PyMySQL not available, using default organization/domain IDs" and lost
+# real per-org/domain attribution, falling back to a stub.
+pymysql==1.1.1

@@ -32,3 +32,24 @@
 
 # Configurable security rules (can be enabled/disabled via environment variables)
 # These are logged but not rejected by default to minimize deliverability impact
+
+# ---------------------------------------------------------------------------
+# Subject capture for the email log (mailer/log_ingestor)
+#
+# Postfix's log records the envelope only -- sender, recipient, size, relay,
+# status -- so the ingestor that builds mail_logs has no way to learn a
+# message's subject, and every Email Logs row rendered with a blank subject.
+# A WARN action makes cleanup echo the header into the log, which the ingestor
+# then correlates back to the queue id.
+#
+# MUST STAY LAST. regexp header_checks stop at the first matching pattern, so
+# a /^Subject:/ rule placed above the HOLD/WARN rules further up would
+# short-circuit them and silently disable the spam-keyword and phishing checks.
+# Ordered here, those still win and this only catches what they did not -- and
+# because WARN logs the header either way, their lines are parsed for the
+# subject too.
+#
+# WARN never rejects or defers, so this cannot affect deliverability. It does
+# put subjects in plaintext in /var/log/postfix/mail.log; that is the tradeoff
+# for showing them in the dashboard, and the log is root-readable only.
+/^Subject:/ WARN subject-capture

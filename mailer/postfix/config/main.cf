@@ -136,19 +136,34 @@ smtpd_sasl_local_domain = $myhostname
 # =============================================================================
 
 # CLIENT CONNECTION RESTRICTIONS
-# Order: mynetworks → SASL → pipelining check → RBLs (8 sources) → hostname check
+# Order: mynetworks → SASL → pipelining check → RBL → hostname check
+#
+# ONE blocklist here, deliberately. This used to stack eight, each as an
+# outright reject, so any single list could veto a message on its own -- and
+# aggressive lists routinely list the shared IPs that ESPs send legitimate
+# transactional mail from.
+#
+# Measured, not assumed: Anthropic's own senders (168.245.101.254 and
+# 168.245.100.91, both reverse-resolving to *.mail.anthropic.com) were
+# rejected here while appearing on NO other list -- bl.spamcop.net alone.
+# The same stack blocked routine delivery-test services. Mail from Gmail got
+# through and everything else quietly did not, which is a very hard shape of
+# outage to notice.
+#
+# The removed lists are not equivalent to zen: cbl.abuseat.org is already
+# inside zen (redundant), dnsbl-1.uceprotect.net lists entire ISP ranges to
+# pressure providers, sorbs is long unreliable, and spamcop/psbl churn fast
+# enough that a listing says little about a given message.
+#
+# Defence in depth is kept, just not as a hair trigger: postscreen still
+# consults five lists with WEIGHTED scores against a threshold
+# (postscreen_dnsbl_sites below), so a single mid-confidence listing costs a
+# sender points rather than the message.
 smtpd_client_restrictions =
     permit_mynetworks,
     permit_sasl_authenticated,
     reject_unauth_pipelining,
     reject_rbl_client zen.spamhaus.org,
-    reject_rbl_client bl.spamcop.net,
-    reject_rbl_client dnsbl.sorbs.net,
-    reject_rbl_client psbl.surriel.com,
-    reject_rbl_client b.barracudacentral.org,
-    reject_rbl_client dnsbl-1.uceprotect.net,
-    reject_rbl_client cbl.abuseat.org,
-    reject_rbl_client dnsbl.dronebl.org,
     warn_if_reject reject_unknown_client_hostname
 
 # RECIPIENT RESTRICTIONS
@@ -166,30 +181,53 @@ smtpd_recipient_restrictions =
 
 # Named restriction class so the submission service's master.cf override
 # (port 587) can reference the same rate-limit policy check by a
-# whitespace-free name -- ported from mailyte-email-server
-# (01-mailyte-email-server/phase-10-smtp-credential-auth.md), same bug
-# confirmed present here: master.cf's own -o argument parser splits an
+# whitespace-free name -- master.cf's own -o argument parser splits an
 # unquoted value on whitespace, so a literal
 # "check_policy_service unix:private/policy-rate-limit" there becomes two
-# broken tokens and crashes smtpd on every startup. This repo had the exact
-# same never-substituted "${whitespace}" placeholder as EE.
+# broken tokens ("...,check_policy_service" and a bare, flag-less
+# "unix:private/policy-rate-limit,reject") and crashes smtpd on every
+# startup ("fatal: unexpected command-line argument"). Confirmed live via
+# mail.log while verifying the SMTP-credentials workstream -- this was
+# pre-existing and unrelated to that workstream, found because it blocked
+# testing it end to end. A previous attempt at this same override
+# apparently tried to solve the same problem by embedding a literal
+# "${whitespace}" placeholder with no substitution step defined anywhere
+# in this repo -- dead since it was written.
 smtpd_restriction_classes = submission_rate_limit_check
 submission_rate_limit_check = check_policy_service unix:private/policy-rate-limit
 
 # SENDER RESTRICTIONS
-# reject_sender_login_mismatch MUST come before permit_sasl_authenticated --
-# ported fix from mailyte-email-server, same pre-existing bug confirmed
-# present here (permit_sasl_authenticated first made the mismatch check
-# dead for every authenticated sender). See
-# 00-foundation memory note postfix_sender_login_mismatch_not_enforced.md --
-# even with this ordering fixed, live testing on the EE sibling showed the
-# mismatch still isn't rejecting; root cause unresolved. Fixed here anyway
-# since leaving the ordering wrong is strictly worse, but don't treat
-# "authenticated senders can only send as their own address" as a working
-# guarantee on this system yet.
+#
+# reject_sender_login_mismatch MUST NOT appear here. This is the GLOBAL value,
+# and the `smtp inet` service (port 25) has no override in master.cf, so it
+# inherits whatever is set here. Port 25 carries unauthenticated mail from the
+# public internet by definition -- so the mismatch check fires on any inbound
+# message whose envelope sender happens to own a mailbox on this server, and
+# rejects legitimate mail with:
+#
+#   553 5.7.1 <user@ourdomain>: Sender address rejected: not logged in
+#
+# That broke inbound mail in production on 2026-08-22: mail from
+# devops@techies.africa to support@customer-14.example was rejected outright, because
+# devops@techies.africa resolves to an owner in smtpd_sender_login_maps while
+# the inbound SMTP session is (correctly) not authenticated. Any sender with a
+# local mailbox was affected, which includes cross-domain mail between all of
+# the hosted domains. Senders with no local mailbox (e.g. postmaster@) were
+# unaffected, which is what made the bug easy to miss when spot-checking.
+#
+# Sender-ownership enforcement belongs ONLY on the authenticated submission
+# paths, and master.cf already has it there, ahead of permit_sasl_authenticated
+# so it is not short-circuited:
+#
+#   submission (587) -o smtpd_sender_restrictions=reject_sender_login_mismatch,permit_sasl_authenticated,reject
+#   smtps      (465) -o smtpd_sender_restrictions=reject_sender_login_mismatch,permit_sasl_authenticated,reject
+#
+# Ordering still matters in those overrides: Postfix evaluates restrictions in
+# order and stops at the first permit/reject, so permit_sasl_authenticated
+# placed first would make the mismatch check dead code (the original 2026-08-07
+# finding). Keep the mismatch check first there -- just not here.
 smtpd_sender_restrictions =
     permit_mynetworks,
-    reject_sender_login_mismatch,
     permit_sasl_authenticated,
     reject_non_fqdn_sender,
     reject_unknown_sender_domain
@@ -204,16 +242,21 @@ smtpd_helo_restrictions =
 
 # DATA PHASE RESTRICTIONS
 #
-# The rate limiter is consulted HERE AND NOWHERE ELSE -- ported from the EE
-# sibling, where the lesson cost an inbound outage: it used to run in three
-# lists at once (sender, recipient and data restrictions), each call posts
-# record:true, so one message incremented the same counter three times
-# inside one second and per-second limits deferred essentially every
-# unauthenticated inbound message. It only hit unauthenticated mail because
-# permit_mynetworks/permit_sasl_authenticated short-circuit ahead of the
-# policy in the other two lists -- outbound looked fine while inbound
-# stopped. DATA runs once per message, which is the unit the caps mean.
-# Adding this policy to any other list re-creates the outage.
+# The rate limiter is consulted HERE AND NOWHERE ELSE on the inbound path.
+#
+# It used to run in three lists at once -- sender, recipient and data
+# restrictions -- and each call posts record:true, so one message incremented
+# the same counter three times inside one second. Against a per-second limit
+# of 1 the first check passed and the second always failed, so essentially
+# every inbound message was deferred with
+# "450 4.7.1 Rate limit exceeded for <sender>". It only hit unauthenticated
+# mail, because permit_mynetworks/permit_sasl_authenticated short-circuit
+# ahead of the policy in the other two lists -- which is why outbound looked
+# fine while inbound stopped for hours.
+#
+# DATA is the right single place: it runs once per message, which matches a
+# limiter keyed on the sender. Adding this line to another list re-creates
+# the outage.
 smtpd_data_restrictions =
     reject_unauth_pipelining,
     reject_multi_recipient_bounce,
@@ -225,10 +268,26 @@ body_checks = regexp:/etc/postfix/body_checks
 mime_header_checks = regexp:/etc/postfix/mime_header_checks
 
 # RELAY RESTRICTIONS
-# permit_mynetworks allows internal Docker containers to deliver to LOCAL domains only.
-# External relay requires SASL authentication (port 587).
-# reject_unauth_destination blocks relay to non-local domains without auth.
+#
+# permit_mynetworks is REQUIRED here, not an oversight. Omitting it (the
+# previous config) meant the only way to relay to an external address was SASL
+# on 587 -- but the webmail does not use SASL. worker/api/routes/mailbox.py
+# submits over the Docker network deliberately, because no user password is
+# stored anywhere to authenticate with; that endpoint enforces the From address
+# itself. So every message a user sent to an outside address was rejected with
+# "554 5.7.1 Relay access denied" while the app reported the mail server had
+# refused the recipient.
+#
+# The exposure this opens is bounded: $mynetworks is 127.0.0.0/8, [::1]/128 and
+# the internal Docker subnet 172.25.0.0/16 -- no publicly routable range, and
+# the host's mail ports are bound to loopback. Anything that can reach it is
+# already a container in this compose stack. This is also Postfix's own default
+# ordering.
+#
+# Do NOT widen $mynetworks to a public range: that is what turns this line into
+# an open relay.
 smtpd_relay_restrictions =
+    permit_mynetworks,
     permit_sasl_authenticated,
     reject_unauth_destination
 
@@ -281,17 +340,26 @@ postscreen_dnsbl_action = enforce
 postscreen_greet_action = enforce
 postscreen_greet_wait = 3s
 
-# Non-SMTP command detection
-postscreen_non_smtp_command_enable = yes
-postscreen_non_smtp_command_action = enforce
-
-# Bare newline detection
-postscreen_bare_newline_enable = yes
-postscreen_bare_newline_action = enforce
-
-# Pipelining detection
-postscreen_pipelining_enable = yes
-postscreen_pipelining_action = enforce
+# --- "after-220" deep protocol tests: DELIBERATELY DISABLED -------------------
+#
+# These three ran with action=enforce and were rejecting real mail. They cannot
+# be evaluated before the SMTP greeting, so postscreen defers the delivery
+# attempt with "450 4.3.2 Service currently unavailable" and allowlists the
+# client, expecting the RETRY to get through.
+#
+# That assumption breaks on every large sender. The allowlist is keyed by IP,
+# and Gmail retries from a different IP each time -- observed here as four
+# attempts from 209.85.210.181, 209.85.160.49, 209.85.216.41 and
+# 209.85.214.173, each one PASS NEW'd and each one rejected. Mail from Gmail
+# could not arrive at all.
+#
+# Postfix ships all three OFF by default and POSTSCREEN_README warns that
+# clients which do not retry from the same address will lose mail. The pre-220
+# tests above (pregreet + DNSBL) carry the real spam-blocking load and cost a
+# legitimate sender nothing, so they stay on.
+postscreen_non_smtp_command_enable = no
+postscreen_bare_newline_enable = no
+postscreen_pipelining_enable = no
 
 # Whitelist — Docker subnet and established clients
 postscreen_access_list = permit_mynetworks
@@ -318,3 +386,55 @@ non_smtpd_milters = inet:rspamd:11332
 milter_protocol = 6
 milter_mail_macros = i {mail_addr} {client_addr} {client_name} {auth_authen}
 milter_default_action = accept
+
+# =============================================================================
+# ENVIRONMENT PASSTHROUGH — for custom pipe/spawn transports
+# =============================================================================
+# Postfix does NOT hand its own container environment to pipe/spawn child
+# processes (scripts/tracking_injector.py, the policy-ip-access service in
+# master.cf) -- only import_environment's own explicit allowlist, which
+# defaults to a minimal safe set (MAIL_CONFIG, TZ, LANG, ...). Confirmed
+# live: tracking_injector.py silently fell back to DELIVERY_OPTIMIZER_URL's
+# own built-in default (http://localhost:8088, meaningless inside this
+# container) instead of the real value set in docker-compose.yml,
+# deferring every single outbound message. Everything these two scripts
+# actually read via os.getenv() needs to be listed here explicitly.
+import_environment = MAIL_CONFIG MAIL_DEBUG MAIL_LOGTAG TZ XAUTHORITY DISPLAY LANG=C POSTLOG_SERVICE POSTLOG_HOSTNAME DB_HOST DB_PORT DB_NAME DB_USER DB_PASSWORD DB_TIMEOUT REDIS_HOST REDIS_PORT TRACKING_SERVICE_URL TRACKING_ENABLED TRACKING_API_TIMEOUT TRACKING_WEBHOOK_URL TRACKING_WEBHOOK_TIMEOUT DELIVERY_OPTIMIZER_URL DELIVERY_OPTIMIZER_TIMEOUT DELIVERY_OPTIMIZER_FALLBACK_DELAY DEFAULT_ORGANIZATION_ID DEFAULT_DOMAIN_ID WEBHOOK_SECRET HOSTNAME
+
+# =============================================================================
+# LOGGING
+#
+# Postfix defaults to syslog, and nothing in this container runs a syslog
+# daemon -- so mail logs went nowhere at all. No record of a delivery, a
+# deferral, or a bounce, which is why delivery problems here could only be
+# diagnosed by reproducing them by hand.
+#
+# /var/log/postfix is bind-mounted to logs/mailer/postfix on the host, so
+# this puts the mail log somewhere a person can actually read it.
+#
+# Requires the `postlog` service in master.cf; Postfix refuses to start
+# without it ("fatal: missing 'postlog' service in master.cf").
+# =============================================================================
+maillog_file = /var/log/postfix/mail.log
+
+# =============================================================================
+# CUTOVER ROUTING
+#
+# Domains migrated from mailcow exist in virtual_mailbox_domains here, which
+# normally means "deliver locally". While a domain's MX still points at the
+# old server (or, for some, at Microsoft 365 / Zoho), local delivery drops
+# mail into this server's unread copy of the mailbox and it never reaches the
+# real one. This map routes those domains by their real MX until each is cut
+# over. See the file's own header for how to maintain it.
+#
+# The file lives in the mounted config dir (config/mailer/postfix/ on the
+# host) rather than in this image, because which domains are cut over changes
+# per deployment and over time -- but the setting has to be here, or it is
+# lost the moment the container is recreated from the image.
+# =============================================================================
+# texthash: rather than hash: -- Postfix reads the plain file directly, so
+# there is no compiled .db to generate, to forget, or to go missing. A missing
+# hash: .db is not a soft failure: transport_maps lookup errors make Postfix
+# reject EVERY sender with "451 4.3.0 Temporary lookup failure", which is
+# exactly how all outbound mail stopped once a deployment wiped the map file.
+transport_maps = texthash:/etc/postfix/custom/transport_cutover

@@ -1,11 +1,11 @@
 
 # Data Flow Architecture
 
-This document provides a comprehensive overview of how data flows through the Mailyte Mail Server system, covering all major processes and interactions.
+This document provides a comprehensive overview of how data flows through the Enterprise Mail Server system, covering all major processes and interactions.
 
 ## Overview
 
-The Mailyte Mail Server processes data through multiple interconnected flows:
+The Enterprise Mail Server processes data through multiple interconnected flows:
 1. **Email Processing Flow**: Handling inbound and outbound emails
 2. **Authentication Flow**: User and API authentication
 3. **Tracking Flow**: Email open and click tracking

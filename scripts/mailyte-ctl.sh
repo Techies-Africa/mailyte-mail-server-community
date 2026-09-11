@@ -519,8 +519,18 @@ cmd_migrate_status() {
 }
 
 cmd_dkim() {
-    print_header "Generate DKIM Keys"
-    python3 "$SCRIPTS_DIR/generate_dkim.py"
+    # Delegates to the host-side orchestrator, which drives
+    # worker/api/utils/dkim_sync.py inside the api container (the only
+    # service with both DB access and the decryption KEK) and materialises
+    # the key files + selector map inside the rspamd container. Running
+    # generate_dkim.py directly against MySQL is impossible from the host
+    # (the DB port is deliberately not published).
+    print_header "DKIM Key Sync (MySQL -> rspamd)"
+    if [ $# -gt 0 ]; then
+        python3 "$SCRIPTS_DIR/generate_dkim.py" "$@"
+    else
+        python3 "$SCRIPTS_DIR/generate_dkim.py" sync
+    fi
 }
 
 cmd_console_token() {
@@ -534,13 +544,14 @@ cmd_console_token() {
     if [ -n "$token" ]; then
         echo "  Token: $token"
         echo ""
-        echo "  Open http://127.0.0.1:${CONSOLE_PORT:-3100}/bootstrap and paste it"
+        echo "  Open http://localhost:${CONSOLE_PORT:-3100}/bootstrap and paste it"
         echo "  to create the first owner account."
     else
         print_warn "No bootstrap token available."
         echo ""
         echo "  This is expected if an operator account already exists — the"
-        echo "  token is single-use and removed once consumed."
+        echo "  token is single-use and removed once consumed. If you are"
+        echo "  locked out, see docs on recovering operator access."
         echo ""
         echo "  If the API is not running yet, start it first:  ./start.sh"
     fi
@@ -629,7 +640,8 @@ show_usage() {
     reset [--force]                      Stop everything and delete all volumes
     migrate                              Run database migrations
     migrate-status                       Show migration status
-    dkim                                 Generate DKIM keys
+    dkim [sync|backfill|dns <domain>]    Sync DKIM keys from MySQL to rspamd
+                                         (backfill also mints keys for domains without one)
     console-token                        Show the console bootstrap token (first run)
 
   INFO
@@ -699,7 +711,7 @@ case "$COMMAND" in
     reset)            parse_flags "$@"; cmd_reset ;;
     migrate)          cmd_migrate ;;
     migrate-status)   cmd_migrate_status ;;
-    dkim)             cmd_dkim ;;
+    dkim)             cmd_dkim "$@" ;;
     console-token)    cmd_console_token ;;
 
     # Info

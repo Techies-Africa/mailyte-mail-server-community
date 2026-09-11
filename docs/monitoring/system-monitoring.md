@@ -2,41 +2,43 @@
 
 OS-level metrics — CPU, memory, disk, and network — because your services are only as healthy as the machine they run on.
 
-## Node Exporter
+## How System Metrics Are Collected
 
-System metrics come from Prometheus Node Exporter, which runs as a container alongside everything else.
+Mailyte does **not** deploy a Prometheus node-exporter or cAdvisor. Host-level metrics come from two psutil-based sources:
 
-```yaml
-# docker-compose.monitoring.yml
-node-exporter:
-  image: prom/node-exporter:latest
-  pid: host
-  volumes:
-    - /proc:/host/proc:ro
-    - /sys:/host/sys:ro
-    - /:/rootfs:ro
-  command:
-    - "--path.procfs=/host/proc"
-    - "--path.sysfs=/host/sys"
-    - "--path.rootfs=/rootfs"
-    - "--collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)"
-  ports:
-    - "9100:9100"
+1. **The monitoring service** (`worker/monitoring/services/system_monitor.py`) — samples CPU, memory, swap, disk, load average, uptime, and network I/O every 30 seconds, applies alert thresholds, and sends webhook alerts on breaches.
+2. **Every worker's own `/metrics`** — the shared collector appends `<service>_cpu_usage_percent`, `<service>_memory_usage_percent`, and `<service>_memory_usage_bytes` gauges to each scrape.
+
+```bash
+# Current system stats as JSON
+curl -s http://localhost:8085/api/stats | python3 -m json.tool
 ```
+
+!!! warning "node_* series do not exist"
+    Any Grafana panel or alert rule written against `node_cpu_seconds_total`, `node_memory_*`, or `node_filesystem_*` (including the `DiskSpaceWarning`/`DiskSpaceCritical` rules in `mail_alerts.yml`) matches nothing, because no node-exporter runs. Disk-pressure alerting is done by the monitoring service's own thresholds below. If you want the full `node_*` catalogue, add a `prom/node-exporter` service to the compose file and a matching scrape job — both are currently absent.
+
+## Alert Thresholds
+
+`system_monitor.check_system_health()` applies these thresholds on every 30-second sweep and dispatches webhook alerts (`cpu_high`, `memory_warning`, `disk_high`, …):
+
+| Resource | Warning | Critical |
+|----------|---------|----------|
+| CPU | > 80% | > 90% |
+| Memory | > 80% | > 90% |
+| Disk (per path) | > 75% | > 85% |
+
+Disk is checked for each of `/`, `/var`, `/tmp`, `/var/log`, and `/var/spool` (paths that don't exist in the container are skipped).
 
 ## CPU
 
-```promql
-# Overall CPU usage (percentage)
-100 - (avg(irate(node_cpu_seconds_total{mode="idle"}[5m])) * 100)
+```bash
+# From the monitoring service
+curl -s http://localhost:8085/api/stats | python3 -c \
+  "import json,sys; print(json.load(sys.stdin)['system']['cpu_usage'])"
 
-# CPU usage by mode (user, system, iowait, etc.)
-irate(node_cpu_seconds_total[5m]) * 100
-
-# Load average (1, 5, 15 min)
-node_load1
-node_load5
-node_load15
+# Classic host-side tools
+top -bn1 | head -15
+uptime
 ```
 
 **What to watch for:**
@@ -51,23 +53,6 @@ High `iowait` usually means disk I/O is the bottleneck — common when the mail 
 
 ## Memory
 
-```promql
-# Memory usage percentage
-(1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100
-
-# Available memory
-node_memory_MemAvailable_bytes
-
-# Memory breakdown
-node_memory_MemTotal_bytes
-node_memory_MemFree_bytes
-node_memory_Buffers_bytes
-node_memory_Cached_bytes
-
-# Swap usage
-node_memory_SwapTotal_bytes - node_memory_SwapFree_bytes
-```
-
 **What to watch for:**
 
 | Metric | Healthy | Warning | Critical |
@@ -77,28 +62,9 @@ node_memory_SwapTotal_bytes - node_memory_SwapFree_bytes
 
 > **Note:** Some swap usage is normal on Linux. But if your mail server is actively swapping, performance will tank. Add more RAM or reduce service memory limits.
 
+Per-service memory is visible in Prometheus via the `<service>_memory_usage_bytes` gauges, and per-container via `docker stats`.
+
 ## Disk
-
-```promql
-# Disk usage percentage
-(1 - node_filesystem_avail_bytes{mountpoint="/"}
-/ node_filesystem_size_bytes{mountpoint="/"}) * 100
-
-# Available disk space
-node_filesystem_avail_bytes{mountpoint="/"}
-
-# Disk I/O rate (bytes/sec)
-rate(node_disk_read_bytes_total[5m])
-rate(node_disk_written_bytes_total[5m])
-
-# Disk I/O operations per second
-rate(node_disk_reads_completed_total[5m])
-rate(node_disk_writes_completed_total[5m])
-
-# Disk I/O latency
-rate(node_disk_read_time_seconds_total[5m])
-/ rate(node_disk_reads_completed_total[5m])
-```
 
 **Critical mount points to monitor:**
 
@@ -106,8 +72,8 @@ rate(node_disk_read_time_seconds_total[5m])
 |-------------|----------|---------------|
 | `/` | OS, containers | Logs grow unchecked |
 | `/var/lib/docker` | Container storage | Images pile up |
-| `/var/mail` or mail volume | Mailboxes | Users don't clean up |
-| `/var/lib/mysql` or DB volume | Database | Tables grow, no cleanup |
+| `storage/mail_data/` | Mailboxes (bind-mounted Maildir) | Users don't clean up |
+| MySQL volume | Database | Tables grow, no cleanup |
 
 ```bash
 # Quick check from the command line
@@ -116,36 +82,30 @@ df -h /var/lib/docker
 docker system df
 ```
 
-> **Warning:** A full disk is the #1 cause of cascading failures. MySQL crashes, Postfix can't queue mail, logs stop writing. Set up disk alerts early and aggressively.
+> **Warning:** A full disk is the #1 cause of cascading failures. MySQL crashes, Postfix can't queue mail, logs stop writing. The monitoring service alerts at 75%/85% — take the warning seriously. A full backup also writes ~3 GB locally before uploading, so keep that headroom.
 
 ## Network
 
-```promql
-# Network throughput (bytes/sec)
-rate(node_network_receive_bytes_total{device="eth0"}[5m])
-rate(node_network_transmit_bytes_total{device="eth0"}[5m])
+There are no Prometheus network metrics without a node-exporter; the monitoring service includes `psutil.net_io_counters()` in its stats payload, and host tools cover the rest:
 
-# Network errors
-rate(node_network_receive_errs_total{device="eth0"}[5m])
-rate(node_network_transmit_errs_total{device="eth0"}[5m])
+```bash
+# Throughput and error counters
+ip -s link
 
-# TCP connections by state
-node_netstat_Tcp_CurrEstab
-node_netstat_Tcp_ActiveOpens
+# TCP connections summary
+ss -s
+
+# Established connections to the mail ports
+ss -tn state established '( sport = :25 or sport = :587 or sport = :993 )' | wc -l
 ```
-
-**What to watch for:**
 
 | Metric | Normal | Investigate |
 |--------|--------|-------------|
 | Bandwidth | Steady pattern | Sudden spikes |
-| Network errors | 0 | Any |
+| Interface errors | 0 | Any |
 | Established connections | Stable | Climbing |
-| TIME_WAIT connections | < 1000 | > 5000 |
 
 ## Container Resource Usage
-
-Docker exposes per-container stats. Use cAdvisor or Docker's built-in metrics.
 
 ```bash
 # Real-time container stats
@@ -153,87 +113,20 @@ docker stats --no-stream --format \
   "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.NetIO}}\t{{.BlockIO}}"
 ```
 
-**With cAdvisor (recommended for Prometheus):**
-
-```yaml
-cadvisor:
-  image: gcr.io/cadvisor/cadvisor:latest
-  volumes:
-    - /:/rootfs:ro
-    - /var/run:/var/run:ro
-    - /sys:/sys:ro
-    - /var/lib/docker/:/var/lib/docker:ro
-  ports:
-    - "8081:8080"
-```
-
-```promql
-# Container CPU usage
-rate(container_cpu_usage_seconds_total{name=~"mailyte.*"}[5m]) * 100
-
-# Container memory usage
-container_memory_usage_bytes{name=~"mailyte.*"}
-
-# Container network I/O
-rate(container_network_receive_bytes_total{name=~"mailyte.*"}[5m])
-rate(container_network_transmit_bytes_total{name=~"mailyte.*"}[5m])
-```
-
 ## Resource Limits
 
-Set container resource limits in Docker Compose to prevent any one service from starving the others:
+`docker-compose.prod.yml` sets memory limits per service so no single container can starve the host — for example `dovecot: 1G`, `monitoring: 512M`. Pattern:
 
 ```yaml
 services:
-  postfix:
+  monitoring:
     deploy:
       resources:
         limits:
-          cpus: "2.0"
-          memory: 1G
-        reservations:
-          cpus: "0.5"
-          memory: 256M
-
-  mysql:
-    deploy:
-      resources:
-        limits:
-          cpus: "2.0"
-          memory: 2G
-        reservations:
-          cpus: "1.0"
           memory: 512M
-
-  api:
-    deploy:
-      resources:
-        limits:
-          cpus: "1.0"
-          memory: 512M
-        reservations:
-          cpus: "0.25"
-          memory: 128M
 ```
 
-## Grafana Dashboard Suggestions
-
-Build a system overview dashboard with these panels:
-
-```
-+----------------------------+----------------------------+
-|       CPU Usage (%)        |      Memory Usage (%)      |
-|       (time series)        |       (time series)        |
-+----------------------------+----------------------------+
-|     Disk Usage by Mount    |    Network Throughput      |
-|       (bar gauge)          |       (time series)        |
-+----------------------------+----------------------------+
-|   Container CPU Usage      |  Container Memory Usage    |
-|   (stacked time series)    |   (stacked time series)    |
-+----------------------------+----------------------------+
-|              Disk I/O (read + write, time series)       |
-+---------------------------------------------------------+
-```
+Check the prod compose file for the current per-service values before changing them — an OOM-killed Dovecot is worse than a slow one.
 
 ## Quick Diagnostic Commands
 

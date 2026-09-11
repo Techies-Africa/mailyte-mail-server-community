@@ -9,10 +9,11 @@ Think of Rspamd as a panel of judges. Each judge (module) scores the email on di
 - **Spam filtering** with Bayesian classification, neural networks, fuzzy hashing
 - **DKIM signing** for outbound email and **DKIM verification** for inbound
 - **SPF and DMARC** checks for sender authentication
-- **ClamAV antivirus** integration for attachment scanning
+- **Smart folder classification** -- a custom Lua plugin (`local.d/lua/email_classifier.lua`) adds an `X-Email-Category` header (primary / notifications / social / promotions / updates) that Dovecot's global Sieve routes on
+- **Transport rule enforcement** -- a custom Lua plugin (`local.d/lua/transport_rules.lua`) applies tenant transport rules from Redis, gated behind `TRANSPORT_RULES_ENABLED` (default **false**: rules written before enforcement existed were drafts, and turning this on puts all of them into force at once)
 - **Greylisting** to defer suspicious first-time senders
 - **Phishing detection** using URL analysis and domain reputation
-- **Rate limiting** (in addition to Postfix's own rate limits)
+- **ClamAV antivirus** hooks exist but are **disabled** -- no ClamAV container is deployed (see `local.d/antivirus.conf` for how to enable one)
 - **Web UI** on port 11334 for monitoring and training
 
 ## Architecture
@@ -78,12 +79,12 @@ Rspamd assigns a numeric score to each email. The `actions.conf` file defines wh
 | Score | Action | What Happens |
 |-------|--------|-------------|
 | < 4 | No action | Email delivered normally |
-| 4-6 | Add header | `X-Spam: Yes` header added, email delivered |
-| 6-10 | Rewrite subject | Subject gets `[SPAM]` prefix |
-| > 10 | Reject | Email rejected at SMTP level |
-| > 15 | Drop | Email silently discarded |
+| >= 4 | Greylist | Temporary rejection for unknown senders |
+| >= 6 | Add header | `X-Spam: Yes` header added; Dovecot Sieve routes to Junk |
+| >= 10 | Rewrite subject | Subject gets `[SPAM]` prefix |
+| >= 15 | Reject | Email rejected at SMTP level |
 
-These thresholds are tunable. Start conservative (higher thresholds) and tighten as you collect training data.
+These are the global defaults from `local.d/actions.conf`; per-organization overrides are applied via the settings module. Start conservative (higher thresholds) and tighten as you collect training data.
 
 ### Bayesian Classifier
 
@@ -139,39 +140,31 @@ The neural network trains automatically from the results of other modules. It ki
 Outbound emails are signed with DKIM to prove they came from your server:
 
 ```lua
--- dkim_signing.conf
-dkim_signing {
-  path = "/var/lib/rspamd/dkim/$domain.$selector.key";
-  selector = "mail";
-  allow_username_mismatch = true;
-}
+-- local.d/dkim_signing.conf
+enabled = true;
+path = "/var/lib/rspamd/dkim/$domain.$selector.key";
+selector = "default";
+sign_authenticated = true;
+sign_local = true;
+use_esld = true;
+allow_hdrfrom_mismatch = false;
+allow_username_mismatch = false;
 ```
 
-DKIM keys are stored per-domain. When you add a new domain, you need to:
+DKIM keys are stored per-domain at `/var/lib/rspamd/dkim/{domain}.{selector}.key` (the bind-mounted `storage/dkim_keys/` directory), with per-domain selectors resolved through `/etc/rspamd/dkim_selectors.map`. The public key goes in a DNS TXT record at `{selector}._domainkey.{domain}`.
 
-1. Generate a DKIM key pair
-2. Place the private key at `/var/lib/rspamd/dkim/{domain}.{selector}.key`
-3. Add the public key as a DNS TXT record at `{selector}._domainkey.{domain}`
+!!! warning "Generate keys inside the rspamd container"
+    `scripts/generate_dkim.py` is the tool -- and it must run **in the rspamd container**, which is the only one that mounts both the key directory *and* has the image-baked `dkim_selectors.map` on its own filesystem (the map is not a bind mount, so writing it from another container never reaches rspamd). The script also envelope-encrypts the private key via `shared.envelope_encryption`, which is why the container mounts `secrets/encryption_kek`.
 
-The API worker automates this process when you create a new domain.
+### ClamAV Antivirus (not deployed)
 
-### ClamAV Antivirus
+`local.d/antivirus.conf` carries a full ClamAV integration, but it ships with `enabled = false` and **no ClamAV container exists in any compose file** -- leaving it disabled prevents connection errors. To enable scanning:
 
-Rspamd sends attachments to ClamAV for virus scanning:
+1. Add a `clamav` service to `docker-compose.yml` (image: `clamav/clamav`)
+2. Set `enabled = true` in `local.d/antivirus.conf`
+3. Confirm `servers = "clamav:3310"` matches the container
 
-```lua
--- antivirus.conf
-antivirus {
-  clamav {
-    action = "reject";
-    type = "clamav";
-    servers = "clamav:3310";
-    scan_mime_parts = true;
-  }
-}
-```
-
-If ClamAV detects a virus, the email is rejected at the SMTP level with a clear error message.
+Once enabled, a detected virus rejects the email at the SMTP level (`action = "reject"`, symbol `CLAM_VIRUS`).
 
 ### Greylisting
 
@@ -224,7 +217,7 @@ The Rspamd web UI is available on port 11334. It provides:
 - Configuration viewer
 - Log viewer
 
-Access it at `http://your-server:11334/`. The password is set via the `RSPAMD_PASSWORD` environment variable.
+Access it at `http://your-server:11334/`. The controller worker (`local.d/worker-controller.inc`) has **no password configured** -- which is exactly why production (`docker-compose.prod.yml`) binds 11334 to `127.0.0.1` only. Reach it over an SSH tunnel, or through the console's proxied link.
 
 ## Tuning False Positives
 
@@ -260,9 +253,13 @@ rspamd:
   container_name: rspamd
   ports:
     - "11332:11332"  # Milter protocol (Postfix connects here)
-    - "11334:11334"  # Web UI + API
+    - "11334:11334"  # Web UI + API (loopback-only in prod)
   volumes:
     - rspamd_data:/var/lib/rspamd
+    - ./storage/dkim_keys:/var/lib/rspamd/dkim
+    - ./logs/mailer/rspamd:/var/log/rspamd
+    - ./config/mailer/rspamd:/etc/rspamd/custom
+    - ./secrets/encryption_kek:/run/secrets/encryption_kek:ro
   depends_on:
     - redis
 ```
@@ -271,11 +268,9 @@ rspamd:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `REDIS_HOST` | `redis` | Redis host for Bayesian data, greylisting, neural network |
-| `REDIS_PORT` | `6379` | Redis port |
-| `RSPAMD_PASSWORD` | (empty) | Web UI password |
-| `CLAMAV_HOST` | `clamav` | ClamAV host |
-| `CLAMAV_PORT` | `3310` | ClamAV port |
+| `REDIS_HOST` / `REDIS_PORT` | `redis` / `6379` | Bayesian data, greylisting, neural network, transport rules |
+| `TRANSPORT_RULES_ENABLED` | `false` | Turn on tenant transport-rule enforcement -- read what your rules say first |
+| `DB_HOST` / `DB_PORT` / `DB_NAME` / `DB_USER` / `DB_PASSWORD` | `mysql` / `3306` / `mailserver` / -- / -- | Used by `generate_dkim.py` when run in this container |
 
 ## Gotchas
 

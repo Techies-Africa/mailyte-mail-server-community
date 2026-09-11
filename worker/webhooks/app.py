@@ -34,21 +34,19 @@ sys.path.append(str(project_root / "shared"))
 # Import explicitly from shared: /app precedes the appended shared path on
 # sys.path, so a bare `from metrics import ...` resolves to the local dict-based
 # stub in worker/webhooks/metrics.py, which has no get_prometheus_metrics().
-from shared.metrics import get_metrics
-from shared.logging_config import get_service_logger, get_performance_logger, LogTimer
-from shared.webhook_dispatcher import dispatch_event, Events
 from services.cleanup_service import WebhookCleanupService
 
 # Import modular webhook services
 from services.notification_sender import notification_sender
 
 from shared.logging_config import LogTimer, get_performance_logger
+from shared.metrics import get_metrics
 from shared.webhook_dispatcher import Events, dispatch_event
 
 app = FastAPI(title="Webhooks Service")
 
 # Initialize metrics
-metrics = get_metrics('webhooks')
+metrics = get_metrics("webhooks")
 
 # Configure service-specific logging
 logger, log_performance = get_performance_logger("webhooks")
@@ -179,8 +177,7 @@ class WebhookProcessor:
 
     def __init__(self):
         # Not wired to a real config source, and process_webhook() below doesn't even read
-        # this. Same bug as mailyte-email-server's copy of this file. Tracked, not fixed here:
-        # ../plans/03-mailyte-api/tracked-debt.md#5.
+        # this. Tracked, not fixed here: plans/03-mailyte-api/tracked-debt.md#5.
         self.webhook_urls = [""]
 
     def process_webhook(self, event_data):
@@ -640,6 +637,97 @@ async def handle_pop3_event(request: Request):
     except Exception as e:
         logger.error(f"POP3 webhook error: {e}")
         return JSONResponse({"error": "Internal server error"}, status_code=500)
+
+
+# Event names for Alertmanager-originated notifications. Deliberately literals
+# rather than additions to shared.webhook_dispatcher.Events: shared/ is out of
+# scope for this service-level change, and dispatch_event() accepts any dotted
+# event string.
+ALERT_EVENT_FIRING = "system.alert.firing"
+ALERT_EVENT_RESOLVED = "system.alert.resolved"
+
+
+def build_alert_events(payload: dict) -> list[dict]:
+    """
+    Convert a standard Alertmanager webhook payload (version 4) into a list of
+    per-alert event dicts ({"event_type": ..., "data": ...}) ready for
+    dispatch_event().
+
+    Each alert in payload["alerts"] becomes its own event so downstream
+    consumers see one notification per alert, not one per Alertmanager group.
+    An alert's own status wins over the group status ("resolved" alerts can
+    ride along in a "firing" group when send_resolved is on).
+    """
+    events = []
+    for alert in payload.get("alerts") or []:
+        if not isinstance(alert, dict):
+            continue
+        labels = alert.get("labels") or {}
+        annotations = alert.get("annotations") or {}
+        status = alert.get("status") or payload.get("status") or "firing"
+        events.append(
+            {
+                "event_type": ALERT_EVENT_RESOLVED if status == "resolved" else ALERT_EVENT_FIRING,
+                "data": {
+                    "alertname": labels.get("alertname", "unknown"),
+                    "severity": labels.get("severity", ""),
+                    "status": status,
+                    "summary": annotations.get("summary", ""),
+                    "description": annotations.get("description", ""),
+                    "labels": labels,
+                    "annotations": annotations,
+                    "starts_at": alert.get("startsAt", ""),
+                    "ends_at": alert.get("endsAt", ""),
+                    "generator_url": alert.get("generatorURL", ""),
+                    "fingerprint": alert.get("fingerprint", ""),
+                    "receiver": payload.get("receiver", ""),
+                    "group_key": payload.get("groupKey", ""),
+                    "external_url": payload.get("externalURL", ""),
+                },
+            }
+        )
+    return events
+
+
+@app.post("/alertmanager")
+async def handle_alertmanager_notification(request: Request):
+    """
+    Receive Alertmanager webhook notifications.
+
+    Both receivers in monitoring/alertmanager/alertmanager.yml post to
+    http://webhooks:8081/alertmanager; until this route existed every alert
+    notification 404'd and Prometheus alerting was end-to-end dead. Each alert
+    is forwarded through the global webhook dispatcher (shared/webhook_dispatcher),
+    i.e. the same signed WEBHOOK_URL delivery every other platform event uses,
+    as system.alert.firing / system.alert.resolved.
+    """
+    try:
+        payload = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Invalid JSON payload"}, status_code=400)
+
+    if not isinstance(payload, dict):
+        return JSONResponse({"error": "Invalid Alertmanager payload"}, status_code=400)
+
+    events = build_alert_events(payload)
+    for event in events:
+        dispatch_event(
+            event["event_type"],
+            data=event["data"],
+            source_service="alertmanager",
+        )
+
+    metrics.increment_counter(
+        "alertmanager_notifications_total",
+        labels={"status": payload.get("status", "unknown")},
+    )
+
+    logger.info(
+        f"Alertmanager notification received: status={payload.get('status', 'unknown')}, "
+        f"alerts forwarded={len(events)}"
+    )
+
+    return {"status": "success", "alerts_forwarded": len(events)}
 
 
 @app.get("/webhook/status")

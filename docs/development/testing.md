@@ -1,145 +1,141 @@
 ---
 title: Testing
-description: Running tests, writing tests, setting up the test database, and mocking external services.
+description: Running tests, the test suite layout, the CI coverage ratchet, and mocking external services.
 ---
 
 # Testing
 
-We use pytest for everything. Tests live in the `tests/` directory and follow the same structure as the code they test.
+We use pytest for everything. Tests live in the `tests/` directory.
+
+## Suite Layout
+
+```
+tests/
+  conftest.py            # Shared fixtures + test env vars
+  unit/                  # Pure unit tests — no Docker, no database
+  integration/           # Run against the LIVE Docker stack (marked integration)
+  e2e/                   # End-to-end API/flow tests against a running stack
+  load/                  # k6 load-test scripts (JavaScript, not pytest)
+  test_dashboard.py      # \
+  test_phase2_services.py #  } top-level suites, run in CI alongside unit/
+  test_security_regressions.py  # /
+```
+
+Pytest config lives in `pytest.ini` at the repo root (and a second `tests/pytest.ini` used when running from inside `tests/`). The registered markers are `integration`, `slow`, `security`, and `smoke` — there is no `unit` marker; unit tests are just the `tests/unit/` directory.
+
+!!! note "`--timeout=30` is always on"
+    Root `pytest.ini` sets `addopts = -v --tb=short --no-header --timeout=30`, so `pytest-timeout` must be installed (it's in `requirements-test.txt`) or every invocation fails with "unrecognized arguments".
+
+## Installing Test Dependencies
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements-test.txt -r worker/api/requirements.txt
+```
+
+`worker/api/requirements.txt` is required because `tests/unit/test_auth.py` and `tests/test_security_regressions.py` import from `worker/api/utils/`, which needs FastAPI installed to import at all.
 
 ## Running Tests
 
-### Full Suite
+### Unit Tests (fast, no services)
 
 ```bash
-# Run all tests
-pytest
+pytest tests/unit/
 
-# Verbose output
-pytest -v
-
-# Stop on first failure
-pytest -x
-
-# Show print output
-pytest -s
-```
-
-### Specific Tests
-
-```bash
 # Single file
-pytest tests/test_domains.py
+pytest tests/unit/test_webhook_dispatcher.py
 
-# Single test class
-pytest tests/test_domains.py::TestDomainCreation
+# Single test, by keyword
+pytest tests/unit/ -k "auth and not session"
 
-# Single test
-pytest tests/test_domains.py::TestDomainCreation::test_create_domain -v
-
-# Tests matching a keyword
-pytest -k "domain and not delete"
+# Stop on first failure / show print output
+pytest tests/unit/ -x -s
 ```
+
+### What CI Runs
+
+CI (`.github/workflows/ci.yml`) runs everything except the live-stack suites, with MySQL 8 and Redis 7 service containers and `PYTHONPATH=.`:
+
+```bash
+pytest tests/ \
+  --ignore=tests/e2e \
+  --ignore=tests/integration \
+  --ignore=tests/load \
+  --ignore=tests/integration_test.py \
+  --ignore=tests/test_mail_flow.py \
+  --ignore=tests/test_dashboard.py \
+  --cov=shared --cov=worker --cov-report=xml:coverage.xml
+```
+
+Test failures fail CI. (Until 2026-08-30 this step ended in `|| true`, so a red suite still produced a green job — do not reintroduce that.) `tests/test_dashboard.py` is ignored because it is Flask-era code against what is now a FastAPI dashboard service; all six of its tests fail unconditionally. Fix or delete that file, then drop the ignore from `ci.yml` and this list.
+
+### Integration Tests (live Docker stack)
+
+Integration tests in `tests/integration/` speak real SMTP/IMAP/HTTP to the running containers. Start the stack first, then:
+
+```bash
+./start.sh dev     # stack must be up
+./start.sh test    # runs tests/integration/ in a container on the Docker network
+```
+
+`./start.sh test` runs pytest inside a `python:3.11-slim` container attached to `mailserver_network`, with 4 parallel workers (`pytest-xdist -n 4 --dist loadgroup` — tests that must run serially share an `xdist_group` marker) and all `TEST_*` connection env vars pointed at the container names (`postfix`, `dovecot`, `api:8080`, ...).
+
+To run them from the host instead (services published on localhost):
+
+```bash
+pytest tests/integration/
+```
+
+Select by directory, not by `-m integration` — most files in `tests/integration/` don't carry the marker, so a marker filter deselects nearly everything.
+
+`tests/integration/conftest.py` reads `TEST_SMTP_HOST`, `TEST_API_BASE`, `TEST_DB_*` etc. from the environment, defaulting to `localhost` and the host-mapped ports (API at `http://localhost:8083`).
 
 ### Coverage
 
 ```bash
-# Run with coverage report
-pytest --cov=worker --cov-report=html
-
-# View the HTML report
+pytest tests/unit/ --cov=shared --cov=worker --cov-report=html
 open htmlcov/index.html
 ```
 
-## Test Database
+CI enforces two coverage gates:
 
-Tests run against a separate MySQL database to avoid messing with development data.
+1. **Repo total is a ratchet** — total line coverage must not fall below the number in `coverage-baseline.txt`. If your PR raises it, update the baseline so it can't drift back down.
+2. **Changed code ≥ 60%** — `diff-cover` compares `coverage.xml` against `origin/develop` and fails if the lines you touched are under 60% covered.
 
-### Setup
+## Fixtures
 
-The test config in `pytest.ini` (or `pyproject.toml`) sets up the test database:
-
-```ini
-# pytest.ini
-[pytest]
-testpaths = tests
-env =
-    DB_NAME=mailserver_test
-    DB_HOST=localhost
-    DB_PORT=3306
-    DB_USER=mailuser
-    DB_PASSWORD=devpassword
-    REDIS_HOST=localhost
-    REDIS_PORT=6379
-```
-
-### Fixtures
-
-Common fixtures are in `tests/conftest.py`:
+The real shared fixtures are in `tests/conftest.py`. They are **mocks and sample data**, not a live database — unit tests never touch MySQL:
 
 ```python
-# tests/conftest.py
-import pytest
-from fastapi.testclient import TestClient
-
-
-@pytest.fixture(scope="session")
-def db():
-    """Create and tear down the test database."""
-    # Create test database
-    setup_test_database()
-    yield get_db_connection()
-    # Drop test database
-    teardown_test_database()
+# tests/conftest.py (actual fixtures)
 
 
 @pytest.fixture
-def client(db):
-    """FastAPI test client."""
-    from worker.api.main import app
-
-    return TestClient(app)
+def mock_db_connection():
+    """Returns (mock_conn, mock_cursor) MagicMocks."""
 
 
 @pytest.fixture
-def api_key_header(db):
-    """Valid API key header for authenticated requests."""
-    key = create_test_api_key(db)
-    return {"X-API-Key": key}
+def mock_redis():
+    """fakeredis.FakeRedis(decode_responses=True), or a MagicMock fallback."""
 
 
 @pytest.fixture
-def sample_org(db):
-    """Create a sample organization for testing."""
-    org_id = "test-org"
-    db.execute(
-        "INSERT IGNORE INTO organizations (id, name, active) VALUES (%s, %s, %s)",
-        (org_id, "Test Organization", True),
-    )
-    return org_id
+def sample_org():
+    """Dict: {'id': 'test-org-001', 'name': 'Test Organization', ...}"""
 
 
 @pytest.fixture
-def sample_domain(db, sample_org):
-    """Create a sample domain for testing."""
-    db.execute(
-        "INSERT IGNORE INTO domains (domain, organization_id, active) VALUES (%s, %s, %s)",
-        ("test.example.com", sample_org, True),
-    )
-    return "test.example.com"
+def sample_domain(sample_org):
+    """Dict: {'domain': 'testorg.com', 'organization_id': ..., ...}"""
+
+
+@pytest.fixture
+def sample_api_key():
+    """Dict: {'api_key': 'test-api-key-12345', 'organization_id': ..., ...}"""
 ```
 
-### Auto-Cleanup
-
-Use a fixture that wraps each test in a transaction rollback:
-
-```python
-@pytest.fixture(autouse=True)
-def cleanup_db(db):
-    """Roll back any changes after each test."""
-    yield
-    db.rollback()
-```
+`tests/conftest.py` also sets the `DB_*`/`REDIS_*`/`ADMIN_TOKEN_SECRET` env vars (via `os.environ.setdefault`) before anything imports the code under test, so modules that read config at import time get safe test values.
 
 ## Writing Tests
 
@@ -148,25 +144,16 @@ def cleanup_db(db):
 Follow the Arrange-Act-Assert pattern:
 
 ```python
-def test_create_domain(client, api_key_header, sample_org):
+def test_lookup_returns_none_for_unknown_domain(mock_db_connection):
     # Arrange
-    domain_data = {
-        "domain": "newtest.com",
-        "organization_id": sample_org,
-        "mailboxes": 50,
-    }
+    mock_conn, mock_cursor = mock_db_connection
+    mock_cursor.fetchone.return_value = None
 
     # Act
-    response = client.post(
-        "/api/v1/add/domain",
-        headers=api_key_header,
-        json=domain_data,
-    )
+    result = get_domain(mock_conn, "missing.example.com")
 
     # Assert
-    assert response.status_code == 200
-    data = response.json()
-    assert data["type"] == "success"
+    assert result is None
 ```
 
 ### Test Naming
@@ -188,77 +175,40 @@ def test_domain_works():
 
 ### Testing Error Cases
 
-Always test the unhappy path:
-
-```python
-def test_create_domain_duplicate_returns_409(client, api_key_header, sample_domain):
-    response = client.post(
-        "/api/v1/add/domain",
-        headers=api_key_header,
-        json={"domain": sample_domain, "organization_id": "test-org"},
-    )
-    assert response.status_code == 409
-
-
-def test_create_domain_invalid_name(client, api_key_header, sample_org):
-    response = client.post(
-        "/api/v1/add/domain",
-        headers=api_key_header,
-        json={"domain": "not a valid domain!!", "organization_id": sample_org},
-    )
-    assert response.status_code == 422
-
-
-def test_create_domain_without_auth(client):
-    response = client.post(
-        "/api/v1/add/domain",
-        json={"domain": "test.com"},
-    )
-    assert response.status_code == 401
-```
+Always test the unhappy path — invalid input, missing auth, duplicates. The e2e suite (`tests/e2e/test_api_endpoints.py`) covers every registered API route this way; new endpoints should get the same treatment.
 
 ## Mocking External Services
 
-### Mocking Redis
+All of these libraries are pinned in `requirements-test.txt`.
+
+### Mocking Redis (fakeredis)
+
+Use the `mock_redis` fixture — it's a real in-memory Redis implementation, so expiry, counters, and data structures behave correctly:
 
 ```python
-from unittest.mock import patch, MagicMock
-
-
-@patch("worker.api.services.redis_client.Redis")
-def test_rate_limit_check(mock_redis, client, api_key_header):
-    mock_redis_instance = MagicMock()
-    mock_redis.return_value = mock_redis_instance
-    mock_redis_instance.get.return_value = b"50"  # 50 requests so far
-
-    response = client.post("/api/v1/add/domain", headers=api_key_header, json={...})
-    assert response.status_code == 200
+def test_rate_limit_counter(mock_redis):
+    mock_redis.incr("rl:org-1:minute")
+    mock_redis.expire("rl:org-1:minute", 60)
+    assert int(mock_redis.get("rl:org-1:minute")) == 1
 ```
 
 ### Mocking SMTP
 
 ```python
+from unittest.mock import patch, MagicMock
+
+
 @patch("smtplib.SMTP")
-def test_send_email(mock_smtp, client, api_key_header):
+def test_send_email(mock_smtp):
     mock_instance = MagicMock()
     mock_smtp.return_value.__enter__ = MagicMock(return_value=mock_instance)
 
-    response = client.post(
-        "/api/v1/send/email",
-        headers=api_key_header,
-        json={
-            "from": "sender@test.com",
-            "to": "recipient@test.com",
-            "subject": "Test",
-            "text": "Hello",
-        },
-    )
+    send_message("sender@test.com", "recipient@test.com", "Test", "Hello")
 
-    assert response.status_code == 200
     mock_instance.sendmail.assert_called_once()
 ```
 
-### Mocking Webhook Delivery
+### Mocking HTTP (responses)
 
 ```python
 import responses
@@ -278,79 +228,39 @@ def test_webhook_delivery():
     assert len(responses.calls) == 1
 ```
 
-### Mocking Time
+`tests/unit/test_webhook_dispatcher.py` is a full worked example of this pattern against `shared/webhook_dispatcher.py`.
+
+### Mocking Time (freezegun)
 
 ```python
 from freezegun import freeze_time
 
 
-@freeze_time("2025-03-25 14:00:00")
+@freeze_time("2026-08-30 14:00:00")
 def test_cert_expiry_check():
-    # All datetime.now() calls return 2025-03-25 14:00:00
-    cert = {"valid_until": "2025-04-01 00:00:00"}
+    cert = {"valid_until": "2026-09-06 00:00:00"}
     assert days_until_expiry(cert) == 7
 ```
 
-## Integration Tests
-
-Integration tests hit the real database and services. They're slower but catch more bugs.
+## Markers
 
 ```python
-@pytest.mark.integration
-class TestFullMailFlow:
-    def test_domain_to_mailbox_lifecycle(self, client, api_key_header):
-        # Create org
-        client.post(
-            "/api/v1/add/organization",
-            headers=api_key_header,
-            json={"id": "lifecycle-test", "name": "Lifecycle Test"},
-        )
-
-        # Create domain
-        client.post(
-            "/api/v1/add/domain",
-            headers=api_key_header,
-            json={"domain": "lifecycle.test", "organization_id": "lifecycle-test"},
-        )
-
-        # Create mailbox
-        resp = client.post(
-            "/api/v1/add/mailbox",
-            headers=api_key_header,
-            json={
-                "local_part": "user",
-                "domain": "lifecycle.test",
-                "password": "testpass123",
-                "name": "Test User",
-            },
-        )
-        assert resp.status_code == 200
-
-        # Verify mailbox exists
-        resp = client.get("/api/v1/get/mailbox/user@lifecycle.test", headers=api_key_header)
-        assert resp.status_code == 200
+@pytest.mark.integration   # Requires running Docker services
+@pytest.mark.slow          # Takes > 10 seconds (email delivery)
+@pytest.mark.security      # Security-related tests
+@pytest.mark.smoke         # Quick sanity checks (run first)
 ```
 
-Run integration tests separately:
+Run by marker:
 
 ```bash
-pytest -m integration
-```
-
-## Test Categories
-
-```python
-# Mark tests
-@pytest.mark.unit          # Fast, no external deps
-@pytest.mark.integration   # Needs database
-@pytest.mark.slow          # Takes > 5 seconds
-@pytest.mark.smoke         # Critical path only
-```
-
-Run by category:
-
-```bash
-pytest -m unit             # Only unit tests
 pytest -m "not slow"       # Skip slow tests
+pytest -m security         # Security regression tests
 pytest -m smoke            # Quick smoke test
 ```
+
+(Live-stack tests are selected by directory — `pytest tests/integration/` — since most of them don't carry the `integration` marker.)
+
+## Load Tests
+
+`tests/load/` contains [k6](https://k6.io/) scripts (`api_load.js`, `smtp_load.js`, `imap_load.js`) — they are JavaScript, run with the `k6` CLI against a running stack, and are not collected by pytest.

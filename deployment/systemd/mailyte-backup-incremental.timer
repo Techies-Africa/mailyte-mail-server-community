@@ -1,8 +1,10 @@
 [Unit]
 Description=Hourly Mailyte incremental backup
+Documentation=file:///var/www/mailyte-email-server/current/docs/operations/disaster-recovery.md
 
 [Timer]
-# :15 past, so it never collides with the 02:30 full backup.
+# :15 past the hour, so it never collides with the 02:30 full backup and the
+# 2 h "no incremental" alert has a full extra period of slack.
 OnCalendar=*-*-* *:15:00
 Persistent=true
 AccuracySec=1min

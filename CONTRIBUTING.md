@@ -1,27 +1,29 @@
 # Contributing to Mailyte Email Server
 
-Thanks for your interest in contributing to Mailyte. This guide covers the process for contributing to the Community Edition.
+Thanks for your interest in contributing to Mailyte. This guide covers the basics; the full contributor handbook lives in [docs/development/](docs/development/index.md).
 
 ## Getting Started
 
 1. Fork the repository
-2. Clone your fork: `git clone https://github.com/YOUR_USERNAME/mailyte-mail-server.git`
-3. Create a branch: `git checkout -b feature/your-feature`
+2. Clone your fork: `git clone https://github.com/YOUR_USERNAME/mailyte-email-server.git`
+3. Create a branch off `develop`: `git checkout -b feature/your-feature`
 4. Make your changes
-5. Run tests (see below)
+5. Run tests and linters (see below)
 6. Push and open a pull request
 
 ## Development Setup
 
 ```bash
-cp .env.example .env
-# Edit .env with your settings
+# Generate .env with strong random secrets (required — the stack
+# refuses to start with missing or known-weak secrets)
+bash scripts/generate-secrets.sh
+# Then edit .env (HOSTNAME, DOMAIN, ...)
 
 # Start in development mode (hot-reload)
-./start.sh
-# Choose option 4 (development mode)
+./start.sh dev
+# Or interactively: ./start.sh → option 4 (Development mode)
 
-# Or directly:
+# Which is equivalent to:
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
 ```
 
@@ -29,38 +31,45 @@ The API will be at `http://localhost:8083/api-docs`.
 
 ## Running Tests
 
+Python 3.11+ is required.
+
 ```bash
 # Unit tests (no Docker required)
-docker run --rm -v "$(pwd):/app" -w /app python:3.11-slim \
-  bash -c "pip install -q pytest bcrypt fastapi && python -m pytest tests/unit/ -v"
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements-test.txt -r worker/api/requirements.txt
+pytest tests/unit/
 
-# Integration tests (requires running services)
+# Integration tests (requires the running dev stack)
 ./start.sh test
 ```
 
 ## Code Style
 
-- Python: We use [Ruff](https://docs.astral.sh/ruff/) for linting and formatting
+- Python: [Ruff](https://docs.astral.sh/ruff/) for linting and formatting, [mypy](https://mypy-lang.org/) for type checking — both configured in `pyproject.toml`
 - Shell scripts: Validated with [ShellCheck](https://www.shellcheck.net/)
 - SQL: Standard MySQL 8.0 syntax
 
-Run the linter before submitting:
+Run before submitting:
 
 ```bash
-pip install ruff
-ruff check .
+pip install ruff mypy mypy-baseline
 ruff format --check .
+ruff check .
+bash scripts/run_mypy.sh | mypy-baseline filter
 ```
+
+CI gates lint, type errors, coverage, and the OpenAPI contract against baseline files at the repo root (`ruff-baseline.txt`, `mypy-baseline.txt`, `coverage-baseline.txt`, `openapi-untyped-baseline.txt`). The counts may only shrink: new violations fail the build, and when your PR removes some, update the baseline in the same PR. See [docs/development/coding-standards.md](docs/development/coding-standards.md).
 
 ## Project Structure
 
 ```
-mailer/          # Core mail services (Postfix, Dovecot, Rspamd)
+mailer/          # Core mail services (Postfix, Dovecot, Rspamd, cert_manager)
 worker/          # Python microservices (API, tracking, webhooks, etc.)
-database/        # SQLAlchemy models and Alembic migrations
-shared/          # Shared utilities (config, logging, webhook dispatcher)
+database/        # SQLAlchemy models and frozen SQL bootstrap files
+alembic/         # Alembic migrations (run via manage.py or the migrate service)
+shared/          # Shared utilities (config, metrics, webhook dispatcher)
 scripts/         # CLI tools and management scripts
-tests/           # Unit and integration tests
+tests/           # Unit, integration, e2e, and load tests
 ```
 
 ## Pull Request Guidelines
@@ -83,7 +92,7 @@ tests/           # Unit and integration tests
 
 ## What Belongs in Enterprise Edition
 
-The following features are maintained in the private Enterprise Edition and should not be added to the Community Edition:
+The following features are maintained in the Enterprise Edition and should not be added to the Community Edition (`mailyte-mail-server-community`):
 
 - Analytics and reporting dashboards
 - AI/ML features (RAG, semantic search)
@@ -98,7 +107,7 @@ If you're unsure whether a feature belongs in CE or EE, open an issue to discuss
 
 ## Reporting Bugs
 
-Open a [GitHub issue](https://github.com/Techies-Africa/mailyte-mail-server-community/issues) with:
+Open a [GitHub issue](https://github.com/Techies-Africa/mailyte-email-server/issues) with:
 
 1. Steps to reproduce
 2. Expected behavior

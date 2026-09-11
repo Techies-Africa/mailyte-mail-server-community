@@ -1,7 +1,7 @@
 
 # Architecture Overview
 
-The Mailyte Mail Server is built as a containerized microservices architecture designed for scalability, reliability, and enterprise-grade performance.
+The Enterprise Mail Server is built as a containerized microservices architecture designed for scalability, reliability, and enterprise-grade performance.
 
 ## System Architecture
 

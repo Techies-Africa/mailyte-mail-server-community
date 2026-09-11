@@ -1,45 +1,98 @@
-# Mailyte Email Server — Community Edition
+# Mailyte Email Server
 
-A self-hosted, programmable email server built on Postfix, Dovecot, and Rspamd. Full SMTP/IMAP/POP3 with email tracking, webhooks, and a REST API.
-
-## Features
-
-- **SMTP** — Postfix with TLS, DKIM signing, SPF/DMARC validation
-- **IMAP/POP3** — Dovecot with SSL, Sieve filters, quota support
-- **Spam filtering** — Rspamd with greylisting and DNSBL checks
-- **Email tracking** — Open and click tracking with pixel injection and URL rewriting
-- **Webhooks** — 50+ event types (delivered, bounced, opened, clicked, etc.) with HMAC signatures
-- **REST API** — Manage domains, mailboxes, aliases, filters, rate limits, and certificates
-- **Rate limiting** — Per-organization, per-domain, and per-mailbox sending limits
-- **SSL/TLS** — Let's Encrypt auto-provisioning with SNI support
-- **Autoconfig** — Email client auto-discovery (Thunderbird, Outlook, Apple Mail)
-- **Webmail** — Roundcube or SOGo (pluggable via Docker Compose profiles)
-- **Docker** — Single `docker compose up` to run everything
+Enterprise email infrastructure built on Postfix, Dovecot, and Rspamd. Provides SMTP/IMAP/POP3 services with unlimited domains, cloud storage integration, email tracking, webhooks, and AI-powered search.
 
 ## Quick Start
 
 ```bash
-# 1. Clone the repo
-git clone https://github.com/Techies-Africa/mailyte-mail-server-community.git
-cd mailyte-mail-server-community
-
-# 2. Copy and configure environment
+# 1. Copy and configure environment
 cp .env.example .env
-# Edit .env — at minimum change passwords and set your domain:
-#   HOSTNAME=mail.yourdomain.com
-#   DOMAIN=yourdomain.com
-#   DB_PASSWORD=<strong-password>
-#   DB_ROOT_PASSWORD=<strong-password>
-#   ADMIN_TOKEN_SECRET=<random-32-char-string>
-#   WEBHOOK_SECRET=<random-secret>
+# Edit .env with your domain, database, and cloud storage settings
 
-# 3. Start all services
+# 2. Launch the interactive console
 ./start.sh
-# Or directly: docker compose up -d
-
-# 4. Wait for all services to be healthy (~30 seconds)
-docker compose ps
+# Select option 1 (First-time setup) or option 2 (Start essential services)
 ```
+
+That's it. The `start.sh` menu gives you access to everything — starting services, viewing logs, running migrations, health checks, backups, and more.
+
+### CLI Mode
+
+`start.sh` also works as a pass-through CLI:
+
+```bash
+./start.sh start mysql api       # Start specific services
+./start.sh status                # Show service status
+./start.sh logs postfix          # Follow Postfix logs
+./start.sh health                # Run health checks
+./start.sh help                  # See all commands
+```
+
+## Service Architecture
+
+The full inventory lives in `docker-compose.yml` (~45 services). The important groups, with **host ports from the base compose file** (in production, `docker-compose.prod.yml` rebinds every internal port to `127.0.0.1` and routes HTTP through Traefik on 443):
+
+### Essential Services (start these first)
+
+| Service | Port(s) | Description |
+|---------|---------|-------------|
+| **redis** | — (internal) | Cache, rate limiting, Rspamd backend |
+| **mysql** | — (internal) | Core database (MySQL 8.0.35, pinned) |
+| **migrate** | — | Alembic schema migrations; runs once per `up`, gates the rest |
+| **rspamd** | 11332, 11334 | Anti-spam filtering + DKIM signing (milter) |
+| **postfix** | 25, 587, 465 | SMTP server |
+| **dovecot** | 143, 993, 110, 995, 4190 | IMAP/POP3/ManageSieve server |
+| **api** | 8083 (binds 8080) | FastAPI gateway — the whole management REST surface |
+
+### Worker Services
+
+| Service | Host port | Description |
+|---------|-----------|-------------|
+| **webhooks** | 8081 | Signed event delivery to external URLs |
+| **rate_limiter** | 8082 | Rate limit counters; consulted by Postfix per message |
+| **tracking** | 8086 | Email open/click tracking |
+| **monitoring** | 8085 | Service health, container auto-restart via docker-proxy |
+| **analytics** | 8087 | Aggregated analytics + scheduled reports |
+| **dashboard** | 8088 | Analytics dashboard service |
+| **archiver** | 8089 | Age-encrypted mail archive to S3 |
+| **queue_manager** | 8090 | Postfix spool queue management (`postqueue`) |
+| **rag** | 8091 | AI search worker |
+| **storage_usage** | 8092 | Mailbox usage via Dovecot IMAP QUOTA |
+| **encryption** | 8093 | S/MIME certificate operations |
+| **delivery_optimizer** | 8094 | ISP throttling, IP warming, bounce processing |
+| **templates** | 8095 | Email template management |
+| **url_protection** | 8096 | Safe Links click-time URL verification |
+| **oauth** | 8097 | OAuth2/XOAUTH2 for IMAP/SMTP |
+| **jmap** | 8098 | JMAP protocol server |
+| **migration** | 8099 | IMAP-to-IMAP mailbox migration |
+| **autoconfig** | 8100 | Client auto-setup (autoconfig/autodiscover/MTA-STS) |
+| **caldav** (+ **radicale**) | 8101 (5232) | CalDAV/CardDAV |
+| **activesync** | 8084 | Mobile sync |
+| **log_ingestor** | — | Tails Postfix's log into `mail_logs` + delivery webhooks |
+| **dlp** / **totp** / **geo_blocking** | 8102 / 8103 / 8104 | Security services |
+
+### Infrastructure & Frontends
+
+| Service | Description |
+|---------|-------------|
+| **qdrant** | Vector DB for AI search (6333) |
+| **kafka** + **zookeeper** | Provisioned broker — no service produces/consumes yet |
+| **cert_manager** + **acme_webroot** | Let's Encrypt automation (webroot HTTP-01, SNI certs) |
+| **prometheus** / **grafana** / **alertmanager** + exporters | Monitoring stack (9090 / 3000 / 9093) |
+| **docs** | This handbook, MkDocs (8000) |
+| **secrets-check** / **docker-proxy** | Fail-closed secrets validation; scoped Docker socket proxy |
+| **webmail** / **console** / **roundcube** / **sogo** | Frontends behind compose profiles (`--profile webmail`, etc.) |
+
+## Startup Order
+
+Services have dependencies and should start in this order. The `start.sh` menu (option 2) handles this automatically, and Compose itself enforces the critical gates (`secrets-check` and `migrate` must succeed before anything that touches secrets or the schema starts):
+
+1. **Gates** — secrets-check (fail-closed secrets validation), then mysql + redis, then migrate (Alembic)
+2. **Anti-spam** — rspamd (needs redis)
+3. **Mail** — postfix, dovecot (need mysql, redis, rspamd)
+4. **API** — api (needs mysql, redis)
+5. **Workers** — webhooks, tracking, rate_limiter, log_ingestor, etc.
+6. **Optional** — rag, qdrant, cert_manager, frontends via profiles
 
 ## First Steps — Create Your First Mailbox
 
@@ -51,194 +104,354 @@ After the server is running, you need to set up an organization, domain, API key
 ./scripts/setup-first-user.sh
 ```
 
-This interactive script creates your first organization, API key, domain, and mailbox.
+This interactive script drives the one-time bootstrap endpoint and creates your first organization, domain, mailbox, and API key in a single call.
 
-### Option B: Manual setup via API
+### Option B: Manual bootstrap via API
+
+A fresh install has no API keys yet, so the API writes a **single-use bootstrap token** inside the api container. Use it once:
 
 ```bash
-# The admin token is set in your .env as ADMIN_TOKEN_SECRET
+# 1. Read the single-use bootstrap token (only exists while no organization does)
+TOKEN=$(docker compose exec -T api cat /app/data/bootstrap-token)
 
-# 1. Create an organization
-curl -X POST http://localhost:8083/api/v1/organizations/ \
-  -H "X-Admin-Token: YOUR_ADMIN_TOKEN" \
+# 2. Bootstrap: creates org + domain + mailbox + API key in one call
+curl -X POST http://localhost:8083/api/v1/bootstrap/ \
+  -H "X-Bootstrap-Token: ${TOKEN}" \
   -H "Content-Type: application/json" \
-  -d '{"name": "my-org"}'
+  -d '{"organization_name": "my-org", "admin_email": "user@yourdomain.com", "admin_password": "your-password"}'
+# → the response contains your API key. Save it.
 
-# 2. Create an API key (save the returned key!)
-curl -X POST http://localhost:8083/api/v1/organizations/my-org/api-keys \
-  -H "X-Admin-Token: YOUR_ADMIN_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"name": "my-key"}'
-
-# 3. Add your domain
+# From here on, use the API key. For example, add another domain:
 curl -X POST http://localhost:8083/api/v1/domains/ \
   -H "X-API-Key: YOUR_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"domain": "yourdomain.com", "organization_id": "my-org"}'
+  -d '{"domain": "yourdomain.com", "organization_id": "YOUR_ORG_ID"}'
 
-# 4. Create a mailbox
-curl -X POST http://localhost:8083/api/v1/mailboxes/ \
+# ...and another mailbox:
+curl -X POST http://localhost:8083/api/v1/mailboxes/email-accounts \
   -H "X-API-Key: YOUR_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"email": "user@yourdomain.com", "password": "your-password", "name": "Your Name"}'
+  -d '{"email": "user2@yourdomain.com", "password": "another-password", "name": "Second User"}'
 ```
 
-### Option C: Direct database seed (development only)
-
-```bash
-# Quick seed for local development/testing
-docker exec mysql mysql -u root -p<ROOT_PASSWORD> mailserver -e "
-  INSERT INTO organizations (id, name, active) VALUES ('dev-org', 'dev-org', 1);
-  INSERT INTO api_keys (key_id, key_hash, name, permissions, organization_id, active)
-    VALUES ('dev-api-key', SHA2('dev-api-key', 256), 'dev', '{\"read\": true, \"write\": true}', 'dev-org', 1);
-  INSERT INTO domains (organization_id, domain, active) VALUES ('dev-org', 'test.local', 1);
-"
-
-# Create a mailbox (needs bcrypt hash)
-docker exec -it api python3 -c "
-from utils.database import get_db_connection
-from utils.auth import hash_password
-conn = get_db_connection()
-cur = conn.cursor()
-cur.execute(
-    'INSERT INTO email_accounts (email, local_part, domain_id, organization_id, password, name, status) VALUES (%s, %s, (SELECT id FROM domains WHERE domain=%s), %s, %s, %s, %s)',
-    ('user@test.local', 'user', 'test.local', 'dev-org', hash_password('testpass123'), 'Test User', 'active')
-)
-conn.commit()
-print('Mailbox created: user@test.local / testpass123')
-"
-```
-
-## Set Up Backups
-
-**Do this before you put real mail on the server.** One command:
-
-```bash
-sudo ./deployment/systemd/install-timers.sh
-```
-
-That enables a nightly full backup and an hourly incremental, to local disk, via
-systemd timers. `scripts/backup.sh` has always existed — this is what actually
-runs it.
-
-Local backups protect you from a bad migration or a mistaken deletion. They do
-**not** survive losing the machine: for that, add an S3-compatible bucket (four
-values in `.env`). Both, plus how to test a restore before you need one, are in
-[docs/operations/backups.md](docs/operations/backups.md).
-
-> Backups contain your DKIM private keys and `.env`. Keep them at mode 700, and
-> encrypt them before putting them anywhere shared.
+Interactive API docs live at `http://localhost:8083/api-docs` (Swagger) and `http://localhost:8083/api-reference` (ReDoc).
 
 ## Logging In
 
 ### Roundcube Webmail
 
-Open `http://localhost:8880` and log in with the email and password you created above.
+Open `http://localhost:8880` and log in with your mailbox email and password.
 
 ### IMAP/POP3 (Thunderbird, Outlook, etc.)
 
 - **IMAP Server:** `localhost` (port 993, SSL/TLS)
 - **SMTP Server:** `localhost` (port 587, STARTTLS)
-- **Username:** Your full email address (e.g., `user@yourdomain.com`)
+- **Username:** Your full email address
 - **Password:** The password you set when creating the mailbox
 
-### API
+### Webmail Options
 
-All API requests require the `X-API-Key` header:
-
-```bash
-curl http://localhost:8083/api/v1/domains/ -H "X-API-Key: YOUR_API_KEY"
-```
-
-Interactive docs: [localhost:8083/api-docs](http://localhost:8083/api-docs) (Swagger) or [localhost:8083/api-reference](http://localhost:8083/api-reference) (Redoc).
-
-## DNS Setup (Production)
-
-For email to work with external providers, configure these DNS records for your domain:
-
-| Type | Name | Value |
-|------|------|-------|
-| MX | `yourdomain.com` | `mail.yourdomain.com` (priority 10) |
-| A | `mail.yourdomain.com` | Your server's IP |
-| TXT | `yourdomain.com` | `v=spf1 mx -all` |
-| TXT | `_dmarc.yourdomain.com` | `v=DMARC1; p=quarantine; rua=mailto:dmarc@yourdomain.com` |
-| TXT | `mail._domainkey.yourdomain.com` | *(DKIM public key — generate with `./start.sh` option 21)* |
-
-## Services
-
-| Service | Port | Description |
-|---------|------|-------------|
-| Postfix | 25, 587, 465 | SMTP server |
-| Dovecot | 143, 993, 110, 995 | IMAP/POP3 server |
-| Rspamd | 11332, 11334 | Spam filtering |
-| API | 8083 | REST management API |
-| Tracking | 8086 | Email open/click tracking |
-| Webhooks | 8081 | Event notifications |
-| Rate Limiter | 8082 | Sending rate control |
-| Roundcube | 8880 | Webmail (profile: roundcube) |
-| SOGo | 8881 | Groupware — webmail + calendar + contacts (profile: sogo) |
-| Autoconfig | 8100 | Email client auto-discovery |
-| Cert Manager | 80 | Let's Encrypt certificates |
-
-## API Endpoints
-
-```
-POST   /api/v1/organizations/     Create organization
-POST   /api/v1/domains/           Add domain
-POST   /api/v1/mailboxes/         Create mailbox
-POST   /api/v1/aliases/           Create alias
-GET    /api/v1/filters/           List mail filters
-POST   /api/v1/tracking/          Configure tracking
-GET    /api/v1/webhooks/          List webhook endpoints
-GET    /api/v1/rate-limiter/      View rate limits
-POST   /api/v1/ssl/               Upload certificate
-```
-
-Full interactive docs at `/api-docs` (Swagger) or `/api-reference` (Redoc).
-
-## Running Tests
+Mailyte supports pluggable webmail via Docker Compose profiles:
 
 ```bash
-# Unit tests (no Docker required)
-docker run --rm -v "$(pwd):/app" -w /app python:3.11-slim \
-  bash -c "pip install -q pytest bcrypt fastapi && python -m pytest tests/unit/ -v"
-
-# Integration tests (requires running services)
-./start.sh test
+# In .env — pick your webmail
+COMPOSE_PROFILES=webmail          # Mailyte's own webmail (ghcr.io/techies-africa/mailyte-webmail)
+COMPOSE_PROFILES=roundcube        # Roundcube (lightweight)
+COMPOSE_PROFILES=sogo             # SOGo (webmail + calendar + contacts + ActiveSync)
+COMPOSE_PROFILES=roundcube,sogo   # Both on different ports
+# Omit for no webmail (API-only)
 ```
 
-## Enterprise Edition
+The `console` profile similarly enables the staff admin panel (ghcr.io/techies-africa/mailyte-console) — an operator tool that must sit behind an IP allowlist, never public DNS.
 
-Need more? [Mailyte Enterprise](https://mailyte.com) adds:
+See [docs/guides/webmail-setup.md](docs/guides/webmail-setup.md) for adding custom webmail clients.
 
-- Analytics and reporting dashboards
-- AI-powered semantic email search (RAG)
-- GDPR compliance tools (data export, erasure)
-- IMAP-to-IMAP migration
-- Shared mailboxes and distribution groups
-- Multi-tenancy with tenant isolation
-- Queue management and delivery optimization
-- Prometheus/Grafana monitoring
-- ActiveSync, JMAP, CalDAV, OAuth
-- Reseller and white-label support
-- Audit logging and DLP
-- Cloud storage sync (S3/Azure/GCS)
-- Email archiving and encryption (PGP/S/MIME)
+## Cloud Mode (Remote MySQL + Redis)
 
-See the full comparison at [localhost:8083/features](http://localhost:8083/features) when the server is running.
+To use managed cloud databases (e.g., AWS RDS + ElastiCache) instead of local Docker containers:
+
+1. Update `.env` with your remote hosts:
+
+```bash
+DB_HOST=your-instance.xxxx.us-east-1.rds.amazonaws.com
+DB_PORT=3306
+REDIS_HOST=your-cluster.xxxx.cache.amazonaws.com
+REDIS_PORT=6379
+```
+
+2. Start with the cloud override:
+
+```bash
+./start.sh    # Select option 6 (Cloud DB/Redis)
+
+# Or directly
+docker compose -f docker-compose.yml -f docker-compose.cloud.yml up -d
+```
+
+This replaces local mysql/redis containers with no-op stubs (so dependency chains still resolve) and injects your remote DB_HOST/REDIS_HOST into every service.
+
+You can combine it with other overrides:
+
+```bash
+# Cloud + dev (hot-reload)
+docker compose -f docker-compose.yml -f docker-compose.cloud.yml -f docker-compose.dev.yml up -d
+
+# Cloud + production
+docker compose -f docker-compose.yml -f docker-compose.cloud.yml -f docker-compose.prod.yml up -d
+```
+
+## Development Setup
+
+```bash
+# Start with hot-reload enabled on all worker services
+./start.sh    # Select option 4 (Development mode)
+
+# Or via CLI
+./start.sh dev
+```
+
+This uses `docker-compose.yml` + `docker-compose.dev.yml` which enables Flask debug mode and auto-reload for all Python workers.
+
+### Running Tests
+
+```bash
+# Via the menu
+./start.sh    # Select option 24
+
+# Or directly
+python3 -m pytest tests/unit/ -v          # Unit tests
+python3 -m pytest tests/e2e/ -v           # End-to-end tests
+python3 -m pytest tests/ -v --cov=worker  # All tests with coverage
+```
+
+Test dependencies: `pip install -r requirements-test.txt`
+
+### Database Migrations
+
+Uses Alembic, managed through `manage.py`:
+
+```bash
+python manage.py migrate              # Run pending migrations
+python manage.py migrate:status       # Show migration status
+python manage.py migrate:create name  # Create new migration
+python manage.py migrate:rollback     # Roll back last migration
+```
+
+## Environment Configuration
+
+Copy `.env.example` to `.env` and configure these key sections:
+
+### Required
+
+```bash
+# Mail server identity
+HOSTNAME=mail.yourdomain.com
+DOMAIN=yourdomain.com
+ADMIN_EMAIL=admin@yourdomain.com
+
+# Database
+DB_HOST=mysql
+DB_PORT=3306
+DB_NAME=mailserver
+DB_USER=mailuser
+DB_PASSWORD=<strong-password>
+DB_ROOT_PASSWORD=<strong-password>
+
+# Security
+ADMIN_PASSWORD=<strong-password>
+WEBHOOK_SECRET=<strong-secret>
+```
+
+### Optional
+
+```bash
+# Cloud storage (AWS S3 or Azure Blob)
+CLOUD_PROVIDER=aws
+AWS_ACCESS_KEY_ID=<key>
+AWS_SECRET_ACCESS_KEY=<secret>
+AWS_DEFAULT_REGION=eu-west-2
+AWS_BUCKET=your-bucket
+
+# Email tracking
+TRACKING_ENABLED=true
+OPEN_TRACKING_ENABLED=true
+CLICK_TRACKING_ENABLED=true
+
+# RAG / AI search
+RAG_MODE=local
+EMBEDDING_PROVIDER=sentence_transformers
+EMBEDDING_MODEL_NAME=all-MiniLM-L6-v2
+```
+
+See `.env.example` for the full list (~750 lines with documentation).
+
+## DNS Configuration
+
+Before going to production, configure these DNS records for each domain:
+
+```dns
+yourdomain.com.              IN  MX   10  mail.yourdomain.com.
+mail.yourdomain.com.         IN  A        YOUR_SERVER_IP
+yourdomain.com.              IN  TXT      "v=spf1 mx ip4:YOUR_SERVER_IP ~all"
+_dmarc.yourdomain.com.       IN  TXT      "v=DMARC1; p=quarantine; rua=mailto:dmarc@yourdomain.com"
+default._domainkey.yourdomain.com. IN TXT "v=DKIM1; k=rsa; p=YOUR_PUBLIC_KEY"
+```
+
+Generate DKIM keys: `./start.sh` > option 20, or `python3 scripts/generate_dkim.py`
+
+## Project Structure
+
+```
+mailyte-email-server/
+|-- start.sh                    # Interactive management console (start here)
+|-- manage.py                   # Database migration CLI
+|-- main.py                     # API entry point (non-Docker)
+|
+|-- docker-compose.yml          # Main service definitions
+|-- docker-compose.dev.yml      # Development overrides (hot-reload)
+|-- docker-compose.prod.yml     # Production overrides
+|-- docker-compose.cloud.yml    # Cloud DB/Redis override (remote MySQL + Redis)
+|
+|-- mailer/                     # Core mail infrastructure
+|   |-- postfix/                # SMTP server (config + policy services + tracking injector)
+|   |-- dovecot/                # IMAP/POP3 server
+|   |-- rspamd/                 # Anti-spam + DKIM signing
+|   |-- cert_manager/           # SSL certificate management
+|   |-- log_ingestor/           # Postfix log -> mail_logs + delivery webhooks
+|   |-- intrusion_detection/    # Fail2ban configs (in-repo only; not deployed)
+|   +-- log_analyzer/           # Log processing (in-repo only; not deployed)
+|
+|-- worker/                     # Microservices
+|   |-- api/                    # FastAPI gateway (34 route modules)
+|   |-- webhooks/               # Event dispatcher
+|   |-- tracking/               # Open/click tracking
+|   |-- rate_limiter/           # Rate limiting
+|   |-- queue_manager/          # Postfix queue management
+|   |-- analytics/              # Email analytics + reports
+|   |-- monitoring/             # Service health + auto-restart
+|   |-- rag/                    # AI search (Qdrant)
+|   |-- storage_usage/          # Storage monitoring (IMAP QUOTA)
+|   +-- ...                     # archiver, autoconfig, jmap, caldav, oauth,
+|                               #   migration, templates, url_protection,
+|                               #   delivery_optimizer, encryption, activesync,
+|                               #   dashboard
+|
+|-- security/                   # DLP, TOTP, geo-blocking services
+|-- shared/                     # Cross-service libs (config, db pool, webhook
+|                               #   dispatcher, envelope encryption, S3 client)
+|-- alembic/                    # Schema migrations (run by the migrate container)
+|
+|-- scripts/                    # Utility scripts
+|   |-- mailyte-ctl.sh          # CLI management tool
+|   |-- mailyte-monitor.sh      # Container monitoring
+|   |-- staged-startup.sh       # Staged service startup
+|   |-- quick-start.sh          # First-time setup wizard
+|   |-- diagnostic.py           # System diagnostics
+|   |-- container-health-monitor.py  # Auto-fix tool
+|   |-- docker-health-check.sh  # In-container health checks
+|   |-- generate_dkim.py        # DKIM key generation
+|   |-- backup.sh               # Database backup
+|   |-- restore.sh              # Database restore
+|   +-- test_runner.py          # Test execution
+|
+|-- database/                   # Schema and migrations
+|   |-- migrations/             # Alembic + SQL migrations
+|   +-- models/                 # SQLAlchemy models
+|
+|-- storage/                    # Runtime data (gitignored)
+|   |-- mail_data/              # Mailboxes
+|   |-- ssl_certs/              # SSL certificates
+|   |-- attachments/            # Email attachments
+|   |-- dkim_keys/              # DKIM signing keys
+|   +-- backups/                # Database backups
+|
+|-- tests/                      # Test suites
+|   |-- unit/                   # Unit tests
+|   |-- e2e/                    # End-to-end tests
+|   +-- load/                   # Load tests
+|
+|-- docs/                       # MkDocs documentation site
+|-- logs/                       # Service logs
++-- monitoring/                 # Prometheus/Grafana/Alertmanager configs
+```
+
+## Production Deployment
+
+```bash
+# 1. Configure production environment
+cp .env.production.example .env
+# Edit with production values (strong passwords, real domain, SSL settings)
+
+# 2. Start in production mode
+./start.sh    # Select option 5
+
+# 3. Verify
+./start.sh health
+```
+
+### Production Checklist
+
+- [ ] Strong secrets generated (`scripts/generate-secrets.sh`) — the `secrets-check` gate refuses to start the stack on weak/missing values
+- [ ] DNS records configured (MX, SPF, DKIM, DMARC) and verified via the API
+- [ ] cert_manager configured (`ACME_STAGING=false` in production)
+- [ ] Migrations applied — the `migrate` container runs Alembic automatically on every `up`; a failed migration stops the deploy
+- [ ] `docker-compose.prod.yml` in use — it binds every internal service to `127.0.0.1`; only 25, 465, 587, 143, 993, 110, 995, 4190, 80, 443 face the internet (Docker bypasses ufw, so the bind address is the control)
+- [ ] Monitoring enabled (Prometheus + Grafana)
+- [ ] Backups configured and tested
+- [ ] Health checks passing (`./start.sh health`)
+
+## API Usage
+
+Every endpoint is under `/api/v1/` and authenticates with an `X-API-Key` header (platform-scoped keys for cross-tenant operations; a fresh install gets its first key from the bootstrap flow above).
+
+```bash
+# List domains
+curl -H "X-API-Key: your-api-key" http://localhost:8083/api/v1/domains/
+
+# Add a domain (returns the DNS records to configure, including DKIM)
+curl -X POST \
+  -H "X-API-Key: your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{"domain": "example.com", "organization_id": "YOUR_ORG_ID"}' \
+  http://localhost:8083/api/v1/domains/
+
+# Add a mailbox
+curl -X POST \
+  -H "X-API-Key: your-api-key" \
+  -H "Content-Type: application/json" \
+  -d '{"email": "user@example.com", "password": "secure-password"}' \
+  http://localhost:8083/api/v1/mailboxes/email-accounts
+```
+
+Full API reference: [docs/api/index.md](docs/api/index.md), or interactively at `http://localhost:8083/api-docs`.
+
+## Troubleshooting
+
+```bash
+# Check what's running
+./start.sh status
+
+# View logs for a specific service
+./start.sh logs postfix
+
+# Run diagnostics (checks Docker, env, services, ports)
+./start.sh    # Select option 11
+
+# Auto-fix common container issues
+./start.sh    # Select option 12
+
+# Rebuild a broken service
+./start.sh    # Select option 21
+```
+
+### Common Issues
+
+**Port conflict on startup** — A local service is using the same port. Either stop it or change the port mapping in `.env` (e.g., `REDIS_PORT=6380`).
+
+**MySQL won't start** — Check logs: `docker compose logs mysql`. Usually a password mismatch or existing volume with different credentials. Reset with `docker volume rm mailyte-email-server_mysql_data`.
+
+**Postfix not sending** — Check DNS records, ensure port 25 is not blocked by your ISP/cloud provider, verify SSL certs are in place.
 
 ## License
 
-AGPL-3.0 — See [LICENSE](LICENSE) for details.
-
-## Contributing
-
-Contributions welcome! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
-
-## Security
-
-To report vulnerabilities, see [SECURITY.md](SECURITY.md).
-
-## Built by
-
-[Techies Africa](https://techies.africa)
+Enterprise License - Contact for commercial use and enterprise support options.

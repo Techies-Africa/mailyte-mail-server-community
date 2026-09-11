@@ -17,6 +17,7 @@ Key Features:
 """
 
 import html as html_module
+import ipaddress
 import logging
 import re
 from datetime import datetime
@@ -39,25 +40,41 @@ def sanitize_text(value):
 
 import base64
 import os
-import subprocess
 import sys
 from pathlib import Path
 
+import dns.exception
+import dns.resolver
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from sqlalchemy import create_engine, func
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
+from utils import dkim_sync
 from utils.auth import create_api_response, org_filter, require_api_key, verify_domain_scope
 from utils.database import get_db_connection
+from utils.smtp_credentials import flush_auth_cache
 
 from database.models.certificates import DKIMKey
-from database.models.core import Domain, EmailAccount, Organization
+from database.models.core import Domain, EmailAccount, Organization, SmtpCredential
 from shared.envelope_encryption import encrypt_private_key
 
 project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
-
+from schemas.common import ErrorResponse, SimpleMessageResponse
+from schemas.domain import (
+    DomainCreateResponse,
+    DomainDeleteResponse,
+    DomainDetailResponse,
+    DomainEditResponse,
+    DomainListResponse,
+    DomainPolicyResponse,
+    DomainQuotaResponse,
+    DomainQuotaUpdateResponse,
+    DomainStatsResponse,
+    DomainVerifyDNSResponse,
+    DomainWriteResponse,
+)
 
 from shared.webhook_dispatcher import Events, dispatch_event
 
@@ -226,6 +243,20 @@ def validate_domain_data(data, is_update=False):
         except (ValueError, TypeError):
             errors.append("Max users must be a valid number")
 
+    # The selector becomes one DNS label ({selector}._domainkey.{domain}) AND
+    # one path component of rspamd's key file ({domain}.{selector}.key in the
+    # shared key directory) -- a dot or slash in it is at best a broken DNS
+    # name and at worst path traversal in a multi-tenant directory, so it is
+    # rejected here rather than trusted downstream (utils/dkim_sync.py
+    # independently refuses unsafe names as defence in depth).
+    if data.get("dkim_selector") is not None and not re.match(
+        r"^[a-zA-Z0-9]([a-zA-Z0-9_-]{0,61}[a-zA-Z0-9])?$", str(data["dkim_selector"])
+    ):
+        errors.append(
+            "DKIM selector must be a single DNS label (letters, digits, '-' or '_'; "
+            "no dots), at most 63 characters"
+        )
+
     return errors
 
 
@@ -248,8 +279,61 @@ def generate_dkim_keypair():
     return private_pem, public_b64
 
 
-def generate_dns_records(domain: str, server_hostname: str, dkim_public_key: str = None):
-    """Generate the DNS records a customer needs to configure."""
+def get_server_hostname() -> str:
+    """The public mail hostname to put in, and check DNS records against.
+
+    Docker sets HOSTNAME to the container ID for any service whose compose
+    block doesn't pass it explicitly -- which `api`'s didn't. That silently
+    produced junk for every domain created since: records reading
+    "MX c17a958e9f9b." and "v=spf1 include:spf.c17a958e9f9b", and an
+    MX/SPF verification that compared live DNS against a container ID and so
+    could never pass. A real mail hostname is always a FQDN, so a value with
+    no dot in it is the container ID it looks like, not a hostname.
+    """
+    hostname = os.getenv("MAIL_HOSTNAME") or os.getenv("HOSTNAME", "")
+    if "." not in hostname:
+        return "mx.mailyte.com"
+    return hostname
+
+
+def get_spf_host() -> str:
+    """The hostname customers `include:` in their SPF record.
+
+    Deliberately separate from get_server_hostname(), because the two are
+    independent facts that were previously forced to move together.
+
+    SPF was derived as `spf.{server_hostname}`, so renaming the mail host
+    silently repointed every customer's SPF at a hostname that had to be
+    created before the rename could happen -- and if it wasn't, receivers get
+    a permerror, which is worse than publishing no SPF at all. Worse, the
+    verifier only checks that the string appears in the TXT record; it never
+    resolves it. So the panel would go green while SPF authentication was
+    actually broken.
+
+    Keeping this configurable means the MX host can move to a new name while
+    SPF keeps pointing at the record that genuinely exists and resolves.
+    """
+    explicit = os.getenv("MAIL_SPF_HOST", "").strip()
+    if explicit:
+        return explicit
+    return f"spf.{get_server_hostname()}"
+
+
+def generate_dns_records(
+    domain: str,
+    server_hostname: str,
+    dkim_public_key: str = None,
+    dkim_selector: str = "default",
+):
+    """Generate the DNS records a customer needs to configure.
+
+    dkim_selector must be the domain's ACTUAL signing selector. This used to
+    hardcode `default._domainkey`, which silently disagreed with the selector
+    the verify-dns endpoint checks (domains.dkim_selector) for any domain on
+    a non-default selector -- i.e. every domain that has been through the
+    two-step rotate/activate flow: customers were told to publish the key at
+    a name rspamd never signs with, and verification then failed forever.
+    """
     records = [
         {
             "type": "MX",
@@ -261,13 +345,14 @@ def generate_dns_records(domain: str, server_hostname: str, dkim_public_key: str
         {
             "type": "TXT",
             "name": domain,
-            "value": f"v=spf1 include:spf.{server_hostname} ~all",
+            "value": f"v=spf1 include:{get_spf_host()} ~all",
             "description": "Authorizes Mailyte servers to send email for this domain",
         },
         {
             "type": "TXT",
             "name": f"_dmarc.{domain}",
-            "value": "v=DMARC1; p=quarantine; rua=mailto:dmarc-reports@" + domain,
+            # dmarc@ is the platform-wide convention (see autoconfig/app.py).
+            "value": "v=DMARC1; p=quarantine; rua=mailto:dmarc@" + domain,
             "description": "Policy for handling emails that fail SPF/DKIM checks",
         },
     ]
@@ -275,7 +360,7 @@ def generate_dns_records(domain: str, server_hostname: str, dkim_public_key: str
         records.append(
             {
                 "type": "TXT",
-                "name": f"default._domainkey.{domain}",
+                "name": f"{dkim_selector or 'default'}._domainkey.{domain}",
                 "value": f"v=DKIM1; k=rsa; p={dkim_public_key}",
                 "description": "Public key for DKIM signature verification",
             }
@@ -283,15 +368,253 @@ def generate_dns_records(domain: str, server_hostname: str, dkim_public_key: str
     return records
 
 
+# DNS verification must see what the WORLD sees, not the container's view.
+# The default resolver is Docker's embedded DNS (127.0.0.11), which (a) resolves
+# the mail server's own hostname to its INTERNAL container IP (e.g. courier ->
+# 172.25.0.43), so the SPF authorization check compared a domain's SPF against
+# the wrong IP and failed valid records, and (b) serves cached/stale answers, so
+# a just-corrected record kept reading as its old value. Pin the verifier to
+# public recursive resolvers instead (override with DNS_VERIFY_RESOLVERS).
+_VERIFY_NAMESERVERS = [
+    ip.strip()
+    for ip in os.getenv("DNS_VERIFY_RESOLVERS", "8.8.8.8,1.1.1.1").split(",")
+    if ip.strip()
+]
+
+
+def _build_verify_resolver() -> "dns.resolver.Resolver":
+    resolver = dns.resolver.Resolver(configure=False)
+    resolver.nameservers = _VERIFY_NAMESERVERS
+    resolver.timeout = 5
+    resolver.lifetime = 10
+    return resolver
+
+
+_verify_resolver = _build_verify_resolver()
+
+
 def check_dns_record(query_name, record_type):
-    """Perform a DNS lookup using dig."""
+    """Resolve a DNS record, returning dig-style text ("" when there's no answer).
+
+    This used to shell out to `dig`, which is not installed in this image:
+    subprocess raised FileNotFoundError, the bare `except` swallowed it, and
+    every MX/SPF/DKIM/DMARC check therefore reported "not found" for domains
+    that were in fact configured correctly. Resolving in-process removes that
+    whole failure mode, and a lookup that genuinely fails is now logged
+    instead of being indistinguishable from a missing record.
+
+    Uses public resolvers (see _VERIFY_NAMESERVERS), never the container's own
+    resolver, so verification reflects the public DNS view.
+    """
     try:
-        result = subprocess.run(
-            ["dig", "+short", record_type, query_name], capture_output=True, text=True, timeout=10
+        answers = _verify_resolver.resolve(query_name, record_type, lifetime=10)
+    except (
+        dns.resolver.NXDOMAIN,
+        dns.resolver.NoAnswer,
+        dns.resolver.NoNameservers,
+        dns.exception.Timeout,
+    ):
+        return ""
+    except Exception as e:
+        logger.warning(f"DNS lookup failed for {record_type} {query_name}: {e}")
+        return ""
+
+    values = []
+    for rdata in answers:
+        if record_type == "TXT":
+            # TXT values over 255 bytes arrive as several chunks -- join them
+            # so a split DKIM key reads back as the single string it is.
+            values.append(b"".join(rdata.strings).decode("utf-8", "replace"))
+        else:
+            values.append(rdata.to_text())
+    return "\n".join(values)
+
+
+# RFC 7208 s4.6.4 caps a policy at ten DNS-querying mechanisms. Past that,
+# receivers return permerror and the mail fails regardless of what the record
+# says, so evaluating further would report a pass the real world rejects.
+SPF_MAX_LOOKUPS = 10
+
+
+def resolve_ips(name: str) -> list:
+    """Every A/AAAA address for a name."""
+    found = []
+    for record_type in ("A", "AAAA"):
+        for value in check_dns_record(name, record_type).split("\n"):
+            value = value.strip()
+            if not value:
+                continue
+            try:
+                found.append(ipaddress.ip_address(value))
+            except ValueError:
+                continue
+    return found
+
+
+def find_spf_records(domain_name: str) -> list:
+    """The domain's v=spf1 TXT records.
+
+    Isolating them matters: check_dns_record joins every TXT record on the name
+    with newlines, so a plain substring search ran across unrelated records --
+    a site-verification string containing the SPF host would have passed the
+    check on its own.
+    """
+    return [
+        line.strip()
+        for line in check_dns_record(domain_name, "TXT").split("\n")
+        if line.strip().lower().startswith("v=spf1")
+    ]
+
+
+def spf_authorizes(domain_name: str, record: str, targets: list, budget: list, seen: set) -> bool:
+    """Does this SPF record actually authorize any of `targets`?
+
+    Evaluates the mechanisms rather than searching for a hostname, because the
+    two questions have different answers in both directions. A domain that
+    authorizes us with `ip4:` or `mx` is correctly configured and the textual
+    check called it broken; a domain carrying `include:` for a host that does
+    not resolve is broken and the textual check called it fine.
+
+    Only `+` (the implicit default) authorizes -- `-include:` and `~mx` are
+    refusals, and reading them as matches is how a checker green-lights a
+    domain receivers will reject.
+    """
+    if record.lower() in seen:
+        # An include loop is a permerror at the receiver, not an authorization.
+        return False
+    seen.add(record.lower())
+
+    redirect = None
+
+    for term in record.split()[1:]:
+        if budget[0] <= 0:
+            return False
+
+        qualifier = "+"
+        if term[:1] in "+-~?":
+            qualifier, term = term[0], term[1:]
+        lowered = term.lower()
+
+        if lowered.startswith("redirect="):
+            redirect = term.split("=", 1)[1]
+            continue
+        if lowered.startswith("exp=") or lowered == "all":
+            continue
+
+        matched = False
+
+        if lowered.startswith(("ip4:", "ip6:")):
+            try:
+                network = ipaddress.ip_network(term.split(":", 1)[1], strict=False)
+            except ValueError:
+                continue
+            matched = any(ip in network for ip in targets if ip.version == network.version)
+
+        elif lowered == "a" or lowered.startswith("a:"):
+            budget[0] -= 1
+            host = term.split(":", 1)[1] if ":" in term else domain_name
+            addresses = resolve_ips(host)
+            matched = any(ip in addresses for ip in targets)
+
+        elif lowered == "mx" or lowered.startswith("mx:"):
+            budget[0] -= 1
+            host = term.split(":", 1)[1] if ":" in term else domain_name
+            addresses = []
+            for line in check_dns_record(host, "MX").split("\n"):
+                parts = line.split()
+                if parts:
+                    addresses.extend(resolve_ips(parts[-1].rstrip(".")))
+            matched = any(ip in addresses for ip in targets)
+
+        elif lowered.startswith("include:"):
+            budget[0] -= 1
+            included = term.split(":", 1)[1]
+            for nested in find_spf_records(included):
+                if spf_authorizes(included, nested, targets, budget, seen):
+                    matched = True
+                    break
+
+        if matched and qualifier == "+":
+            return True
+
+    if redirect and budget[0] > 0:
+        budget[0] -= 1
+        for nested in find_spf_records(redirect):
+            if spf_authorizes(redirect, nested, targets, budget, seen):
+                return True
+
+    return False
+
+
+def check_spf(domain_name: str, server_hostname: str) -> dict:
+    """Verify that the domain's SPF authorizes this mail server."""
+    expected = f"include:{get_spf_host()}"
+    records = find_spf_records(domain_name)
+
+    if not records:
+        return {
+            "status": "fail",
+            "found": False,
+            "expected": expected,
+            "message": "No SPF record published for this domain",
+        }
+
+    if len(records) > 1:
+        return {
+            "status": "fail",
+            "found": True,
+            "expected": expected,
+            "actual": " | ".join(records),
+            "message": (
+                f"{len(records)} SPF records published; RFC 7208 allows one and "
+                "receivers treat more as a permerror"
+            ),
+        }
+
+    record = records[0]
+    targets = resolve_ips(server_hostname)
+
+    if not targets:
+        # Our own hostname would not resolve. That is our problem, not the
+        # customer's, so fall back to the textual check rather than reporting a
+        # failure against them that we never actually established.
+        included = get_spf_host() in record
+        logger.warning(
+            f"SPF check for {domain_name} fell back to a text match: "
+            f"{server_hostname} did not resolve"
         )
-        return result.stdout.strip()
-    except Exception:
-        return None
+        return {
+            "status": "pass" if included else "fail",
+            "found": True,
+            "expected": expected,
+            "actual": record,
+            "message": None if included else f"SPF record does not include {get_spf_host()}",
+        }
+
+    budget = [SPF_MAX_LOOKUPS]
+    if spf_authorizes(domain_name, record, targets, budget, set()):
+        return {"status": "pass", "found": True, "expected": expected, "actual": record}
+
+    if budget[0] <= 0:
+        return {
+            "status": "fail",
+            "found": True,
+            "expected": expected,
+            "actual": record,
+            "message": (
+                f"SPF record needs more than {SPF_MAX_LOOKUPS} DNS lookups to "
+                "evaluate; receivers return permerror before reaching this server"
+            ),
+        }
+
+    addresses = ", ".join(str(ip) for ip in targets)
+    return {
+        "status": "fail",
+        "found": True,
+        "expected": expected,
+        "actual": record,
+        "message": f"SPF record does not authorize this mail server ({addresses})",
+    }
 
 
 # Whitelisted ORDER BY targets for GET /domains (console phase-02 SS2.5).
@@ -309,7 +632,7 @@ _SORT_DIRECTIONS = ("asc", "desc")
 
 
 def _parse_bool_param(raw: str | None) -> tuple[bool, bool | None]:
-    """"true"/"false" -> (valid, value); unrecognised input is reported
+    """ "true"/"false" -> (valid, value); unrecognised input is reported
     invalid rather than coerced, so a typo 422s instead of silently
     inverting the filter."""
     if raw is None:
@@ -328,6 +651,11 @@ def _parse_bool_param(raw: str | None) -> tuple[bool, bool | None]:
     description="Retrieve a paginated list of mail domains, searchable by name and sortable by "
     "name, creation date or storage used. Platform-scope callers see every organization and may "
     "narrow to one with `organization_id`; tenant credentials always see only their own.",
+    response_model=DomainListResponse,
+    responses={
+        422: {"model": ErrorResponse, "description": "Unknown sort key/direction or bad boolean"},
+        500: {"model": ErrorResponse, "description": "Failed to retrieve domains"},
+    },
 )
 @require_api_key("read")
 async def list_domains(
@@ -470,6 +798,14 @@ async def list_domains(
     "/{domain_id}",
     summary="Get domain details",
     description="Retrieve detailed information about a specific domain, including its organization, email accounts, and usage statistics.",
+    response_model=DomainDetailResponse,
+    responses={
+        404: {
+            "model": ErrorResponse,
+            "description": "Domain not found (or belongs to another org)",
+        },
+        500: {"model": ErrorResponse, "description": "Failed to retrieve domain"},
+    },
 )
 @require_api_key("read")
 async def get_domain(domain_id: str, request: Request):
@@ -479,8 +815,7 @@ async def get_domain(domain_id: str, request: Request):
     try:
         domain = session.query(Domain).filter_by(id=domain_id).first()
         if not domain or (
-            ctx["scope"] == "organization"
-            and domain.organization_id != ctx["organization_id"]
+            ctx["scope"] == "organization" and domain.organization_id != ctx["organization_id"]
         ):
             return JSONResponse(
                 content=create_api_response("error", "Domain not found"), status_code=404
@@ -491,6 +826,43 @@ async def get_domain(domain_id: str, request: Request):
         # Add organization information
         org = session.query(Organization).filter_by(id=domain.organization_id).first()
         domain_data["organization"] = org.to_dict() if org else None
+
+        # Add the DKIM record. Only POST /domains used to return this, so any
+        # consumer that fetched a domain after creation saw dkim_record: null
+        # and reported "no DKIM key generated" for domains that have a working,
+        # correctly published key. Sourced from the same dkim_keys row rspamd
+        # signs with, so what we advertise is what actually signs.
+        dkim_key = session.query(DKIMKey).filter_by(domain_id=domain.id, active=True).first()
+        dkim_public_b64 = _dkim_public_key_b64(dkim_key.public_key) if dkim_key else None
+        dkim_selector = (
+            (dkim_key.selector if dkim_key else None) or domain.dkim_selector or "default"
+        )
+        domain_data["dkim_record"] = (
+            f"v=DKIM1; k=rsa; p={dkim_public_b64}" if dkim_public_b64 else None
+        )
+        domain_data["dkim_selector"] = dkim_selector
+        domain_data["dkim_dns_name"] = f"{dkim_selector}._domainkey.{domain.domain}"
+
+        # Regenerate the DNS records rather than replaying what POST returned
+        # when the domain was created.
+        #
+        # Only POST used to emit these, and the consumer stores that response
+        # verbatim -- so a domain created before get_server_hostname() was
+        # fixed still hands out "MX c17a958e9f9b." and
+        # "include:spf.c17a958e9f9b", the container ID Docker had set as
+        # HOSTNAME. Those values are frozen at creation and no amount of
+        # re-fetching corrects them, which puts two disagreeing record sets in
+        # front of the customer: a live one and a fossil.
+        #
+        # Generating here means the records always reflect the hostname and
+        # DKIM key in force right now, and changing MAIL_HOSTNAME propagates to
+        # every domain on the next read instead of only to newly created ones.
+        domain_data["dns_records"] = generate_dns_records(
+            domain.domain,
+            get_server_hostname(),
+            dkim_public_b64 if domain.dkim_enabled else None,
+            dkim_selector=dkim_selector,
+        )
 
         # Add email accounts
         email_accounts = session.query(EmailAccount).filter_by(domain_id=domain_id).all()
@@ -520,6 +892,16 @@ async def get_domain(domain_id: str, request: Request):
     "/",
     summary="Create a new domain",
     description="Add a mail domain to the organization. Automatically generates DKIM signing keys and returns the DNS records needed for email delivery.",
+    response_model=DomainCreateResponse,
+    responses={
+        400: {"model": ErrorResponse, "description": "No data provided / validation failed"},
+        404: {"model": ErrorResponse, "description": "Organization not found"},
+        409: {
+            "model": ErrorResponse,
+            "description": "DOMAIN_ALREADY_CLAIMED (by this org or another) / external_id already exists",
+        },
+        500: {"model": ErrorResponse, "description": "Failed to create domain"},
+    },
 )
 @require_api_key("write")
 async def create_domain(request: Request):
@@ -690,6 +1072,13 @@ async def create_domain(request: Request):
                 logger.error(f"Failed to generate DKIM keys for domain {domain.domain}: {dkim_err}")
                 # Domain was already created successfully; don't fail the whole request
 
+        if dkim_record:
+            # Write-through to rspamd's key directory + selector map (the DB
+            # row alone signs nothing). Best-effort: on failure the log says
+            # what to run, and reconcile heals it -- the API response must
+            # not fail for a domain that was created correctly.
+            dkim_sync.try_sync_domain(domain.domain)
+
         dispatch_event(
             Events.DOMAIN_ADDED,
             data={
@@ -710,10 +1099,13 @@ async def create_domain(request: Request):
                 f"{domain.dkim_selector or 'default'}._domainkey.{domain.domain}"
             )
 
-        server_hostname = os.getenv("HOSTNAME", "mx.mailyte.com")
+        server_hostname = get_server_hostname()
         dkim_pub = public_b64 if domain.dkim_enabled and dkim_record else None
         response_data["dns_records"] = generate_dns_records(
-            domain.domain, server_hostname, dkim_pub
+            domain.domain,
+            server_hostname,
+            dkim_pub,
+            dkim_selector=domain.dkim_selector or "default",
         )
 
         return JSONResponse(
@@ -735,6 +1127,13 @@ async def create_domain(request: Request):
     "/{domain_id}",
     summary="Update a domain",
     description="Update the settings of an existing domain such as description, active status, quotas, and DKIM configuration.",
+    response_model=DomainWriteResponse,
+    responses={
+        400: {"model": ErrorResponse, "description": "No data provided / validation failed"},
+        404: {"model": ErrorResponse, "description": "Domain not found"},
+        409: {"model": ErrorResponse, "description": "external_id already exists"},
+        500: {"model": ErrorResponse, "description": "Failed to update domain"},
+    },
 )
 @require_api_key("write")
 async def update_domain(domain_id: str, request: Request):
@@ -763,8 +1162,7 @@ async def update_domain(domain_id: str, request: Request):
         # all (distinct from, and worse than, the platform-scope bug this
         # pass otherwise fixes). Closing that gap here too.
         if not domain or (
-            ctx["scope"] == "organization"
-            and domain.organization_id != ctx["organization_id"]
+            ctx["scope"] == "organization" and domain.organization_id != ctx["organization_id"]
         ):
             return JSONResponse(
                 content=create_api_response("error", "Domain not found"), status_code=404
@@ -810,6 +1208,15 @@ async def update_domain(domain_id: str, request: Request):
         domain.updated_at = datetime.now()
         session.commit()
 
+        if {"dkim_enabled", "dkim_selector", "active"} & set(data.keys()):
+            # dkim_enabled=false / active=false must actually stop rspamd
+            # signing: with try_fallback rspamd signs any domain whose
+            # default-selector key file exists, so the file has to go, not
+            # just the DB flag. Re-enabling re-exports the stored keys, and a
+            # selector change refreshes the selector map. Best-effort by
+            # design (see utils/dkim_sync.try_sync_domain).
+            dkim_sync.try_sync_domain(domain.domain)
+
         dispatch_event(
             Events.DOMAIN_UPDATED,
             data={
@@ -839,6 +1246,15 @@ async def update_domain(domain_id: str, request: Request):
     "/{domain_id}",
     summary="Delete a domain",
     description="Permanently remove a domain. The domain must have no remaining email accounts; delete those first.",
+    response_model=SimpleMessageResponse,
+    responses={
+        400: {"model": ErrorResponse, "description": "Domain still has email accounts"},
+        404: {
+            "model": ErrorResponse,
+            "description": "Domain not found (or belongs to another org)",
+        },
+        500: {"model": ErrorResponse, "description": "Failed to delete domain"},
+    },
 )
 @require_api_key("write")
 async def delete_domain_by_id(domain_id: str, request: Request):
@@ -848,8 +1264,7 @@ async def delete_domain_by_id(domain_id: str, request: Request):
     try:
         domain = session.query(Domain).filter_by(id=domain_id).first()
         if not domain or (
-            ctx["scope"] == "organization"
-            and domain.organization_id != ctx["organization_id"]
+            ctx["scope"] == "organization" and domain.organization_id != ctx["organization_id"]
         ):
             return JSONResponse(
                 content=create_api_response("error", "Domain not found"), status_code=404
@@ -870,8 +1285,42 @@ async def delete_domain_by_id(domain_id: str, request: Request):
         domain_id_val = domain.id
         domain_name_val = domain.domain
         org_id_val = domain.organization_id
+
+        # SMTP credentials must go WITH the domain. smtp_credentials.domain_id
+        # is the one FK to domains that does not cascade, so a domain holding
+        # any credential could not be deleted at all: the IntegrityError was
+        # swallowed by the catch below and returned as an opaque 500 "Failed
+        # to delete domain" with no hint of the cause. Every provisioned
+        # domain now auto-mints an internal platform send credential, so this
+        # made essentially every domain undeletable (found live 2026-09-08).
+        #
+        # Deleting them is the correct semantic, not merely the convenient
+        # one: a credential authenticates sending FOR this domain and is
+        # meaningless once it is gone -- leaving it behind would strand an
+        # access token pointing at a domain this platform no longer hosts.
+        # Mailboxes are different and still refuse the delete above: they
+        # hold mail, so removing them has to be a deliberate act.
+        credentials = session.query(SmtpCredential).filter_by(domain_id=domain_id_val).all()
+        credential_usernames = [c.username for c in credentials]
+        for credential in credentials:
+            session.delete(credential)
+
         session.delete(domain)
         session.commit()
+
+        # Dovecot caches successful auth for up to an hour; without this a
+        # deleted domain's credential keeps authenticating after its row is
+        # gone (the same cache gotcha as revocation).
+        for username in credential_usernames:
+            try:
+                flush_auth_cache(username)
+            except Exception as exc:  # noqa: BLE001 - best effort, never block the delete
+                logger.warning(f"Auth cache flush failed for {username}: {exc}")
+
+        # Remove the tenant's key files and its selector-map entry -- a
+        # leftover file would keep rspamd signing for a domain this platform
+        # no longer hosts (dkim_keys rows themselves go via ON DELETE CASCADE).
+        dkim_sync.try_sync_domain(domain_name_val)
 
         dispatch_event(
             Events.DOMAIN_DELETED,
@@ -901,6 +1350,14 @@ async def delete_domain_by_id(domain_id: str, request: Request):
     "/{domain_id}/verify-dns",
     summary="Verify domain DNS records",
     description="Perform live DNS lookups to check whether MX, SPF, DKIM, and DMARC records are correctly configured for the domain.",
+    response_model=DomainVerifyDNSResponse,
+    responses={
+        404: {
+            "model": ErrorResponse,
+            "description": "Domain not found (or belongs to another org)",
+        },
+        500: {"model": ErrorResponse, "description": "Failed to verify DNS records"},
+    },
 )
 @require_api_key("read")
 async def verify_domain_dns(domain_id: str, request: Request):
@@ -910,15 +1367,14 @@ async def verify_domain_dns(domain_id: str, request: Request):
     try:
         domain = session.query(Domain).filter_by(id=domain_id).first()
         if not domain or (
-            ctx["scope"] == "organization"
-            and domain.organization_id != ctx["organization_id"]
+            ctx["scope"] == "organization" and domain.organization_id != ctx["organization_id"]
         ):
             return JSONResponse(
                 content=create_api_response("error", "Domain not found"), status_code=404
             )
 
         domain_name = domain.domain
-        server_hostname = os.getenv("HOSTNAME", "mx.mailyte.com")
+        server_hostname = get_server_hostname()
 
         # Check MX record
         mx_result = check_dns_record(domain_name, "MX")
@@ -936,15 +1392,7 @@ async def verify_domain_dns(domain_id: str, request: Request):
         mx_verification = {"status": mx_status, "expected": server_hostname, "actual": mx_actual}
 
         # Check SPF record (TXT on the domain)
-        spf_result = check_dns_record(domain_name, "TXT")
-        spf_status = "fail"
-        spf_found = False
-        if spf_result and f"spf.{server_hostname}" in spf_result:
-            spf_status = "pass"
-            spf_found = True
-        spf_verification = {"status": spf_status, "found": spf_found}
-        if spf_status == "fail":
-            spf_verification["message"] = "SPF record not found or does not include Mailyte"
+        spf_verification = check_spf(domain_name, server_hostname)
 
         # Check DKIM record
         dkim_selector = domain.dkim_selector or "default"
@@ -1003,6 +1451,14 @@ async def verify_domain_dns(domain_id: str, request: Request):
     "/{domain_id}/quotas",
     summary="Get domain quotas",
     description="Retrieve quota limits and current usage for a domain, including per-account storage breakdowns.",
+    response_model=DomainQuotaResponse,
+    responses={
+        404: {
+            "model": ErrorResponse,
+            "description": "Domain not found (or belongs to another org)",
+        },
+        500: {"model": ErrorResponse, "description": "Failed to retrieve quota information"},
+    },
 )
 @require_api_key("read")
 async def get_domain_quotas(domain_id: str, request: Request):
@@ -1012,8 +1468,7 @@ async def get_domain_quotas(domain_id: str, request: Request):
     try:
         domain = session.query(Domain).filter_by(id=domain_id).first()
         if not domain or (
-            ctx["scope"] == "organization"
-            and domain.organization_id != ctx["organization_id"]
+            ctx["scope"] == "organization" and domain.organization_id != ctx["organization_id"]
         ):
             return JSONResponse(
                 content=create_api_response("error", "Domain not found"), status_code=404
@@ -1061,6 +1516,15 @@ async def get_domain_quotas(domain_id: str, request: Request):
     "/{domain_id}/quotas",
     summary="Update domain quotas",
     description="Adjust the storage quota, maximum mailbox count, rate limits, or per-account storage defaults for a domain.",
+    response_model=DomainQuotaUpdateResponse,
+    responses={
+        400: {"model": ErrorResponse, "description": "No quota data provided"},
+        404: {
+            "model": ErrorResponse,
+            "description": "Domain not found (or belongs to another org)",
+        },
+        500: {"model": ErrorResponse, "description": "Failed to update quotas"},
+    },
 )
 @require_api_key("write")
 async def update_domain_quotas(domain_id: str, request: Request):
@@ -1077,8 +1541,7 @@ async def update_domain_quotas(domain_id: str, request: Request):
     try:
         domain = session.query(Domain).filter_by(id=domain_id).first()
         if not domain or (
-            ctx["scope"] == "organization"
-            and domain.organization_id != ctx["organization_id"]
+            ctx["scope"] == "organization" and domain.organization_id != ctx["organization_id"]
         ):
             return JSONResponse(
                 content=create_api_response("error", "Domain not found"), status_code=404
@@ -1137,6 +1600,17 @@ async def update_domain_quotas(domain_id: str, request: Request):
     "/edit",
     summary="Edit domain (legacy)",
     description="Mailcow-compatible bulk domain edit endpoint. Accepts a list of domain names or IDs and a set of attributes to update on each.",
+    response_model=DomainEditResponse,
+    responses={
+        400: {
+            "model": ErrorResponse,
+            "description": "Invalid request format -- items/attr expected",
+        },
+        500: {
+            "model": ErrorResponse,
+            "description": "Database connection failed / failed to edit domain",
+        },
+    },
 )
 @require_api_key("write")
 async def edit_domain(request: Request):
@@ -1238,6 +1712,17 @@ async def edit_domain(request: Request):
     "/delete/domain",
     summary="Delete domains (legacy)",
     description="Legacy bulk domain deletion endpoint. Accepts an array of domain names and removes each domain along with its mailboxes, aliases, and DKIM keys.",
+    response_model=DomainDeleteResponse,
+    responses={
+        400: {
+            "model": ErrorResponse,
+            "description": "Invalid request format -- array of domains expected",
+        },
+        500: {
+            "model": ErrorResponse,
+            "description": "Database connection failed / failed to delete domains",
+        },
+    },
 )
 @require_api_key("write")
 async def delete_domain(request: Request):
@@ -1288,16 +1773,50 @@ async def delete_domain(request: Request):
                 # Start transaction for each domain
                 cursor.execute("START TRANSACTION")
 
-                # Delete associated data first
-                cursor.execute("DELETE FROM email_accounts WHERE domain = %s", (domain,))
+                # Collect the addresses first: after COMMIT each one needs a
+                # Dovecot auth-cache flush, or the deleted mailboxes keep
+                # authenticating for up to an hour (auth_cache_ttl).
+                cursor.execute(
+                    "SELECT ea.email FROM email_accounts ea "
+                    "JOIN domains d ON ea.domain_id = d.id WHERE d.domain = %s",
+                    (domain,),
+                )
+                deleted_emails = [row["email"] for row in cursor.fetchall()]
+
+                # email_accounts and aliases both key on domain_id, not a
+                # `domain` name column (and aliases has source/destination,
+                # not `address`) -- the old name-based DELETEs raised
+                # "Unknown column", the per-domain except swallowed it, and
+                # every legacy delete rolled back as "not found".
+                cursor.execute(
+                    "DELETE ea FROM email_accounts ea "
+                    "JOIN domains d ON ea.domain_id = d.id WHERE d.domain = %s",
+                    (domain,),
+                )
                 mailboxes_deleted = cursor.rowcount
 
-                cursor.execute("DELETE FROM aliases WHERE address LIKE %s", (f"%@{domain}",))
+                cursor.execute(
+                    "DELETE a FROM aliases a "
+                    "JOIN domains d ON a.domain_id = d.id WHERE d.domain = %s",
+                    (domain,),
+                )
                 aliases_deleted = cursor.rowcount
 
-                cursor.execute("DELETE FROM dkim_keys WHERE domain = %s", (domain,))
+                # dkim_keys has no `domain` column (0001_baseline: domain_id
+                # CHAR(26) FK with ON DELETE CASCADE) -- the old
+                # `WHERE domain = %s` raised "Unknown column", the per-domain
+                # except swallowed it, and EVERY legacy delete rolled back as
+                # "not found". Join on domain_id; the cascade would also cover
+                # this, but the explicit delete keeps the intent visible.
+                cursor.execute(
+                    "DELETE dk FROM dkim_keys dk "
+                    "JOIN domains d ON dk.domain_id = d.id WHERE d.domain = %s",
+                    (domain,),
+                )
 
-                cursor.execute("DELETE FROM domain_admins WHERE domain = %s", (domain,))
+                # No domain_admins DELETE: that table exists in no migration
+                # or model -- the statement raised "Unknown table" and rolled
+                # the whole cascade back (same failure mode as above).
 
                 cursor.execute(
                     "DELETE FROM domains WHERE domain = %s AND organization_id = %s",
@@ -1307,6 +1826,14 @@ async def delete_domain(request: Request):
 
                 if domain_deleted > 0:
                     cursor.execute("COMMIT")
+                    # Same cleanup as delete_domain_by_id: drop the domain's
+                    # key files + selector-map entry so rspamd stops signing.
+                    dkim_sync.try_sync_domain(domain)
+                    # Best-effort revocation: without the flush each deleted
+                    # mailbox keeps authenticating from Dovecot's cache for
+                    # up to an hour. Never fails the delete (helper logs).
+                    for email in deleted_emails:
+                        flush_auth_cache(email)
                     dispatch_event(
                         Events.DOMAIN_DELETED,
                         data={
@@ -1359,6 +1886,14 @@ async def delete_domain(request: Request):
     "/get/domain/policy/{domain}",
     summary="Get domain policy",
     description="Retrieve the spam and security policy settings for a domain, including greylisting, RBL, and blacklist-only flags.",
+    response_model=DomainPolicyResponse,
+    responses={
+        404: {"model": ErrorResponse, "description": "Domain not found"},
+        500: {
+            "model": ErrorResponse,
+            "description": "Database connection failed / failed to retrieve domain policy",
+        },
+    },
 )
 @require_api_key("read")
 async def get_domain_policy(domain: str, request: Request):
@@ -1385,7 +1920,8 @@ async def get_domain_policy(domain: str, request: Request):
             """
             -- rate_limits, not rl_value/rl_frame: those two columns exist on
             -- no table in this schema, so this query raised "Unknown column
-            -- 'd.rl_value'" and the endpoint 500'd on every call.
+            -- 'd.rl_value'" and the endpoint 500'd on every call. The domains
+            -- table carries rate limits as a JSON column instead.
             SELECT d.domain, d.rate_limits, d.active,
                    dp.policy_bl_only, dp.policy_reject_spam,
                    dp.policy_greylist, dp.policy_rbl
@@ -1418,6 +1954,14 @@ async def get_domain_policy(domain: str, request: Request):
     "/edit/domain/policy",
     summary="Edit domain policy",
     description="Create or update the spam and security policy for a domain. Uses upsert semantics so the record is created if it does not exist.",
+    response_model=SimpleMessageResponse,
+    responses={
+        400: {"model": ErrorResponse, "description": "Missing required field: domain"},
+        500: {
+            "model": ErrorResponse,
+            "description": "Database connection failed / failed to update domain policy",
+        },
+    },
 )
 @require_api_key("write")
 async def edit_domain_policy(request: Request):
@@ -1494,6 +2038,17 @@ async def edit_domain_policy(request: Request):
     "/stats/{domain}",
     summary="Get domain statistics",
     description="Retrieve aggregate statistics for a domain including mailbox count, alias count, and total quota usage.",
+    response_model=DomainStatsResponse,
+    responses={
+        404: {
+            "model": ErrorResponse,
+            "description": "Domain not found (or belongs to another org)",
+        },
+        500: {
+            "model": ErrorResponse,
+            "description": "Database connection failed / failed to retrieve domain statistics",
+        },
+    },
 )
 @require_api_key("read")
 async def get_domain_stats(domain: str, request: Request):
@@ -1606,13 +2161,12 @@ async def get_domain_stats(domain: str, request: Request):
 # the stored public key instead of inventing schema for them
 # (conventions.md SS1 rule 5).
 _DKIM_RSPAMD_NOTE = (
-    "This API writes the key to MySQL only. Rspamd signs from "
-    "/var/lib/rspamd/dkim/{domain}.{selector}.key and reads its domain->selector map "
-    "from /etc/rspamd/dkim_selectors.map, and the rspamd container is the only one that "
-    "mounts both (see docker-compose.yml's own comment on the rspamd service) -- the api "
-    "container mounts neither. Signing does not actually move to the new selector until "
-    "`python3 scripts/generate_dkim.py --update-map` has run inside the rspamd container "
-    "and the key file for the new selector exists there."
+    "Key files and the selector map are exported to rspamd automatically "
+    "(utils/dkim_sync.py write-through; `rspamd_synced` in this response reports whether "
+    "that export succeeded). If rspamd_synced is false the key is safely stored in MySQL "
+    "but rspamd is not signing with it yet -- run `scripts/generate_dkim.py sync` on the "
+    "docker host (or `./start.sh dkim`) to export the keys, fix file ownership for the "
+    "_rspamd user, and refresh /etc/rspamd/dkim_selectors.map inside the rspamd container."
 )
 
 
@@ -1637,12 +2191,11 @@ def _dkim_public_key_b64(stored: str | None) -> str | None:
       - scripts/generate_dkim.py stores the full PEM including
         '-----BEGIN PUBLIC KEY-----' lines.
     A p= tag containing PEM armour and newlines is not a valid DKIM record,
-    so both shapes are collapsed here rather than at the call sites.
+    so both shapes are collapsed here rather than at the call sites. The one
+    implementation lives in utils/dkim_sync.py (which needs it for its own
+    DNS output); this is an alias, not a second spelling that can drift.
     """
-    if not stored:
-        return None
-    lines = [line.strip() for line in stored.strip().splitlines()]
-    return "".join(line for line in lines if line and not line.startswith("-----")) or None
+    return dkim_sync.public_key_b64(stored)
 
 
 def _dkim_key_details(public_b64: str | None) -> tuple:
@@ -1695,3 +2248,313 @@ def _load_domain_scoped(session, domain_id: str, ctx):
     return domain
 
 
+@router.get(
+    "/{domain_id}/dkim",
+    summary="List a domain's DKIM keys",
+    description="Every DKIM key on the domain with the exact TXT record to publish for each "
+    "(PRD SS5.3). Private key material is never included in this response in any form -- "
+    "plaintext, encrypted, or decrypted.",
+    responses={
+        404: {
+            "model": ErrorResponse,
+            "description": "Domain not found (or belongs to another org)",
+        },
+        500: {"model": ErrorResponse, "description": "Failed to retrieve DKIM keys"},
+    },
+)
+@require_api_key("read", role="support")
+async def list_dkim_keys(domain_id: str, request: Request):
+    ctx = request.state.auth_context
+    session = get_db_session()
+    try:
+        domain = _load_domain_scoped(session, domain_id, ctx)
+        if not domain:
+            return JSONResponse(
+                content=create_api_response("error", "Domain not found"), status_code=404
+            )
+
+        keys = (
+            session.query(DKIMKey)
+            .filter_by(domain_id=domain_id)
+            .order_by(DKIMKey.active.desc(), DKIMKey.created_at.desc())
+            .all()
+        )
+
+        items = []
+        for key in keys:
+            public_b64 = _dkim_public_key_b64(key.public_key)
+            algorithm, key_size = _dkim_key_details(public_b64)
+            record = _dkim_record(domain.domain, key.selector, public_b64)
+            items.append(
+                {
+                    "selector": key.selector,
+                    "algorithm": algorithm,
+                    "key_size": key_size,
+                    "active": bool(key.active),
+                    "created_at": key.created_at.isoformat() if key.created_at else None,
+                    "updated_at": key.updated_at.isoformat() if key.updated_at else None,
+                    "record_name": record["name"],
+                    "record_type": record["type"],
+                    "record_value": record["value"],
+                }
+            )
+
+        return create_api_response(
+            "success",
+            "DKIM keys retrieved",
+            {
+                "domain": domain.domain,
+                "domain_id": domain.id,
+                "dkim_enabled": bool(domain.dkim_enabled),
+                # The selector the domain row claims is signing. Reported
+                # alongside the per-key `active` flags because the two can
+                # disagree (nothing enforces that they match), and an
+                # operator debugging a DKIM failure needs to see the
+                # disagreement rather than one of the two values alone.
+                "signing_selector": domain.dkim_selector,
+                "items": items,
+                "total": len(items),
+            },
+        )
+
+    except Exception as e:
+        logger.error(f"List DKIM keys error: {e}")
+        return JSONResponse(
+            content=create_api_response("error", "Failed to retrieve DKIM keys"), status_code=500
+        )
+    finally:
+        session.close()
+
+
+@router.post(
+    "/{domain_id}/dkim/rotate",
+    summary="Generate a new DKIM key under a new selector",
+    description="Step one of a safe rotation: mints a fresh 2048-bit RSA key under a NEW "
+    "selector and leaves the existing key active and signing. Returns the DNS record to "
+    "publish. Nothing starts signing with the new key until POST /{domain_id}/dkim/{selector}"
+    "/activate is called -- deliberately, so the record has time to propagate first.",
+    responses={
+        404: {
+            "model": ErrorResponse,
+            "description": "Domain not found (or belongs to another org)",
+        },
+        500: {"model": ErrorResponse, "description": "Failed to rotate DKIM key"},
+    },
+)
+@require_api_key("write", role="operator")
+async def rotate_dkim_key(domain_id: str, body: DKIMRotateRequest, request: Request):
+    ctx = request.state.auth_context
+    session = get_db_session()
+    try:
+        domain = _load_domain_scoped(session, domain_id, ctx)
+        if not domain:
+            return JSONResponse(
+                content=create_api_response("error", "Domain not found"), status_code=404
+            )
+
+        existing = {
+            key.selector for key in session.query(DKIMKey).filter_by(domain_id=domain_id).all()
+        }
+
+        # Timestamped and alphanumeric: a DNS label, valid at every
+        # registrar, sorts chronologically, and says when it was minted.
+        # The suffix loop covers two rotations inside the same second --
+        # `selector` is not unique-constrained on this table, so a collision
+        # would silently produce two rows the activate step could not tell
+        # apart rather than erroring.
+        base_selector = f"mailyte{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+        selector = base_selector
+        suffix = 1
+        while selector in existing:
+            selector = f"{base_selector}x{suffix}"
+            suffix += 1
+
+        private_pem, public_b64 = generate_dkim_keypair()
+
+        # Same write path as create_domain() above: private_key stays NULL,
+        # only the envelope-encrypted columns are written (phase-07 C2), and
+        # private_pem is never logged, returned, or held past this block.
+        encrypted = encrypt_private_key(private_pem)
+        new_key = DKIMKey(
+            domain_id=domain.id,
+            selector=selector,
+            private_key=None,
+            private_key_ciphertext=encrypted.ciphertext,
+            private_key_nonce=encrypted.nonce,
+            key_version=encrypted.key_version,
+            public_key=public_b64,
+            # Inactive on purpose -- this is the half of the rotation that
+            # must NOT change what is signing. The old key keeps signing
+            # until activate is called.
+            active=False,
+        )
+        session.add(new_key)
+        session.commit()
+
+        # Export the new (still inactive) key's file now, while its DNS
+        # record propagates -- the activate cutover must find the file
+        # already on disk, or there is a window where rspamd signs nothing.
+        # The selector map is untouched here because the active key did not
+        # change; that is exactly the point of the two-step flow.
+        rspamd_synced = dkim_sync.try_sync_domain(domain.domain)
+
+        algorithm, key_size = _dkim_key_details(public_b64)
+        record = _dkim_record(domain.domain, selector, public_b64)
+        previous = [
+            key.selector
+            for key in session.query(DKIMKey).filter_by(domain_id=domain_id, active=True).all()
+        ]
+
+        logger.warning(
+            f"DKIM key rotated for domain={domain.domain} new_selector={selector} "
+            f"by={ctx['operator_id']} reason={body.reason!r}"
+        )
+
+        dispatch_event(
+            Events.ENCRYPTION_KEY_GENERATED,
+            data={
+                "domain_id": domain.id,
+                "domain": domain.domain,
+                "selector": selector,
+                "kind": "dkim",
+            },
+            org_id=domain.organization_id,
+            domain=domain.domain,
+            source_service="api",
+        )
+
+        return JSONResponse(
+            content=create_api_response(
+                "success",
+                "New DKIM key generated -- publish the record, then activate the selector",
+                {
+                    "domain": domain.domain,
+                    "selector": selector,
+                    "algorithm": algorithm,
+                    "key_size": key_size,
+                    "active": False,
+                    "rspamd_synced": rspamd_synced,
+                    "record_name": record["name"],
+                    "record_type": record["type"],
+                    "record_value": record["value"],
+                    "previous_active_selectors": previous,
+                    "activate_url": f"/api/v1/domains/{domain.id}/dkim/{selector}/activate",
+                    "warning": (
+                        f"Do NOT remove the existing DKIM record(s) "
+                        f"({', '.join(previous) if previous else 'none currently active'}). "
+                        "Mail already in flight is signed with the old selector and verifiers "
+                        "resolve the selector named in each message's signature, so pulling the "
+                        "old record early makes those messages fail DKIM and therefore DMARC. "
+                        f"Publish {record['name']}, wait for it to resolve everywhere (allow at "
+                        "least the old record's TTL), then call the activate endpoint. Signing "
+                        "does not move until you do -- this call changed nothing about what is "
+                        f"signing today. {_DKIM_RSPAMD_NOTE}"
+                    ),
+                },
+            ),
+            status_code=201,
+        )
+
+    except Exception as e:
+        session.rollback()
+        logger.error(f"Rotate DKIM key error: {e}")
+        return JSONResponse(
+            content=create_api_response("error", "Failed to rotate DKIM key"), status_code=500
+        )
+    finally:
+        session.close()
+
+
+@router.post(
+    "/{domain_id}/dkim/{selector}/activate",
+    summary="Cut DKIM signing over to a selector",
+    description="Step two of a safe rotation: makes the named selector the signing key and "
+    "deactivates every other selector on the domain. Call only once the selector's TXT record "
+    "resolves publicly -- activating before propagation is what breaks DKIM.",
+    responses={
+        404: {
+            "model": ErrorResponse,
+            "description": "Domain or selector not found (or domain belongs to another org)",
+        },
+        500: {"model": ErrorResponse, "description": "Failed to activate DKIM selector"},
+    },
+)
+@require_api_key("write", role="operator")
+async def activate_dkim_selector(
+    domain_id: str, selector: str, body: DKIMRotateRequest, request: Request
+):
+    ctx = request.state.auth_context
+    session = get_db_session()
+    try:
+        domain = _load_domain_scoped(session, domain_id, ctx)
+        if not domain:
+            return JSONResponse(
+                content=create_api_response("error", "Domain not found"), status_code=404
+            )
+
+        keys = session.query(DKIMKey).filter_by(domain_id=domain_id).all()
+        target = [key for key in keys if key.selector == selector]
+        if not target:
+            return JSONResponse(
+                content=create_api_response(
+                    "error", f"No DKIM key with selector '{selector}' on this domain"
+                ),
+                status_code=404,
+            )
+
+        deactivated = []
+        for key in keys:
+            if key.selector == selector:
+                key.active = True
+            elif key.active:
+                key.active = False
+                deactivated.append(key.selector)
+
+        # domains.dkim_selector is a second, independent record of "which
+        # selector signs" -- it is what verify-dns above queries and what
+        # create_domain seeds. Leaving it stale would make the DKIM check
+        # look up the OLD selector's record after a successful cutover and
+        # report a pass/fail about the wrong key entirely.
+        domain.dkim_selector = selector
+        session.commit()
+
+        # The cutover is only real once the selector map on disk names this
+        # selector -- until then rspamd keeps signing with the fallback
+        # `default` path. Write-through now; rspamd_synced below reports it.
+        rspamd_synced = dkim_sync.try_sync_domain(domain.domain)
+
+        public_b64 = _dkim_public_key_b64(target[0].public_key)
+        record = _dkim_record(domain.domain, selector, public_b64)
+
+        logger.warning(
+            f"DKIM selector activated for domain={domain.domain} selector={selector} "
+            f"deactivated={deactivated} by={ctx['operator_id']} reason={body.reason!r}"
+        )
+
+        return create_api_response(
+            "success",
+            f"DKIM signing selector set to '{selector}'",
+            {
+                "domain": domain.domain,
+                "active_selector": selector,
+                "deactivated_selectors": deactivated,
+                "rspamd_synced": rspamd_synced,
+                "record_name": record["name"],
+                "record_value": record["value"],
+                "warning": (
+                    "Keep the deactivated selectors' TXT records published until mail signed "
+                    "with them has aged out of every retry queue -- a few days is the usual "
+                    f"advice. {_DKIM_RSPAMD_NOTE}"
+                ),
+            },
+        )
+
+    except Exception as e:
+        session.rollback()
+        logger.error(f"Activate DKIM selector error: {e}")
+        return JSONResponse(
+            content=create_api_response("error", "Failed to activate DKIM selector"),
+            status_code=500,
+        )
+    finally:
+        session.close()

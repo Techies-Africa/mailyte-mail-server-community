@@ -148,7 +148,15 @@ class RateLimitUsageService:
             )
             self.database_fallbacks += 1
 
-            usage_counts = self.database_service.get_usage_data(entity_type, identifier, direction)
+            # get_usage_data() (a different method -- period/start_time/
+            # end_time history query) was being called here with 3 args
+            # short of its required 5, throwing on every cache-miss.
+            # get_current_usage_stats() is the one that actually matches
+            # this call's shape (3 args -> {hourly_count, daily_count,
+            # monthly_count, ...} dict).
+            usage_counts = self.database_service.get_current_usage_stats(
+                entity_type, identifier, direction
+            )
 
             # Update cache with database data if we have a cache service
             if self.cache_service.redis_client and usage_counts:
@@ -207,9 +215,12 @@ class RateLimitUsageService:
                             f"Cache increment successful for {entity_type}:{identifier}:{direction}"
                         )
 
-                        # Also store in database for persistence (async/background would be better)
+                        # Also store in database for persistence (async/background would be better).
+                        # store_usage_data's 4th positional arg is the increment count (int) --
+                        # this was passing updated_counts (a dict of post-increment totals),
+                        # which the method's real signature has never accepted.
                         self.database_service.store_usage_data(
-                            entity_type, identifier, direction, updated_counts
+                            entity_type, identifier, direction, amount
                         )
 
                 except Exception as e:

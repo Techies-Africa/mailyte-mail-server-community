@@ -20,9 +20,9 @@ flowchart TB
         Postfix["Postfix\nSMTP MTA\n:25 / :587 / :465"]
         Dovecot["Dovecot\nIMAP/POP3\n:143 / :993 / :110 / :995"]
         Rspamd["Rspamd\nAnti-Spam\n:11332 / :11334"]
-        CertMgr["Certificate Manager\nAuto SSL\n:80 (ACME)"]
-        IDS["Intrusion Detection\nFail2ban"]
-        LogAn["Log Analyzer\nPattern Detection"]
+        CertMgr["Certificate Manager\nAuto SSL (ACME webroot)"]
+        LogIng["Log Ingestor\nmail_logs producer"]
+        IDS["Intrusion Detection\nFail2ban (host-side)"]
     end
 
     subgraph Storage["Shared Storage"]
@@ -53,7 +53,8 @@ flowchart TB
     CertMgr -->|"SIGHUP reload"| Dovecot
 
     IDS -->|"reads"| Logs
-    LogAn -->|"reads"| Logs
+    LogIng -->|"tails"| Logs
+    LogIng -->|"mail_logs rows"| MySQL
 
     Postfix --> MailDir
     Dovecot --> MailDir
@@ -98,11 +99,21 @@ flowchart TB
 
     ---
 
-    Automated Let's Encrypt SSL certificates with auto-renewal and service reload.
+    Automated Let's Encrypt SSL certificates with auto-renewal and service reload. ACME HTTP-01 goes through a shared webroot served by the `acme_webroot` container behind Traefik.
 
-    **Container:** `cert_manager` | **Port:** 80 (ACME)
+    **Container:** `cert_manager` (no published port)
 
     [:octicons-arrow-right-24: Certificate Manager](cert-manager.md)
+
+-   :material-file-document-arrow-right:{ .lg .middle } **Log Ingestor**
+
+    ---
+
+    Tails Postfix's log and produces `mail_logs` rows plus delivery webhooks -- the sole producer for every Email Logs surface. Added 2026-08-22.
+
+    **Container:** `log_ingestor` (no listening port)
+
+    [:octicons-arrow-right-24: Log Ingestor](log-ingestor.md)
 
 -   :material-shield-alert:{ .lg .middle } **Intrusion Detection**
 
@@ -110,7 +121,7 @@ flowchart TB
 
     Fail2ban jails for brute-force protection on SMTP, IMAP, and POP3 authentication.
 
-    **Runs inside:** postfix/dovecot containers
+    **Runs:** host-side (installed by `install.sh`, not a container)
 
     [:octicons-arrow-right-24: Intrusion Detection](intrusion-detection.md)
 
@@ -118,9 +129,7 @@ flowchart TB
 
     ---
 
-    Real-time log processing, anomaly detection, and pattern matching across all services.
-
-    **Runs as:** sidecar container
+    Aggregate log reports (delivery/spam statistics). A standalone script -- not deployed in any compose file.
 
     [:octicons-arrow-right-24: Log Analyzer](log-analyzer.md)
 
@@ -137,27 +146,28 @@ sequenceDiagram
     participant User as Email Client
     participant PF as Postfix :587
     participant DV as Dovecot :24100
-    participant RD as Redis
+    participant RL as rate_limiter :8082
     participant RS as Rspamd
     participant Remote as Remote MTA
 
     User->>PF: Connect (STARTTLS/TLS)
     PF->>DV: SASL auth check
     DV-->>PF: Auth OK
-    PF->>RD: Rate limit check
-    RD-->>PF: Within limits
-    PF->>RS: DKIM signing + headers
+    PF->>RL: Policy check (DATA phase, via HTTP bridge)
+    RL-->>PF: Within limits
+    PF->>PF: tracking-filter (pixel + links)
+    PF->>RS: DKIM signing + headers (milter)
     RS-->>PF: Signed message
     PF->>Remote: Deliver via SMTP
 ```
 
-1. **User connects** to Postfix on port 587 (STARTTLS) or 465 (implicit TLS).
-2. **SASL authentication** — Postfix delegates to Dovecot on port 24100 to verify credentials against MySQL.
-3. **Rate limiting** — the `rate_limit_policy.py` policy server checks per-mailbox, per-domain, and per-org hourly limits in Redis.
-4. **Content filtering** — the email passes through the tracking injector, which adds open/click tracking pixels for HTML emails.
+1. **User connects** to Postfix on port 587 (STARTTLS) or 465 (implicit TLS). The webmail/API submit on the internal listener 10587 instead.
+2. **SASL authentication** — Postfix delegates to Dovecot on port 24100 to verify credentials against MySQL (mailbox passwords or SMTP API keys).
+3. **Rate limiting** — at DATA phase, `rate_limit_policy.py` delegates to the rate limiter worker over HTTP; over-quota answers defer with `4.7.1`.
+4. **Content filtering** — the tracking injector adds open/click tracking for HTML mail, consults the delivery optimizer, and archives the message.
 5. **Rspamd milter** — signs the email with DKIM, adds authentication headers.
 6. **Delivery** — Postfix hands the email to the remote MTA over SMTP.
-7. **Webhook notification** — the webhook sender fires an `email.sent` event.
+7. **Logging** — the log ingestor turns the resulting log lines into `mail_logs` rows and `email.delivered`/`bounced`/`deferred` webhooks.
 
 ### Inbound (someone sends email to your user)
 

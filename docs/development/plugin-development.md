@@ -1,309 +1,127 @@
 ---
 title: Plugin Development
-description: Extend Mailyte with plugins — hooks, events, custom middleware, and third-party integrations.
+description: How to extend Mailyte — webhook consumers, custom workers, and mail-pipeline hooks.
 ---
 
 # Plugin Development
 
-> **Enterprise Edition** — This feature is available in [Mailyte Enterprise](https://mailyte.com). The Community Edition does not include this functionality.
+!!! warning "There is no in-process plugin API"
+    As of 2026-08-30, Mailyte has no plugin loader, no `plugins/` directory, and no in-process event bus that third-party code can register against. Earlier versions of this page documented such a system; it was never built. What Mailyte **does** have is a set of real extension points that cover the same use cases — integrating with external systems, reacting to email events, and adding processing of your own — without patching core code.
 
+## The Extension Points
 
-Plugins let you extend Mailyte without modifying core code. You can hook into email events, add middleware to the API, create custom processing pipelines, and integrate with external services.
+| You want to... | Use |
+|---|---|
+| React to email/system events from an external app | **Webhooks** — every event is delivered to your HTTP endpoint |
+| Add new background processing inside the platform | **A custom worker** — a first-class service in the stack |
+| Filter or file mail per-mailbox | **Sieve scripts** — managed over ManageSieve via the API |
+| Adjust spam filtering / add mail-time rules | **Rspamd configuration** (`mailer/rspamd/`) |
+| Add API middleware or routes | A change to `worker/api/` — see [Adding Features](adding-features.md) |
 
-## Plugin Architecture
+## Webhooks: The Event Integration Point
 
-Plugins are Python modules that register themselves with Mailyte's event system. They can:
-
-- Listen for events (email received, sent, bounced, etc.)
-- Add API middleware (custom auth, logging, rate limiting)
-- Add custom API routes
-- Modify email processing pipelines
-- Integrate with external services
+All events in the system are funneled through one dispatcher, `shared/webhook_dispatcher.py`. Every service calls `dispatch_event()` and the dispatcher handles queuing, signing, delivery, retries, and dead-lettering. Your "plugin" is an HTTP endpoint that receives them.
 
 ```mermaid
 graph LR
-    EVENT[Email Event] --> DISPATCHER[Event Dispatcher]
-    DISPATCHER --> P1[Plugin: CRM Sync]
-    DISPATCHER --> P2[Plugin: Compliance Logger]
-    DISPATCHER --> P3[Plugin: Custom Filter]
-    DISPATCHER --> CORE[Core Processing]
+    S1[tracking] --> D[Webhook Dispatcher]
+    S2[api] --> D
+    S3[log_ingestor] --> D
+    S4[storage_usage] --> D
+    D -->|signed POST| E[Your endpoint: CRM sync, compliance logger, custom filter...]
+    D -->|permanent failure| DLQ[(webhook_dead_letters)]
 ```
 
-## Plugin Structure
+### Configuration
 
-```
-plugins/
-  my_plugin/
-    __init__.py        # Plugin registration
-    plugin.py          # Plugin logic
-    config.py          # Plugin configuration
-    requirements.txt   # Additional dependencies
-```
-
-## Creating a Plugin
-
-### Step 1: Define the Plugin
-
-```python
-# plugins/my_plugin/__init__.py
-from .plugin import MyPlugin
-
-PLUGIN_NAME = "my_plugin"
-PLUGIN_VERSION = "1.0.0"
-PLUGIN_DESCRIPTION = "Syncs email events to an external CRM"
-
-
-def register(app, event_bus):
-    """Called by Mailyte during startup."""
-    plugin = MyPlugin()
-    plugin.setup(app, event_bus)
-    return plugin
-```
-
-### Step 2: Implement the Plugin
-
-```python
-# plugins/my_plugin/plugin.py
-import logging
-from typing import Any
-
-logger = logging.getLogger(__name__)
-
-
-class MyPlugin:
-    def __init__(self):
-        self.name = "my_plugin"
-        self.enabled = True
-
-    def setup(self, app, event_bus):
-        """Register event handlers and middleware."""
-        # Listen for email events
-        event_bus.subscribe("email.smtp.inbound", self.on_email_received)
-        event_bus.subscribe("email.smtp.outbound", self.on_email_sent)
-        event_bus.subscribe("email.tracking.bounced", self.on_email_bounced)
-
-        # Add custom API routes
-        self.register_routes(app)
-
-        logger.info("MyPlugin initialized")
-
-    async def on_email_received(self, event: dict):
-        """Called when an email is received."""
-        sender = event["payload"]["metadata"]["from"]
-        recipient = event["payload"]["metadata"]["to"]
-        subject = event["payload"]["metadata"]["subject"]
-
-        logger.info("Email received from %s to %s: %s", sender, recipient, subject)
-
-        # Your custom logic here
-        await self.sync_to_crm(sender, "inbound", subject)
-
-    async def on_email_sent(self, event: dict):
-        """Called when an email is sent."""
-        recipient = event["payload"]["metadata"]["to"]
-        await self.sync_to_crm(recipient, "outbound", event["payload"]["metadata"]["subject"])
-
-    async def on_email_bounced(self, event: dict):
-        """Called when an email bounces."""
-        recipient = event["payload"]["delivery_info"]["recipient"]
-        reason = event["payload"]["delivery_info"].get("bounce_reason", "unknown")
-        logger.warning("Bounce for %s: %s", recipient, reason)
-
-    async def sync_to_crm(self, email: str, direction: str, subject: str):
-        """Sync event to external CRM."""
-        # Your CRM API call here
-        pass
-
-    def register_routes(self, app):
-        """Add custom API routes."""
-
-        @app.get("/api/v1/plugins/my_plugin/status")
-        async def plugin_status():
-            return {
-                "plugin": self.name,
-                "enabled": self.enabled,
-                "status": "running",
-            }
-```
-
-## Event Bus
-
-The event bus is how plugins receive notifications from the core system.
-
-### Available Events
-
-| Event | When it fires | Payload |
-|-------|--------------|---------|
-| `email.smtp.inbound` | Email received | Full webhook payload |
-| `email.smtp.outbound` | Email sent | Full webhook payload |
-| `email.tracking.opened` | Tracking pixel hit | Tracking event data |
-| `email.tracking.clicked` | Link clicked | Tracking event data |
-| `email.tracking.bounced` | Email bounced | Bounce data |
-| `email.tracking.complained` | Spam complaint | Complaint data |
-| `domain.created` | Domain added | Domain data |
-| `domain.deleted` | Domain removed | Domain data |
-| `mailbox.created` | Mailbox added | Mailbox data |
-| `mailbox.deleted` | Mailbox removed | Mailbox data |
-| `organization.created` | Org added | Org data |
-| `quota.warning` | Approaching quota limit | Usage data |
-| `quota.exceeded` | Quota exceeded | Usage data |
-| `cert.renewed` | SSL cert renewed | Cert data |
-| `cert.expiring` | SSL cert expiring soon | Cert data |
-
-### Subscribing to Events
-
-```python
-# Subscribe to a single event
-event_bus.subscribe("email.smtp.inbound", self.handler)
-
-# Subscribe to multiple events
-for event in ["email.smtp.inbound", "email.smtp.outbound"]:
-    event_bus.subscribe(event, self.handler)
-
-# Subscribe with a filter
-event_bus.subscribe("email.smtp.inbound", self.handler, filter={"organization_id": "specific-org"})
-```
-
-### Event Handler Signature
-
-```python
-async def handler(self, event: dict):
-    """
-    event = {
-        "event": "email.smtp.inbound",
-        "timestamp": "2025-03-25T14:30:00Z",
-        "payload": { ... }
-    }
-    """
-    pass
-```
-
-Handlers run asynchronously. If your handler is slow, it won't block other handlers or core processing.
-
-## Custom Middleware
-
-Add middleware to the API for cross-cutting concerns:
-
-```python
-# plugins/my_plugin/middleware.py
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.requests import Request
-import time
-import logging
-
-logger = logging.getLogger(__name__)
-
-
-class AuditLogMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        start = time.time()
-        response = await call_next(request)
-        duration = time.time() - start
-
-        # Log every API call
-        logger.info(
-            "API %s %s - %d (%.3fs) - %s",
-            request.method,
-            request.url.path,
-            response.status_code,
-            duration,
-            request.headers.get("X-API-Key", "no-key")[:8] + "...",
-        )
-
-        return response
-```
-
-Register it in your plugin setup:
-
-```python
-def setup(self, app, event_bus):
-    from .middleware import AuditLogMiddleware
-
-    app.add_middleware(AuditLogMiddleware)
-```
-
-## Custom Email Filter
-
-Create a plugin that filters or modifies emails during processing:
-
-```python
-class ComplianceFilterPlugin:
-    def setup(self, app, event_bus):
-        event_bus.subscribe("email.smtp.outbound.pre_send", self.check_compliance)
-
-    async def check_compliance(self, event: dict):
-        """Check outbound email against compliance rules before sending."""
-        recipient = event["payload"]["metadata"]["to"]
-        org_id = event["payload"].get("organization_id")
-
-        # Check suppression list
-        if await self.is_suppressed(recipient, org_id):
-            return {"action": "reject", "reason": "recipient_suppressed"}
-
-        # Check for sensitive content
-        subject = event["payload"]["metadata"].get("subject", "")
-        if self.contains_sensitive_data(subject):
-            return {"action": "hold", "reason": "compliance_review_needed"}
-
-        return {"action": "allow"}
-```
-
-## Plugin Configuration
-
-```python
-# plugins/my_plugin/config.py
-import os
-
-
-class PluginConfig:
-    ENABLED = os.environ.get("PLUGIN_MY_PLUGIN_ENABLED", "true").lower() == "true"
-    CRM_API_URL = os.environ.get("PLUGIN_MY_PLUGIN_CRM_URL", "")
-    CRM_API_KEY = os.environ.get("PLUGIN_MY_PLUGIN_CRM_KEY", "")
-    LOG_LEVEL = os.environ.get("PLUGIN_MY_PLUGIN_LOG_LEVEL", "INFO")
-```
-
-Add the env vars to your `.env` file:
+The dispatcher posts every event to the global webhook URL, signed with the shared secret:
 
 ```bash
-PLUGIN_MY_PLUGIN_ENABLED=true
-PLUGIN_MY_PLUGIN_CRM_URL=https://api.mycrm.com
-PLUGIN_MY_PLUGIN_CRM_KEY=secret
+# .env
+WEBHOOK_URLS=https://app.example.com/mailyte/webhook
+WEBHOOK_SECRET=your-webhook-secret
 ```
 
-## Testing Plugins
+### The Envelope
+
+Every payload has a consistent envelope: event type, timestamp, source service, org/domain context, the event-specific data, and a Mailgun-style `signature` block (timestamp + token + HMAC) for replay-attack prevention. Delivery details, headers (`X-Webhook-Event`), retry/backoff behavior, and the signature verification recipe are documented in [Webhook Events](../reference/webhook-events.md) and the [Webhooks feature guide](../features/webhooks.md).
+
+### Event Catalog
+
+The authoritative list is the `Events` class at the bottom of `shared/webhook_dispatcher.py` — naming convention `{category}.{action}` or `{category}.{subcategory}.{action}`. A sample of what's there:
+
+| Event | When it fires |
+|-------|--------------|
+| `email.accepted` / `email.delivered` / `email.bounced` / `email.deferred` | SMTP lifecycle |
+| `email.read` / `email.moved` / `email.deleted` / `email.flagged` | IMAP user actions |
+| `tracking.open` / `tracking.click` / `tracking.unsubscribe` | Engagement tracking |
+| `folder.created` / `folder.renamed` / ... | Folder operations |
+| `storage.quota.warning` / `storage.quota.exceeded` | Quota monitoring |
+| `rate_limit.limit_exceeded` | Rate limiting |
+
+See [Webhook Events](../reference/webhook-events.md) for the full reference.
+
+### Delivery Semantics Worth Knowing
+
+- **Retries with backoff** — transient failures are retried; a `406` response from your endpoint means "don't retry this one"
+- **Dead letter queue** — permanently failed events land in the `webhook_dead_letters` table so an operator can see what was lost and requeue it
+- **Ordering is not guaranteed** — treat events as idempotent facts, keyed by the envelope's id
+
+### A "Plugin" as a Webhook Consumer
+
+The CRM-sync example this page used to show as an in-process plugin is, in reality, a small HTTP service:
 
 ```python
-# tests/test_my_plugin.py
-import pytest
-from plugins.my_plugin.plugin import MyPlugin
+# your-crm-sync-service (runs anywhere that can receive HTTPS)
+from fastapi import FastAPI, Request
+
+app = FastAPI()
 
 
-class TestMyPlugin:
-    def setup_method(self):
-        self.plugin = MyPlugin()
-
-    @pytest.mark.asyncio
-    async def test_on_email_received(self):
-        event = {
-            "event": "email.smtp.inbound",
-            "timestamp": "2025-03-25T14:30:00Z",
-            "payload": {
-                "metadata": {
-                    "from": "sender@example.com",
-                    "to": "recipient@test.com",
-                    "subject": "Test",
-                }
-            },
-        }
-        # Should not raise
-        await self.plugin.on_email_received(event)
+@app.post("/mailyte/webhook")
+async def receive(request: Request):
+    envelope = await request.json()
+    # 1. Verify envelope["signature"] with your WEBHOOK_SECRET (see webhook docs)
+    # 2. Route on the event type
+    match envelope["event"]:
+        case "email.inbound" | "email.outbound":
+            await sync_to_crm(envelope["data"])
+        case "email.bounced":
+            await flag_contact(envelope["data"])
+    return {"status": "ok"}
 ```
 
-## Best Practices
+## Firing Your Own Events
 
-- **Keep plugins focused** — one plugin, one job
-- **Handle errors gracefully** — a plugin crash shouldn't break email delivery
-- **Use async handlers** — don't block the event loop
-- **Log at appropriate levels** — INFO for normal ops, WARNING for issues
-- **Document your config** — list all env vars the plugin needs
-- **Write tests** — especially for filter/compliance plugins
+If you're adding code inside the platform (a feature or a custom worker) and want it to notify integrations, dispatch — don't build your own HTTP delivery:
+
+```python
+from shared.webhook_dispatcher import dispatch_event
+
+dispatch_event(
+    event_type="my_feature.thing.happened",  # {category}.{action} convention
+    data={"item_id": item_id},
+    org_id=org_id,
+    domain=domain,
+    source_service="my_worker",
+)
+```
+
+`dispatch_event()` is fire-and-forget: if no `WEBHOOK_URL` is configured it silently no-ops, otherwise the envelope is queued to a worker pool (or published via Redis with `use_redis=True`, for callers without their own worker pool such as Postfix scripts).
+
+## Custom Workers
+
+For processing that must run **inside** the platform — with database access, the shared libraries, and a place in the compose stack — build a worker. That is the supported way to add a new long-running component; see [Custom Workers](custom-workers.md).
+
+## Mail-Pipeline Hooks
+
+- **Sieve** — per-mailbox filtering (vacation, file-into-folder, reject) is standard Sieve, managed through Dovecot's ManageSieve service; the API's filter endpoints (`worker/api/utils/managesieve.py`) speak that protocol on your behalf.
+- **Rspamd** — spam scoring, greylisting, and custom symbols/rules are configured under `mailer/rspamd/`. Changes there apply at mail-time to every message.
+
+## Best Practices for Integrations
+
+- **Verify signatures** — never act on an unsigned or badly-signed webhook payload
+- **Return quickly** — acknowledge with a 2xx and process asynchronously; slow endpoints eat the retry budget
+- **Be idempotent** — retries mean you may see the same event twice
+- **Use 406 deliberately** — it's the documented "drop this event, don't retry" signal
+- **Watch the dead letter queue** — `webhook_dead_letters` is where lost events surface

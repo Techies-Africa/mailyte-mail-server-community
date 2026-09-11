@@ -1,7 +1,7 @@
 
 # Rate Limiter Service
 
-The Rate Limiter Service provides intelligent rate limiting and quota management for the Mailyte Mail Server. It operates at multiple levels (organization, domain, and email account) to prevent abuse and ensure fair usage across all tenants.
+The Rate Limiter Service provides intelligent rate limiting and quota management for the Enterprise Mail Server. It operates at multiple levels (organization, domain, and email account) to prevent abuse and ensure fair usage across all tenants.
 
 ## Overview
 
@@ -656,4 +656,4 @@ active_rate_limits = Gauge("active_rate_limits", "Active rate limits")
 - Increase cache size
 - Add read replicas
 
-The Rate Limiter Service provides comprehensive quota management while maintaining high performance and reliability, ensuring fair usage across all tenants of the Mailyte Mail Server.
+The Rate Limiter Service provides comprehensive quota management while maintaining high performance and reliability, ensuring fair usage across all tenants of the Enterprise Mail Server.

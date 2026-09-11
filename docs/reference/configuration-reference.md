@@ -1,176 +1,123 @@
 ---
 title: Configuration Reference
-description: Complete reference for every configuration file across all Mailyte services — Postfix, Dovecot, Rspamd, API, and workers.
+description: Where every configuration file actually lives — baked image configs, host-mounted overrides, and the generated files that tie them together.
 ---
 
 # Configuration Reference
 
-All configuration lives in the `config/` directory, organized by service. Custom overrides go into subdirectories that are mounted into the Docker containers.
+Mailyte's mail-stack configuration is **baked into the service images** from the repo, with a small set of host-mounted override files under `config/` and generated files under `storage/`. Environment variables adjust behavior at container start.
 
-## Directory Structure
+## Where Config Lives
 
-```
-config/
-  mailer/
-    postfix/          # Postfix overrides
-    dovecot/          # Dovecot overrides
-    rspamd/           # Rspamd overrides
-```
+| Layer | Path (repo) | Path (container) | Applied |
+|-------|-------------|------------------|---------|
+| Postfix baked config | `mailer/postfix/config/` | `/etc/postfix/` | Image build; entrypoint applies env overrides via `postconf -e` and `envsubst` |
+| Postfix host override | `config/mailer/postfix/transport_cutover` | `/etc/postfix/custom/transport_cutover` | Live (texthash map; `postfix reload`) |
+| Dovecot baked config | `mailer/dovecot/config/dovecot.conf` (+ SQL `.ext` files) | `/etc/dovecot/` | Image build; entrypoint substitutes DB credentials and `DOVEADM_API_KEY` |
+| Dovecot host override | `config/mailer/dovecot/local.conf` | `/etc/dovecot/local.conf` | `!include_try` at the end of dovecot.conf (prod mount; carries mail_crypt) |
+| Rspamd baked config | `mailer/rspamd/config/` (`local.d/`, Lua) | `/etc/rspamd/` | Image build |
+| DKIM keys | `storage/dkim_keys/` | `/var/lib/rspamd/dkim/` | Bind mount; written by `scripts/generate_dkim.py` and the API |
+| SSL certs (deployed) | `storage/ssl_certs/`, `storage/ssl_private/` | `/etc/ssl/certs[/custom]`, `/etc/ssl/private[/custom]` | Written by cert_manager |
+| SNI maps | `storage/sni_config/` | `/etc/ssl/sni` | Written by cert_manager; consumed by Postfix, Dovecot, Traefik |
+| Monitoring | `monitoring/prometheus/`, `monitoring/alertmanager/`, `monitoring/grafana/` | `/etc/prometheus/`, `/etc/alertmanager/`, Grafana provisioning | Read-only mounts |
+| Traefik (prod) | `deployment/traefik/traefik.yml` | `/etc/traefik/traefik.yml` | Read-only mount; dynamic certs via `/etc/traefik/dynamic/traefik_certs.yml` |
+| Roundcube override | `config/mailer/roundcube/custom.config.inc.php` | Roundcube config dir | Mount |
 
-## Postfix Configuration
+!!! warning "Baked means baked"
+    Editing `/etc/postfix/main.cf` or `/etc/rspamd/local.d/*` inside a running container does not survive a container recreate, and `postconf -e` changes are re-applied from env at every start. Persistent changes belong in the repo (`mailer/*/config/`, then rebuild) or in an env var the entrypoint reads.
 
-Config path: `config/mailer/postfix/` (mounted to `/etc/postfix/custom/`)
+## Postfix — Key Effective Settings
 
-### main.cf — Core Settings
+Full detail: [Postfix Configuration](../configuration/postfix-configuration.md).
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `myhostname` | `$HOSTNAME` | Server FQDN (must match PTR record) |
-| `mydomain` | `$DOMAIN` | Primary domain |
-| `mynetworks` | `127.0.0.0/8 [::1]/128 172.16.0.0/12` | Trusted networks |
-| `message_size_limit` | `52428800` | Max email size (50 MB) |
-| `smtpd_tls_cert_file` | From cert_manager | SSL certificate path |
-| `smtpd_tls_key_file` | From cert_manager | SSL private key path |
-| `smtpd_tls_security_level` | `may` | TLS for inbound (`may`, `encrypt`) |
-| `smtp_tls_security_level` | `may` | TLS for outbound (`may`, `encrypt`, `dane`) |
-| `smtpd_tls_protocols` | `!SSLv2, !SSLv3, !TLSv1, !TLSv1.1` | Allowed inbound TLS versions |
-| `virtual_mailbox_domains` | MySQL lookup | Domains handled by this server |
-| `virtual_mailbox_maps` | MySQL lookup | Mailbox -> storage mapping |
-| `virtual_alias_maps` | MySQL lookup | Alias -> destination mapping |
-| `virtual_transport` | `lmtp:dovecot:24` | Delivery via Dovecot LMTP |
-| `milter_default_action` | `accept` | What to do if Rspamd is unreachable |
-| `smtpd_milters` | `inet:rspamd:11332` | Connect to Rspamd for filtering |
-| `default_destination_concurrency_limit` | `5` | Max parallel deliveries per destination |
-| `smtp_destination_concurrency_limit` | `5` | Max parallel SMTP connections per destination |
-| `default_process_limit` | `100` | Max Postfix processes |
-| `queue_run_delay` | `300s` | How often to retry deferred messages |
-| `maximal_backoff_time` | `4000s` | Max retry delay |
-| `minimal_backoff_time` | `300s` | Min retry delay |
-| `bounce_queue_lifetime` | `5d` | How long to keep bounced messages |
-| `maximal_queue_lifetime` | `5d` | How long to keep deferred messages |
+| Setting | Value | Notes |
+|---------|-------|-------|
+| `myhostname` | `${HOSTNAME}` | set by entrypoint |
+| `mydestination` | `localhost` | all real domains are virtual |
+| `virtual_mailbox_domains` / `_maps` / `virtual_alias_maps` / `smtpd_sender_login_maps` | `proxy:mysql:/etc/postfix/mysql-*.cf` | queries `domains` / `email_accounts` / `aliases` / (+ `smtp_credentials`) |
+| `virtual_transport` | `lmtp:inet:dovecot:24` | |
+| `smtpd_sasl_type` / `smtpd_sasl_path` | `dovecot` / `inet:dovecot:24100` | |
+| `smtpd_tls_cert_file` / `key_file` | `/etc/ssl/certs/server.crt` / `/etc/ssl/private/server.key` | from cert_manager |
+| `tls_server_sni_maps` | `hash:/etc/postfix/sni_certs.map` | from cert_manager |
+| `smtpd_tls_security_level` / `smtp_tls_security_level` | `may` / `may` | 587/465 override to `encrypt` |
+| `smtpd_milters` / `non_smtpd_milters` | `inet:rspamd:11332` | `milter_default_action = accept` |
+| `message_size_limit` | `52428800` (50 MB) | baked, not env-driven |
+| `maillog_file` | `/var/log/postfix/mail.log` | tailed by log_ingestor |
+| `transport_maps` | `texthash:/etc/postfix/custom/transport_cutover` | migration cutover routing |
+| Port 25 | postscreen (DNSBL scoring, greet test) | |
+| Ports 587/465 | SASL required, `reject_sender_login_mismatch` first, tracking content filter | |
+| Port 10026 (localhost) | tracking-filter re-injection listener | |
+| Port 10587 (internal) | unauthenticated submission for trusted internal services | not published |
 
-### master.cf — Service Definitions
+## Dovecot — Key Effective Settings
 
-Controls which Postfix daemons run and on which ports:
+Full detail: [Dovecot Configuration](../configuration/dovecot-configuration.md).
 
-| Service | Port | Description |
-|---------|------|-------------|
-| `smtp` | 25 | Inbound SMTP |
-| `submission` | 587 | Authenticated submission (STARTTLS) |
-| `smtps` | 465 | Authenticated submission (implicit TLS) |
-| `pickup` | — | Local mail pickup |
-| `cleanup` | — | Header/body checks |
-| `qmgr` | — | Queue manager |
+| Setting | Value |
+|---------|-------|
+| `protocols` | `imap pop3 lmtp sieve` |
+| `mail_location` | `maildir:/var/mail/vhosts/%d/%n` |
+| `mail_uid` / `mail_gid` | `vmail` (5000/5000) |
+| `ssl` | `required`; `ssl_min_protocol = TLSv1.2`; SNI via `conf.d/sni.conf` |
+| `auth_mechanisms` | `plain login` (TLS-only) |
+| passdbs (in order) | SMTP-only `smtp_credentials` SQL → master passwd-file → `email_accounts` SQL |
+| `default_pass_scheme` | `BLF-CRYPT` (bcrypt) |
+| `auth_cache_ttl` | `1 hour` (flushed via doveadm HTTP API on credential changes) |
+| Quota | `*:storage=5GB` default, per-user override from `email_accounts.storage_quota`; Trash +500MB, Junk +100MB, 10% grace; warnings at 75/80/95% |
+| LMTP | TCP port 24; SASL for Postfix on 24100; doveadm HTTP on 24180 (all internal-only) |
+| Sieve | global `default.sieve` (archive pipe → spam→Junk → category smart folders); per-user via ManageSieve 4190 |
+| mail_crypt | in host-mounted `local.conf` (global EC key pair + LZ4) — production only |
 
-## Dovecot Configuration
+## Rspamd — Key Effective Settings
 
-Config path: `config/mailer/dovecot/` (mounted to `/etc/dovecot/custom/`)
+Full detail: [Rspamd Configuration](../configuration/rspamd-configuration.md).
 
-### Key Settings
+| Setting | Value |
+|---------|-------|
+| Actions | `reject = 15; rewrite_subject = 10; add_header = 6; greylist = 4` |
+| DKIM/ARC | enabled; selector `default`; keys `/var/lib/rspamd/dkim/{domain}.{selector}.key`; `selector_map` generated |
+| Bayes | Redis backend, `per_user`, `min_learns = 200` |
+| Greylisting | 300 s, skip authenticated/local/DKIM-valid; 34-domain provider whitelist |
+| Antivirus | **disabled** (no ClamAV container ships) |
+| Per-org | `settings` module from Redis (`rspamd_settings:` prefix) + multimap white/blacklists |
+| Custom Lua | `email_classifier.lua` (X-Email-Category), `transport_rules.lua` (env-gated) |
+| Workers | proxy 11332 (milter), normal 11333, controller 11334 (no password — keep internal) |
 
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `mail_location` | `maildir:/var/mail/vhosts/%d/%n/Maildir` | Where mail is stored |
-| `mail_uid` | `5000` | UID for mail files |
-| `mail_gid` | `5000` | GID for mail files |
-| `protocols` | `imap pop3 lmtp sieve` | Enabled protocols |
-| `ssl` | `required` | TLS requirement |
-| `ssl_cert` | From cert_manager | SSL certificate |
-| `ssl_key` | From cert_manager | SSL private key |
-| `ssl_min_protocol` | `TLSv1.2` | Minimum TLS version |
-| `auth_mechanisms` | `plain login` | SASL auth methods |
-| `passdb driver` | `sql` | Password database (MySQL) |
-| `userdb driver` | `sql` | User database (MySQL) |
-| `mail_max_userip_connections` | `20` | Max connections per user/IP |
-| `mail_plugins` | `quota` | Enabled plugins |
-| `quota_rule` | `*:storage=1G` | Default quota per mailbox |
+## API and Worker Configuration
 
-### Protocol-Specific
-
-| Setting | Value | Description |
-|---------|-------|-------------|
-| `protocol imap: mail_plugins` | `imap_quota imap_sieve` | IMAP plugins |
-| `protocol lmtp: mail_plugins` | `sieve` | LMTP plugins (server-side filtering) |
-| `service imap-login: inet_listener imap` | port 143 | Plaintext IMAP (STARTTLS) |
-| `service imap-login: inet_listener imaps` | port 993 | Implicit TLS IMAP |
-| `service pop3-login: inet_listener pop3s` | port 995 | Implicit TLS POP3 |
-
-## Rspamd Configuration
-
-Config path: `config/mailer/rspamd/` (mounted to `/etc/rspamd/custom/`)
-
-Local overrides go in `local.d/` subdirectory.
-
-### Core Settings (`local.d/options.inc`)
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `dns.nameserver` | System default | DNS servers for lookups |
-| `max_memory` | Not set | Memory limit for Rspamd |
-
-### DKIM Signing (`local.d/dkim_signing.conf`)
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `enabled` | `true` | Enable DKIM signing |
-| `path` | `/var/lib/rspamd/dkim/$domain.$selector.key` | Key file path |
-| `selector` | `default` | DKIM selector |
-| `use_domain` | `header` | Use From header domain for signing |
-| `allow_username_mismatch` | `true` | Sign even if SMTP auth user differs |
-
-### Actions (`local.d/actions.conf`)
-
-| Action | Default Score | Description |
-|--------|--------------|-------------|
-| `reject` | `15` | Reject the message |
-| `add header` | `6` | Add spam header but deliver |
-| `greylist` | `4` | Greylist (defer temporarily) |
-| `no action` | `0` | Deliver normally |
-
-### Statistics (`local.d/classifier-bayes.conf`)
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `backend` | `redis` | Storage backend |
-| `servers` | `redis:6379` | Redis connection |
-| `autolearn` | `true` | Auto-learn from scored messages |
-
-## API Configuration
-
-The API is configured via environment variables. See [Environment Variables](environment-variables.md) for the complete list.
-
-Key settings:
+The API and all workers are configured **entirely via environment variables** — see [Environment Variables](environment-variables.md). Highlights:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PORT` | `8080` | API listen port |
-| `DB_HOST` | — | MySQL host |
-| `DB_NAME` | `mailserver` | Database name |
-| `REDIS_HOST` | `redis` | Redis host |
-| `ADMIN_PASSWORD` | — | Admin authentication password |
-| `ADMIN_TOKEN_SECRET` | — | JWT signing secret |
+| `PORT` | per-service (API: compose sets `8080`) | Bind port |
+| `DB_*`, `REDIS_*` | `mysql` / `redis` | Backing stores |
+| `ADMIN_PASSWORD` / `ADMIN_TOKEN_SECRET` | — | API admin auth |
+| `DOVEADM_URL` / `DOVEADM_API_KEY` | `http://dovecot:24180` / — | SMTP-credential cache flush |
+| `WEBHOOK_SECRET` / `WEBHOOK_URLS` | — | Webhook signing/global endpoint |
 
-## Worker Configuration
-
-Each worker reads its configuration from environment variables. Common variables shared across workers:
-
-| Variable | Description |
-|----------|-------------|
-| `DB_HOST`, `DB_PORT`, `DB_NAME`, `DB_USER`, `DB_PASSWORD` | MySQL connection |
-| `REDIS_HOST`, `REDIS_PORT` | Redis connection |
-| `WEBHOOK_SECRET` | Webhook signing secret |
-| `WEBHOOK_SERVICE_URL` | Internal webhook service URL |
-
-Worker-specific variables are documented in each worker's module page under [Worker Modules](../worker/index.md).
-
-## SSL / Certificate Manager
+## cert_manager
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ACME_EMAIL` | — | Let's Encrypt registration email |
-| `ACME_STAGING` | `true` | Use staging CA (set `false` for production) |
-| `CERT_RENEWAL_DAYS` | `30` | Renew certificates this many days before expiry |
-| `CERT_CHECK_INTERVAL` | `21600` | Seconds between renewal checks (6 hours) |
-| `WILDCARD_DOMAIN` | — | Domain for wildcard certificate |
-| `DNS_PROVIDER` | — | DNS provider for DNS-01 challenges |
-| `DOCKER_RELOAD_ENABLED` | `true` | Reload Postfix/Dovecot after cert changes |
+| `ACME_EMAIL` (`ACME_EMAILS` for a pool) | `admin@localhost` | ACME account(s) |
+| `ACME_STAGING` | `true` (prod: `false`) | Staging CA |
+| `CERT_RENEWAL_DAYS` / `CERT_CHECK_INTERVAL` | `30` / `21600` | Renewal loop |
+| `SSL_CERT_PATH` / `SSL_KEY_PATH` | `/etc/ssl/certs` / `/etc/ssl/private` | Deploy directories |
+| `SNI_CONFIG_PATH` | `/etc/ssl/sni` | SNI map output |
+| `TRAEFIK_ADMIN_SUBDOMAINS` | `api,autoconfig,jmap,caldav,docs,grafana,traefik,console` | Admin hostnames |
+| `WILDCARD_DOMAIN` / `DNS_PROVIDER` | — | DNS-01 wildcard issuance |
+| `DOCKER_RELOAD_ENABLED` / `DOCKER_PROXY_URL` | `true` (compose) / `http://docker-proxy:2375` | SIGHUP Postfix/Dovecot after deploys |
+
+See [SSL Certificates](../configuration/ssl-certificates.md) for the issuance flow (webroot HTTP-01, SAN selection by live DNS, SNI map generation).
+
+## Monitoring Stack
+
+- `monitoring/prometheus/prometheus.yml` — scrape config (15 s interval, all worker `/metrics` endpoints, mysql/redis exporters).
+- `monitoring/prometheus/rules/mail_alerts.yml`, `backup_alerts.yml` — alert rules.
+- `monitoring/alertmanager/alertmanager.yml` — routes everything to `http://webhooks:8081/alertmanager`.
+- `monitoring/grafana/` — provisioning + the `mail_overview` and `security_dashboard` dashboards.
+
+See [Monitoring Configuration](../configuration/monitoring-configuration.md) and [Prometheus Setup](../configuration/prometheus-setup.md).
+
+!!! note "Legacy configs to ignore"
+    `worker/monitoring/prometheus.yml`, `worker/monitoring/alertmanager.yml`, `worker/monitoring/alert_rules.yml`, and everything under `worker/monitoring/config/` are unreferenced legacy files that contradict the active `monitoring/` tree — nothing mounts them.

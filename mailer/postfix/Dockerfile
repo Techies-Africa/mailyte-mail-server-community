@@ -17,12 +17,20 @@ RUN apt-get update && \
     ca-certificates \
     gettext-base \
     openssl \
+    # iproute2: the entrypoint adds a second bridge-internal address the
+    # marketing transport binds to, so a host SNAT rule can give that stream
+    # its own public egress IP (Docker MASQUERADE otherwise rewrites every
+    # container's source to the host's primary address).
+    iproute2 \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
-# --timeout/--retries per conventions §5 -- a full CE build runs every service
-# in parallel and saturates the link, and a pip timeout here fails the build.
-RUN pip3 install --timeout 120 --retries 10 mysql-connector-python requests redis
+# pymysql: tracking_injector.py imports pymysql specifically (not
+# mysql.connector, which every other script in this codebase uses) --
+# confirmed live: it was never installed here, so every tracking-injected
+# outbound message logged "PyMySQL not available, using default
+# organization/domain IDs" and lost real per-org/domain attribution.
+RUN pip3 install mysql-connector-python requests redis pymysql
 
 # Create vmail user and group (uid/gid 5000 — must match Dovecot)
 RUN groupadd -g 5000 vmail && \

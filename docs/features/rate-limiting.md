@@ -1,34 +1,36 @@
 # Rate Limiting
 
-**Prevents any single sender, domain, or organization from monopolizing the mail server.**
+**Prevents any single sender, credential, domain, or organization from monopolizing the mail server.**
 
-The rate limiter is a standalone Flask service (port `8082`) backed by Redis. It enforces sending and receiving limits at three levels -- organization, domain, and individual mailbox -- across multiple time windows (per-second, per-minute, hourly, daily, monthly). When someone hits a limit, the service returns a "defer" response to Postfix, which tells the sending server to try again later.
+The rate limiter is a standalone FastAPI service (port `8082`) backed by Redis (DB 1). It enforces sending and receiving limits at three levels — organization, domain, and individual mailbox — plus per-SMTP-credential limits, across six windows (per-second, per-minute, hourly, daily, monthly, and burst). When a limit is hit, Postfix receives a `DEFER_IF_PERMIT` policy answer and the sending server retries later.
 
 ## How it works
 
 ```mermaid
 flowchart TD
-    A[Email arrives at Postfix] --> B[Postfix policy service\nport 10030]
-    B --> C[Rate Limiter API\nport 8082]
-    C --> D{Check org limit}
-    D -->|OK| E{Check domain limit}
-    D -->|Exceeded| H[Defer: try later]
-    E -->|OK| F{Check mailbox limit}
-    E -->|Exceeded| H
-    F -->|OK| G[Accept email]
+    A[Message reaches DATA phase] --> B[Postfix policy service\ncheck_policy_service unix:private/policy-rate-limit]
+    B --> C[rate_limit_policy.py\nspawn service]
+    C --> D[Rate Limiter :8082\nPOST /check_rate_limit]
+    D --> E{Org limit}
+    E -->|OK| F{Domain limit}
+    E -->|Exceeded| H[action=DEFER_IF_PERMIT\n450 4.7.1 Rate limit exceeded]
+    F -->|OK| G{Mailbox / credential limit}
     F -->|Exceeded| H
-    G --> I[Increment counters\nin Redis]
+    G -->|OK| I[action=DUNNO + increment counters]
+    G -->|Exceeded| H
 ```
 
-The check is hierarchical: organization limits are checked first, then domain, then mailbox. If any level says "no," the email is deferred. This means an org-level limit can cap the total output of all domains and mailboxes under it.
+The check is hierarchical: organization first, then domain, then mailbox (or SMTP credential). If any level says no, the message is deferred with `450 4.7.1`, so nothing is lost — the sender's queue retries.
 
-### Sliding window counters
+### Exactly one counting point
 
-Counters are stored in Redis using a sliding window approach. Instead of resetting at the top of each hour, the window slides forward continuously. This prevents the "burst at boundary" problem where someone could send double their hourly limit by timing sends around the reset point.
+The Postfix policy check runs **only** in `smtpd_data_restrictions` (once per message, at DATA). It must never be added to the sender/recipient/client restriction lists as well — each policy call records usage, and multiple calls per message double- or triple-count. That misconfiguration once deferred essentially all inbound mail; the reasoning is documented inline in `mailer/postfix/config/main.cf`.
+
+Direction is inferred from authentication: a session with a SASL username is counted as **outbound** against that identity (mailbox address or SMTP credential username); an unauthenticated session is counted as **inbound** against the envelope sender.
 
 ### Fail-open design
 
-If Redis goes down or the rate limiter service is unreachable, the system **fails open** -- emails are allowed through. This is a deliberate choice: a broken rate limiter shouldn't bring email delivery to a halt. You'll see errors in the logs, and the health monitor will try to restart the service.
+If Redis, the database, or the rate limiter itself is unreachable, the policy script answers `DUNNO` and mail flows. A broken rate limiter must not become a mail outage; you'll see errors in the logs instead.
 
 ## Configuration
 
@@ -38,43 +40,32 @@ If Redis goes down or the rate limiter service is unreachable, the system **fail
 |----------|---------|-------------|
 | `RATE_LIMITER_HOST` | `0.0.0.0` | Service bind address |
 | `RATE_LIMITER_PORT` | `8082` | Service port |
-| `RATE_LIMIT_ENABLED` | `true` | Master switch |
-| `RATE_LIMIT_REDIS_URL` | `redis://redis:6379/0` | Redis connection URL |
+| `RATE_LIMITER_URL` | `http://rate_limiter:8082` | Where the Postfix policy script reaches the service |
+| `REDIS_HOST` / `REDIS_PORT` / `REDIS_DB` | `redis` / `6379` / `1` | Counter storage |
+| `RATE_LIMIT_CACHE_TTL` | `300` | Rate-limit rule cache TTL (seconds) |
+| `ORG_MAPPING_CACHE_TTL` | `600` | Email→org mapping cache TTL |
 
-### Default org limits
+### Default limits
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `ORG_OUTBOUND_HOURLY_DEFAULT` | `10000` | Outbound emails per hour |
-| `ORG_OUTBOUND_DAILY_DEFAULT` | `100000` | Outbound emails per day |
-| `ORG_OUTBOUND_MONTHLY_DEFAULT` | `1000000` | Outbound emails per month |
-| `ORG_OUTBOUND_BURST_DEFAULT` | `2000` | Max burst size |
-| `ORG_INBOUND_HOURLY_DEFAULT` | `5000` | Inbound emails per hour |
-| `ORG_INBOUND_DAILY_DEFAULT` | `50000` | Inbound emails per day |
-| `ORG_INBOUND_MONTHLY_DEFAULT` | `500000` | Inbound emails per month |
+Every level has per-second, per-minute, hourly, daily, monthly, and burst windows, for both directions. Environment variables follow the pattern `{ORG|DOMAIN|MAILBOX}_{INBOUND|OUTBOUND}_{SECOND|MINUTE|HOURLY|DAILY|MONTHLY|BURST}_DEFAULT`. The defaults:
 
-### Default domain limits
+| Level / Direction | second | minute | hourly | daily | monthly | burst |
+|-------------------|--------|--------|--------|-------|---------|-------|
+| Org outbound | 20 | 200 | 10,000 | 100,000 | 1,000,000 | 2,000 |
+| Org inbound | 10 | 100 | 5,000 | 50,000 | 500,000 | 1,000 |
+| Domain outbound | 5 | 40 | 2,000 | 20,000 | 200,000 | 500 |
+| Domain inbound | 2 | 20 | 1,000 | 10,000 | 100,000 | 200 |
+| Mailbox outbound | 2 | 10 | 200 | 2,000 | 20,000 | 100 |
+| Mailbox inbound | 1 | 5 | 100 | 1,000 | 10,000 | 50 |
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `DOMAIN_OUTBOUND_HOURLY_DEFAULT` | `2000` | Per domain per hour |
-| `DOMAIN_OUTBOUND_DAILY_DEFAULT` | `20000` | Per domain per day |
-| `DOMAIN_OUTBOUND_MONTHLY_DEFAULT` | `200000` | Per domain per month |
-
-### Default mailbox limits
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `MAILBOX_OUTBOUND_HOURLY_DEFAULT` | `200` | Per mailbox per hour |
-| `MAILBOX_OUTBOUND_DAILY_DEFAULT` | `2000` | Per mailbox per day |
-| `MAILBOX_OUTBOUND_MONTHLY_DEFAULT` | `20000` | Per mailbox per month |
+Per-entity custom limits (set via `/set_limits` or the platform API at `/api/v1/rate-limiter/`) override these defaults. [SMTP API-key credentials](smtp-credentials.md) can additionally carry their own `hourly_limit` / `daily_limit`, enforced against the credential's username.
 
 ### Alert thresholds
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `RATE_LIMIT_WARNING_THRESHOLD` | `80` | Percentage at which to send a warning webhook |
-| `RATE_LIMIT_CRITICAL_THRESHOLD` | `95` | Percentage at which to send a critical alert |
+| `RATE_LIMIT_WARNING_THRESHOLD` | `80` | Percentage at which a warning webhook fires |
+| `RATE_LIMIT_CRITICAL_THRESHOLD` | `95` | Percentage at which a critical alert fires |
 
 ## API endpoints
 
@@ -83,40 +74,29 @@ If Redis goes down or the rate limiter service is unreachable, the system **fail
 ```bash
 curl -X POST http://localhost:8082/check_rate_limit \
   -H "Content-Type: application/json" \
-  -d '{
-    "email": "sender@example.com",
-    "direction": "outbound"
-  }'
+  -d '{"email": "sender@example.com", "direction": "outbound"}'
 ```
 
-Response when allowed:
+### Postfix policy protocol
 
-```json
-{
-  "allowed": true,
-  "message": "Rate limit check passed",
-  "email": "sender@example.com",
-  "direction": "outbound",
-  "details": {
-    "checks": {
-      "organization": { "hourly_count": 42, "hourly_limit": 10000 },
-      "domain": { "hourly_count": 12, "hourly_limit": 2000 },
-      "mailbox": { "hourly_count": 3, "hourly_limit": 200 }
-    }
-  }
-}
+```
+POST /policy
 ```
 
-Response when exceeded (HTTP `429`):
+Speaks the plain-text Postfix policy delegation protocol over HTTP — the body is the raw `key=value` request, the response is `action=DUNNO` or `action=DEFER_IF_PERMIT 4.7.1 ...`. This is what `mailer/postfix/scripts/rate_limit_policy.py` can forward to directly.
 
-```json
-{
-  "allowed": false,
-  "message": "Domain rate limit exceeded: Hourly limit (2000) exceeded"
-}
+### Other endpoints
+
+```
+POST /increment_usage                          # count usage explicitly
+GET  /get_usage/{entity_type}/{identifier}     # entity_type: organization|domain|mailbox
+POST /set_limits                               # per-entity custom limits
+POST /reset_counters
+GET  /health
+GET  /metrics                                  # Prometheus
 ```
 
-### Set custom limits
+Example — custom domain limits:
 
 ```bash
 curl -X POST http://localhost:8082/set_limits \
@@ -127,45 +107,28 @@ curl -X POST http://localhost:8082/set_limits \
     "direction": "outbound",
     "hourly_limit": 5000,
     "daily_limit": 50000,
-    "monthly_limit": 500000,
-    "warning_threshold": 80,
-    "critical_threshold": 95,
-    "description": "Increased limits for BigClient"
+    "monthly_limit": 500000
   }'
 ```
 
-### Get usage stats
-
-```bash
-curl http://localhost:8082/get_usage/domain/bigclient.com?direction=outbound
-```
-
-### Health check
-
-```bash
-curl http://localhost:8082/health
-```
-
-Returns the status of all sub-services (config, cache, database, usage, alerts, webhooks).
-
 ## Webhook events
 
-The rate limiter fires webhooks when limits are approached or exceeded:
+Dispatched through the [centralized webhook dispatcher](webhooks.md):
 
 | Event | When |
 |-------|------|
-| `rate_limit.threshold` | Usage crosses the warning (80%) or critical (95%) threshold |
-| `rate_limit.exceeded` | A rate limit is actually hit and an email is deferred |
-| `rate_limit.reset` | An admin updates rate limit configuration |
+| `rate_limit.threshold_breach` | Usage crosses the warning (80%) or critical (95%) threshold |
+| `rate_limit.exceeded` | A limit is hit and a message is deferred |
+| `rate_limit.reset` | An admin updates or resets rate limit configuration |
 
 ## Things to know
 
-- **Postfix integration is via the policy service.** Postfix talks to the rate limiter through a policy delegation service on port `10030`. This is set up automatically in the Docker deployment -- you don't need to wire it manually.
+- **The Postfix hookup is a spawn service, not a port.** `master.cf` defines `policy-rate-limit` as a `spawn` service running `rate_limit_policy.py`, referenced from `main.cf`'s `smtpd_data_restrictions` (and, on the submission ports, via the named restriction class `submission_rate_limit_check`). There is no separate "policy port 10030".
 
-- **Custom limits override defaults.** If you set a limit for a specific domain, it takes precedence over the default. Same for org and mailbox levels. Limits set to `0` mean "no limit for this window."
+- **SMTP API keys are rate limited too.** A credential's SASL username (no `@` in it) is checked as an authenticated identity — an earlier guard that skipped usernames without `@` exempted every API key and has been fixed.
 
-- **Redis is the source of truth for counters.** If Redis data is lost (restart without persistence), counters reset to zero. This isn't catastrophic -- it just means limits won't be enforced until usage accumulates again. Enable Redis persistence (AOF or RDB) in production.
+- **Redis is the source of truth for counters.** If Redis data is lost, counters reset to zero and limits are effectively unenforced until usage re-accumulates. Enable Redis persistence in production.
 
-- **The cache has TTLs.** Rate limit configuration is cached for 5 minutes (`RATE_LIMIT_CACHE_TTL=300`) and org mappings for 10 minutes (`ORG_MAPPING_CACHE_TTL=600`). If you change limits via the API, there's a brief window before the change takes effect across all workers.
+- **Caches introduce a small propagation delay.** Rules are cached 5 minutes and org mappings 10 minutes; a limit change can take up to that long to apply everywhere.
 
-- **Burst limits are separate from time-window limits.** The `burst_limit` caps how many emails can be sent in a very short burst, independent of the hourly/daily/monthly windows. Think of it as a short-fuse rate limit to prevent sudden floods.
+- **Burst limits are separate from the time windows.** The burst window catches short floods independent of the hourly/daily/monthly counters.

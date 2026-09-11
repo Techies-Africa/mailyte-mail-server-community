@@ -1,7 +1,7 @@
 
 # Mail Infrastructure Components
 
-The Mailyte Mail Server's mailer infrastructure consists of several integrated components that work together to provide enterprise-grade email services with advanced security, monitoring, and deliverability features.
+The Enterprise Mail Server's mailer infrastructure consists of several integrated components that work together to provide enterprise-grade email services with advanced security, monitoring, and deliverability features.
 
 ## Architecture Overview
 

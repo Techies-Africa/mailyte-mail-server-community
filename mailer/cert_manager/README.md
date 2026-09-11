@@ -15,16 +15,17 @@ This module provides comprehensive SSL/TLS certificate management with:
 ## Key Features
 
 ### Certificate Provisioning
-- **Domain Validation**: Automated domain ownership verification
-- **SAN Certificates**: Multiple domains in single certificate
-- **Wildcard Support**: Subdomain certificate coverage
-- **Custom CA Support**: Enterprise certificate authority integration
+- **HTTP-01 via webroot**: certbot runs with `--webroot`; the `acme_webroot` nginx container serves the shared challenge directory, and Traefik routes `/.well-known/acme-challenge/*` to it for any hostname. cert_manager binds **no** port of its own -- Traefik owns 80/443
+- **SAN Certificates**: mail domains get SAN certs (mail/smtp/imap names); `CERT_SERVER_IPS` must name this server's public address(es) so SAN candidates pointing elsewhere are skipped
+- **Traefik admin certs**: `TRAEFIK_ADMIN_SUBDOMAINS` (default `api,autoconfig,jmap,caldav,docs,grafana,traefik,console`) and `TRAEFIK_EXTRA_HOSTNAMES` get certificates too, published to Traefik via the generated `traefik_certs.yml` file-provider config -- both variables must be passed through compose, not just set in `.env`
+- **Wildcard Support**: `WILDCARD_DOMAIN` + `DNS_PROVIDER` for DNS-01 wildcard certs
+- **Multiple ACME accounts**: `ACME_EMAILS` round-robins accounts to multiply rate limits; `CERT_WORKER_THREADS` (default 3) parallelizes certbot runs
 
 ### Renewal Management
-- **Automated Renewal**: 30-day expiration window renewal
-- **Graceful Deployment**: Hot certificate reloading
-- **Rollback Capability**: Automatic recovery from failed updates
-- **Notification System**: Webhook alerts for renewal events
+- **Automated Renewal**: `CERT_RENEWAL_DAYS` (default 30) window, checked every `CERT_CHECK_INTERVAL` (default 6h)
+- **Graceful Deployment**: Postfix/Dovecot are reloaded through the **docker-proxy** container (`DOCKER_PROXY_URL`, scoped to list/inspect/restart) -- there is no Docker socket mount
+- **SNI maps**: per-domain `local_name` blocks for Dovecot and SNI maps for Postfix are written to `SNI_CONFIG_PATH`
+- **Notification System**: Webhook alerts for cert events
 
 ## Service Architecture
 
@@ -101,8 +102,7 @@ domains = [
 ### Service Integration
 - **Postfix**: SMTP service certificate updates
 - **Dovecot**: IMAP/POP3 service certificates
-- **Nginx**: Web service certificate deployment
-- **Health Monitor**: Certificate status monitoring
+- **Traefik**: HTTPS certs for admin subdomains via the file provider
 
 ## Monitoring & Alerting
 
@@ -175,10 +175,10 @@ openssl s_client -connect mail.example.com:993 -servername mail.example.com
 
 ## Integration Points
 
-- **Postfix**: SMTP service TLS certificate management
-- **Dovecot**: IMAP/POP3 service certificate deployment
-- **Nginx**: Web service SSL certificate configuration
-- **Health Monitor**: Certificate status monitoring and alerting
-- **Webhook System**: Real-time certificate event notifications
+- **Postfix / Dovecot**: SNI cert maps written to the shared `storage/sni_config` volume; reloads via docker-proxy
+- **Traefik**: certs for admin subdomains and extra hostnames delivered through `traefik_certs.yml` (file provider); Traefik's built-in ACME is deliberately unused -- a configured certResolver intercepts the challenge path and broke issuance in production once
+- **acme_webroot**: serves HTTP-01 challenge files certbot writes to the shared webroot
+- **Webhook System**: certificate event notifications
+- **MySQL**: certificate state tracked in `ssl_certificates`
 
 This module ensures production-grade SSL/TLS security with automated certificate lifecycle management, eliminating manual certificate administration while maintaining high security standards and service availability.

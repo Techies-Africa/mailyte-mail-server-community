@@ -1,155 +1,122 @@
 # Backup & Restore
 
-**Automated database and filesystem backups with cloud sync to S3 or Azure.**
+**Scheduled full and incremental backups of the database, mail store, and secrets — encrypted with age and optionally shipped offsite to S3.**
 
-Mailyte runs scheduled backups of your database and mail storage, compresses them, and optionally uploads them to cloud storage. If something goes catastrophically wrong, you can restore from any backup point within your retention window.
+Backups are driven by `scripts/backup.sh` on the **host**, executed by systemd timers (installed via `deployment/systemd/install-timers.sh`). Containers do not back themselves up.
 
 ## How it works
 
 ```mermaid
 flowchart LR
-    A[Cron Schedule\ndefault: 2am daily] --> B[Backup Worker]
-    B --> C[MySQL dump]
-    B --> D[Mail filesystem\nsnapshot]
-    C & D --> E[Compress\ngzip]
-    E --> F[Local backup\nretention: 30 days]
-    F -->|CLOUD_SYNC_ENABLED=true| G[Upload to\nS3 / Azure / GCS]
+    T1[systemd timer\nfull: daily 02:30] --> B[scripts/backup.sh]
+    T2[systemd timer\nincremental: hourly at :15] --> B
+    B --> C[MySQL dump / binlog]
+    B --> D[Redis snapshot]
+    B --> E[Maildirs]
+    B --> F[Secrets, DKIM keys,\nSSL certs, config]
+    C & D & E & F --> V[Verify inside archives]
+    V --> M[Manifest]
+    M --> G[age encrypt\npublic-key mode]
+    G -->|secrets/dr.env configured| H[(S3 offsite)]
+    G --> I[Local: storage/backups/\nretention: 3 fulls / 30 days]
 ```
 
-Think of it like Time Machine for your mail server. Every night (or whatever schedule you configure), the system takes a snapshot. The local copy is kept for quick restores; the cloud copy is your off-site safety net.
+The ordering is deliberate: **components → verify → manifest → encrypt → upload → prune**. Verification reads inside the gzip/tar archives (impossible after encryption), and pruning happens last — aggressively only after a successful upload, so a broken offsite path never costs the local copies.
+
+### Schedules (systemd timers)
+
+| Timer | Schedule | What runs |
+|-------|----------|-----------|
+| `mailyte-backup-full.timer` | Daily at 02:30 | `backup.sh --full` |
+| `mailyte-backup-incremental.timer` | Hourly at :15 | `backup.sh --incremental` (MySQL binlog + new mail) |
+| `mailyte-mail-sync.timer` | Every 15 minutes | `scripts/mail-sync.sh` (continuous Maildir sync) |
 
 ### What gets backed up
 
-| Component | Method | Contents |
-|-----------|--------|----------|
-| **MySQL database** | `mysqldump` | All tables -- organizations, domains, mailboxes, quotas, tracking data, templates, rate limit configs |
-| **Mail filesystem** | Filesystem copy/tar | All maildirs under `/var/mail/vhosts` |
-| **Configuration** | File copy | Postfix, Dovecot, Rspamd config files |
-| **Attachments** | Filesystem copy/tar | Stored attachments in `/storage/attachments` |
+| Component | Method |
+|-----------|--------|
+| **MySQL** | `mysqldump` (full) and binlog capture (incremental), exec'd inside the mysql container |
+| **Redis** | Snapshot |
+| **Mail storage** | `/var/mail/vhosts` maildirs (full + new-mail incremental) |
+| **Secrets** | `secrets/` — always encrypted; `--no-encrypt` refuses to run with secrets included |
+| **DKIM keys / SSL certs** | `storage/dkim_keys`, `storage/ssl_certs`, `storage/ssl_private` |
+| **Configuration** | Postfix/Dovecot/Rspamd config files |
 
-### What does NOT get backed up automatically
+### What does NOT get backed up
 
-- **Redis data** -- Counters and caches are ephemeral. After a restore, rate limit counters reset to zero and caches rebuild themselves.
-- **Qdrant vector database** -- The RAG search index is not included in the default backup. It can be rebuilt by re-indexing emails after a restore.
-- **Let's Encrypt certificates** -- Certificates are regenerated automatically on startup via the cert manager.
+- **Qdrant vector data** — the RAG index is rebuildable by re-indexing.
+- **Rate-limit counters** — ephemeral by design; they reset and re-accumulate.
+
+Separately from backups, the [Archiver](archiving.md) continuously stores every accepted message in encrypted S3 within seconds of delivery — that is what protects mail written *between* backup runs.
 
 ## Configuration
 
-### Backup schedule
+Local behavior comes from the environment; everything offsite comes from **`secrets/dr.env`** (read by `scripts/lib/dr_common.sh`):
+
+```bash
+# secrets/dr.env
+S3_BUCKET=mailyte-dr
+S3_PREFIX=mailyte/backups
+S3_ENDPOINT_URL=            # empty for AWS; set for MinIO/R2/B2
+AWS_ACCESS_KEY_ID=...
+AWS_SECRET_ACCESS_KEY=...
+DR_AGE_RECIPIENT=age1...    # PUBLIC key only — the identity never lands on this host
+```
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `BACKUP_ENABLED` | `true` | Enable automated backups |
-| `BACKUP_SCHEDULE` | `0 2 * * *` | Cron expression (default: 2am daily) |
-| `BACKUP_RETENTION_DAYS` | `30` | Days to keep local backups |
-| `BACKUP_COMPRESSION` | `gzip` | Compression algorithm |
+| `BACKUP_DIR` | `<project_root>/storage/backups` | Local backup destination |
+| `BACKUP_RETENTION_FULLS` | `3` | Local full backups kept once offsite works |
+| `BACKUP_RETENTION_DAYS` | `30` | Age-based prune fallback when offsite is down |
+| `DB_PASSWORD`, `DB_NAME`, `MAIL_DATA_DIR` | — | Component settings |
 
-### Cloud sync
+!!! warning "Offsite is opt-in and must be verified"
+    Without a populated `secrets/dr.env` (S3 bucket + credentials + age recipient), backups stay on the same server they protect. Encryption uses age in public-key mode on purpose: a compromised host can *create* backups but never *read* them. Check `aws s3 ls` and the `backup_history` table (surfaced at the archiver's `GET /backup/history` and as freshness gauges in the monitoring service) to confirm uploads are actually happening.
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `CLOUD_SYNC_ENABLED` | `false` | Enable cloud upload |
-| `CLOUD_SYNC_PROVIDER` | `s3` | Provider: `s3`, `azure`, or `gcs` |
-| `CLOUD_PROVIDER` | `aws` | Cloud provider selection |
+## Script usage
 
-#### AWS S3
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `AWS_ACCESS_KEY_ID` | *(required)* | AWS access key |
-| `AWS_SECRET_ACCESS_KEY` | *(required)* | AWS secret key |
-| `AWS_DEFAULT_REGION` | `eu-west-2` | AWS region |
-| `AWS_BUCKET` | `development-local-1` | S3 bucket name |
-| `AWS_S3_PREFIX` | `mailyte` | Key prefix in bucket |
-
-#### Azure Blob Storage
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `AZURE_STORAGE_ACCOUNT` | *(required)* | Azure storage account name |
-| `AZURE_STORAGE_KEY` | *(required)* | Azure storage key |
-| `AZURE_CONTAINER` | *(required)* | Blob container name |
-
-#### Google Cloud Storage
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `GCS_BUCKET` | *(required)* | GCS bucket name |
-| `GCS_CREDENTIALS_FILE` | *(required)* | Path to service account JSON |
+```bash
+./scripts/backup.sh --full            # everything (default)
+./scripts/backup.sh --incremental     # MySQL binlog + new mail only
+./scripts/backup.sh --mysql-only | --redis-only | --mail-only | --secrets-only | --config-only
+./scripts/backup.sh --pre-deploy      # DB + config, local only (used by deployment/deploy.sh)
+./scripts/backup.sh --verify          # verify existing backups
+./scripts/backup.sh --no-upload       # skip S3 even if configured
+```
 
 ## Performing a restore
 
 !!! danger "Restores are destructive"
-    Restoring from a backup will overwrite current data. Always verify you're restoring the right backup and consider taking a fresh backup of the current state first.
+    Restoring overwrites current data. Verify which backup you're restoring, and take a fresh backup of the current state first.
 
-### Restore the database
+Use `scripts/restore.sh` (and `scripts/lib/restore_organization.sh` for per-org restores). To rehearse the whole path without touching production, `scripts/dr-drill.sh` runs a disaster-recovery drill against the `deployment/dr-local` environment.
 
-```bash
-# Find your backup
-ls /backup/mysql/
-
-# Decompress and restore
-gunzip < /backup/mysql/mailserver_2026-03-25_020000.sql.gz | mysql -u root -p mailserver
-```
-
-### Restore the mail filesystem
+Manual database restore, if you need it:
 
 ```bash
-# Stop Dovecot first
-supervisorctl stop dovecot
-
-# Restore maildirs
-tar xzf /backup/mail/vhosts_2026-03-25_020000.tar.gz -C /var/mail/
-
-# Fix permissions
-chown -R vmail:vmail /var/mail/vhosts
-
-# Restart Dovecot
-supervisorctl start dovecot
-```
-
-### Restore from cloud
-
-```bash
-# Download from S3
-aws s3 cp s3://your-bucket/mailyte/backups/2026-03-25/ /tmp/restore/ --recursive
-
-# Then follow the local restore steps above
+ls storage/backups/                      # find the run
+# decrypt (needs the age identity, which lives OFF this host)
+age -d -i dr_identity.txt < mysql_full_...sql.gz.age | gunzip | \
+  docker exec -i mysql mysql -u root -p"$MYSQL_ROOT_PASSWORD" mailserver
 ```
 
 ### Post-restore checklist
 
-After restoring:
-
-1. **Verify Postfix can deliver.** Send a test email.
-2. **Verify Dovecot can serve.** Log in via IMAP.
-3. **Check DNS records.** SPF, DKIM, DMARC should still be valid.
-4. **Rebuild RAG index** if you use AI search: re-index via the RAG admin API.
-5. **Rate limit counters are reset.** This is expected -- they'll accumulate naturally.
-6. **Check cron is running.** Make sure backups resume on schedule.
-
-## Monitoring backups
-
-The health monitor tracks backup status. If a scheduled backup fails, you'll get a webhook notification. You can also check manually:
-
-```bash
-# Check the last backup timestamp
-ls -lt /backup/mysql/ | head -5
-
-# Verify cloud sync
-aws s3 ls s3://your-bucket/mailyte/backups/ --recursive | tail -5
-```
+1. **Verify Postfix delivers** — send a test message.
+2. **Verify Dovecot serves** — log in via IMAP. Remember stored mail is mail_crypt ciphertext; the global key pair (`/etc/dovecot/mail_crypt/`) must be restored too or every mailbox reads as empty/corrupt.
+3. **Check DKIM/SSL keys** are back in `storage/` — outbound signing and TLS depend on them.
+4. **Rebuild the RAG index** if you use AI search.
+5. **Rate limit counters reset** — expected.
+6. **Confirm the timers are active**: `systemctl list-timers 'mailyte-*'`.
 
 ## Things to know
 
-- **Backups run at 2am by default.** This is a cron expression (`0 2 * * *`). Change it to a time when your server has low load. Backups are I/O-intensive, especially the filesystem copy.
+- **The age identity must live off-server.** `scripts/escrow-secrets.sh` exists to escrow the key material; a backup you can't decrypt because the only identity copy died with the server is not a backup.
 
-- **Cloud sync is optional but strongly recommended.** Local backups protect against software failures and accidental deletions. Cloud backups protect against hardware failures, data center outages, and everything else.
+- **Verification happens before encryption on every run** — the script reads inside the archives it just wrote. `--verify` re-checks existing runs.
 
-- **Retention is managed automatically.** Local backups older than `BACKUP_RETENTION_DAYS` are deleted by the cleanup job. Cloud backups follow the same policy unless your cloud provider has its own lifecycle rules.
+- **`--pre-deploy` is your rollback point.** `deployment/deploy.sh` snapshots the database and config before each release.
 
-- **Large mail stores take time to back up.** If you have hundreds of gigabytes of mail data, the filesystem backup could take hours. Consider incremental backup strategies for very large deployments (not yet built into the default backup, but you can script rsync-based incrementals).
+- **Only S3-compatible offsite is supported.** The upload path uses the AWS CLI against `S3_ENDPOINT_URL` — AWS, MinIO, Cloudflare R2, Backblaze B2. There is no Azure Blob or GCS support.
 
-- **S3 is used for more than backups.** The `AWS_S3_PREFIX=mailyte` setting puts backups under the `mailyte/` prefix in your bucket. Email file storage and attachments also use S3 (in production). Keep your bucket organized and use lifecycle rules to manage costs.
-
-- **Test your restores.** A backup you've never tested restoring is a backup you don't actually have. Periodically spin up a test instance and verify the restore process works end to end.
+- **Test your restores.** `scripts/dr-drill.sh` exists precisely so the restore path is exercised regularly, not discovered during an incident.

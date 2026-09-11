@@ -1,286 +1,106 @@
 # Backup Strategies
 
-What to back up, how often, and where to store it — because the question isn't *if* you'll need a backup, it's *when*.
+What gets backed up, how often, and where it goes — because the question isn't *if* you'll need a backup, it's *when*.
 
-## What Needs Backing Up
+Mailyte ships a complete backup system: `scripts/backup.sh` (the engine), systemd timers (the schedule), age public-key encryption (the confidentiality), S3 upload (the offsite copy), and `scripts/restore.sh` (the way back). Do not build your own mysqldump cron next to it.
 
-| Data | Priority | Size | Changes How Often |
-|------|----------|------|-------------------|
-| MySQL database | Critical | Medium | Constantly |
-| Mail storage (Maildir) | Critical | Large | Constantly |
-| Configuration files | High | Small | Rarely |
-| TLS certificates | High | Tiny | Every 60-90 days |
-| DKIM keys | High | Tiny | Rarely |
-| Rspamd learned data | Medium | Small | Daily |
-| Docker Compose files | Medium | Tiny | Occasionally |
-| `.env` file | High | Tiny | Occasionally |
+## What Gets Backed Up
 
-Things you don't need to back up:
-- Redis data (rebuilt from the database on restart)
-- Postfix queue (transient by nature)
-- Prometheus data (nice to have, not critical)
-- Docker images (pulled from registry)
+A `--full` run covers:
 
-## Backup Schedule
+| Data | Priority | Notes |
+|------|----------|-------|
+| MySQL database | Critical | Full dump; `--incremental` ships binlogs between fulls |
+| Mail storage (`storage/mail_data/` Maildirs) | Critical | Incremental runs only pick up new mail |
+| Redis data | Medium | Rate-limit and cache state |
+| `secrets/` | Critical | Always encrypted — `--no-encrypt` refuses to run when secrets are included |
+| DKIM keys (`storage/dkim_keys/`) | High | Encrypted under the KEK on disk already |
+| SSL certificates (`storage/ssl_certs/`, `storage/ssl_private/`) | High | Reissuable, but restoring beats reissuing mid-incident |
+| Configuration (`config/`, compose files) | High | |
 
-| Backup Type | Frequency | Retention |
-|-------------|-----------|-----------|
-| MySQL full dump | Daily | 30 days |
-| MySQL binary log | Continuous | 7 days |
-| Mail storage incremental | Daily | 30 days |
-| Mail storage full | Weekly | 90 days |
-| Configuration snapshot | On change + weekly | 90 days |
+Things deliberately *not* backed up: the Postfix queue (transient), Prometheus data (nice to have), Docker images (rebuilt from source).
 
-## MySQL Backup
+## The Schedule: systemd Timers, Not Cron
 
-### Option 1: mysqldump (Simple, good for small databases)
+Backups run from **host systemd**, not from a container — a backup container that stops with `docker compose down` is missing exactly when it's needed.
 
 ```bash
-#!/bin/bash
-# scripts/backup-mysql.sh
-
-BACKUP_DIR="/opt/mailyte/backups/mysql"
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-BACKUP_FILE="${BACKUP_DIR}/mailyte_${TIMESTAMP}.sql.gz"
-
-mkdir -p "$BACKUP_DIR"
-
-# Dump and compress
-docker compose exec -T mysql mysqldump \
-  -u root -p"${MYSQL_ROOT_PASSWORD}" \
-  --single-transaction \
-  --routines \
-  --triggers \
-  --databases mailyte \
-  | gzip > "$BACKUP_FILE"
-
-# Verify the backup isn't empty
-if [ -s "$BACKUP_FILE" ]; then
-  echo "$(date): MySQL backup created: $BACKUP_FILE ($(du -sh "$BACKUP_FILE" | cut -f1))"
-else
-  echo "$(date): ERROR: MySQL backup is empty!"
-  rm -f "$BACKUP_FILE"
-  exit 1
-fi
-
-# Remove backups older than 30 days
-find "$BACKUP_DIR" -name "*.sql.gz" -mtime +30 -delete
+sudo ./deployment/systemd/install-timers.sh           # installs + enables
+sudo ./deployment/systemd/install-timers.sh --status  # verify
 ```
 
-### Option 2: Percona XtraBackup (Better for large databases)
+| Timer | Runs | Does |
+|-------|------|------|
+| `mailyte-backup-full.timer` | Daily at 02:30 | `backup.sh --full` |
+| `mailyte-backup-incremental.timer` | Hourly at :15 | `backup.sh --incremental` (MySQL binlog + new mail) |
+| `mailyte-mail-sync.timer` | Every 15 min | Near-real-time Maildir state sync to S3 |
+
+On top of the schedule, `deployment/deploy.sh` takes its own pre-deploy backup on every release — a database dump whenever a migration is pending, a local config backup otherwise.
+
+## Backup Modes
 
 ```bash
-# Install xtrabackup in the MySQL container
-docker compose exec mysql apt-get install -y percona-xtrabackup-80
-
-# Full backup
-docker compose exec mysql xtrabackup \
-  --backup \
-  --target-dir=/var/backups/mysql/full \
-  --user=root \
-  --password="${MYSQL_ROOT_PASSWORD}"
-
-# Incremental backup (based on the last full)
-docker compose exec mysql xtrabackup \
-  --backup \
-  --target-dir=/var/backups/mysql/inc1 \
-  --incremental-basedir=/var/backups/mysql/full \
-  --user=root \
-  --password="${MYSQL_ROOT_PASSWORD}"
+./scripts/backup.sh --full            # everything (the default)
+./scripts/backup.sh --incremental     # MySQL binlog + new mail since last run
+./scripts/backup.sh --mysql-only      # one component only; also:
+                                      # --redis-only, --mail-only,
+                                      # --secrets-only, --config-only
+./scripts/backup.sh --pre-deploy      # database + config, local only (used by deploy.sh)
+./scripts/backup.sh --verify          # verify existing backups
+./scripts/backup.sh --no-upload       # skip S3 even if configured
 ```
 
-## Mail Storage Backup
+Each run writes a timestamped set under `storage/backups/<YYYYMMDD_HHMMSS>/` with a `MANIFEST.json`, in a strict order: components → verify → manifest → encrypt → upload → prune. Verification happens *before* encryption (you cannot read inside an encrypted tar), and pruning happens last — local copies are only pruned aggressively once the upload succeeded, so a broken offsite path never costs you the local copies too.
 
-### Using rsync (Incremental)
+Retention: the last `BACKUP_RETENTION_FULLS` (default 3) local full sets are kept once offsite works, with an age-based fallback of `BACKUP_RETENTION_DAYS` (default 30) when it does not.
+
+## Offsite Configuration: `secrets/dr.env`
+
+Everything offsite-related lives in `secrets/dr.env` (mode 600, never committed, and in `secrets/` — not `config/` — because deploys replace `config/` while `secrets/` persists):
+
+```dotenv
+# secrets/dr.env
+S3_BUCKET=your-dr-bucket
+S3_PREFIX=mailyte/backups
+S3_ENDPOINT_URL=            # empty for real AWS; set for MinIO/R2/B2
+AWS_ACCESS_KEY_ID=...       # a backup-writer principal: Put, no Delete
+AWS_SECRET_ACCESS_KEY=...
+AWS_DEFAULT_REGION=eu-west-1
+DR_AGE_RECIPIENT=age1...    # PUBLIC key only -- the identity never lands on this host
+```
+
+### Why age public-key encryption
+
+Backups are encrypted client-side to `DR_AGE_RECIPIENT` before upload. Because only the *public* key exists on the server, a fully compromised host can write new backups but **cannot read any backup — including its own**. The matching private identity exists only in escrow, off this machine.
+
+### Escrow the unrecoverable secrets
+
+Some things a backup cannot recreate: the age identity itself, `secrets/encryption_kek` (protects DKIM/PGP/S-MIME keys), Dovecot mail_crypt keys, `.env`. Bundle and store them off-server:
 
 ```bash
-#!/bin/bash
-# scripts/backup-mail.sh
-
-BACKUP_DIR="/opt/mailyte/backups/mail"
-TIMESTAMP=$(date +%Y%m%d)
-MAIL_VOLUME=$(docker volume inspect mailyte_mail-data --format '{{ .Mountpoint }}')
-
-mkdir -p "$BACKUP_DIR"
-
-# Incremental backup with rsync
-rsync -av --delete \
-  "$MAIL_VOLUME/" \
-  "$BACKUP_DIR/latest/"
-
-# Create a dated snapshot using hard links (saves space)
-cp -al "$BACKUP_DIR/latest" "$BACKUP_DIR/snapshot_${TIMESTAMP}"
-
-# Remove snapshots older than 30 days
-find "$BACKUP_DIR" -maxdepth 1 -name "snapshot_*" -mtime +30 -exec rm -rf {} +
-
-echo "$(date): Mail backup complete"
+./scripts/escrow-secrets.sh
 ```
 
-### Using tar (Full archive)
-
-```bash
-# Weekly full backup
-MAIL_VOLUME=$(docker volume inspect mailyte_mail-data --format '{{ .Mountpoint }}')
-tar czf /opt/mailyte/backups/mail/mail_full_$(date +%Y%m%d).tar.gz \
-  -C "$MAIL_VOLUME" .
-```
-
-## Configuration Backup
-
-```bash
-#!/bin/bash
-# scripts/backup-config.sh
-
-BACKUP_DIR="/opt/mailyte/backups/config"
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-
-mkdir -p "$BACKUP_DIR"
-
-tar czf "$BACKUP_DIR/config_${TIMESTAMP}.tar.gz" \
-  --exclude='.env' \
-  docker-compose.yml \
-  docker-compose.monitoring.yml \
-  config/ \
-  monitoring/ \
-  scripts/
-
-# Back up .env separately (encrypted)
-gpg --symmetric --cipher-algo AES256 \
-  --output "$BACKUP_DIR/env_${TIMESTAMP}.gpg" \
-  .env
-
-# Keep 90 days
-find "$BACKUP_DIR" -mtime +90 -delete
-
-echo "$(date): Config backup complete"
-```
-
-## Remote Storage
-
-Don't keep backups only on the same server. Use remote storage.
-
-### Amazon S3
-
-```bash
-#!/bin/bash
-# scripts/sync-to-s3.sh
-
-AWS_BUCKET="s3://your-bucket/mailyte-backups"
-BACKUP_DIR="/opt/mailyte/backups"
-
-# Sync all backups to S3
-aws s3 sync "$BACKUP_DIR" "$AWS_BUCKET" \
-  --storage-class STANDARD_IA \
-  --delete
-
-# For older backups, use Glacier
-aws s3api put-bucket-lifecycle-configuration \
-  --bucket your-bucket \
-  --lifecycle-configuration '{
-    "Rules": [{
-      "ID": "archive-old-backups",
-      "Filter": {"Prefix": "mailyte-backups/"},
-      "Status": "Enabled",
-      "Transitions": [{
-        "Days": 30,
-        "StorageClass": "GLACIER"
-      }],
-      "Expiration": {"Days": 365}
-    }]
-  }'
-```
-
-### Azure Blob Storage
-
-```bash
-# Install Azure CLI
-# az login
-
-az storage blob upload-batch \
-  --destination mailyte-backups \
-  --source /opt/mailyte/backups \
-  --account-name yourstorageaccount \
-  --overwrite
-```
-
-### Rsync to Remote Server
-
-```bash
-# Sync to a backup server
-rsync -avz --delete \
-  /opt/mailyte/backups/ \
-  backup-user@backup-server:/backups/mailyte/
-```
-
-## Full Backup Script
-
-Wraps everything together:
-
-```bash
-#!/bin/bash
-# scripts/backup.sh — Full Mailyte backup
-
-set -e
-LABEL="${1:-daily}"
-BACKUP_ROOT="/opt/mailyte/backups"
-LOG="/var/log/mailyte-backup.log"
-
-log() { echo "$(date '+%Y-%m-%d %H:%M:%S') $1" | tee -a "$LOG"; }
-
-log "Starting $LABEL backup"
-
-# 1. MySQL
-log "Backing up MySQL..."
-./scripts/backup-mysql.sh >> "$LOG" 2>&1
-
-# 2. Mail storage
-log "Backing up mail storage..."
-./scripts/backup-mail.sh >> "$LOG" 2>&1
-
-# 3. Configuration
-log "Backing up configuration..."
-./scripts/backup-config.sh >> "$LOG" 2>&1
-
-# 4. Sync to remote (uncomment the one you use)
-# log "Syncing to S3..."
-# ./scripts/sync-to-s3.sh >> "$LOG" 2>&1
-
-# log "Syncing to remote server..."
-# rsync -avz $BACKUP_ROOT/ backup-user@backup-server:/backups/mailyte/ >> "$LOG" 2>&1
-
-log "Backup complete. Total size: $(du -sh $BACKUP_ROOT | cut -f1)"
-```
-
-Schedule it:
-
-```bash
-# Daily at 2 AM
-echo "0 2 * * * root /opt/mailyte/scripts/backup.sh daily >> /var/log/mailyte-backup.log 2>&1" \
-  | sudo tee /etc/cron.d/mailyte-backup
-
-# Weekly full on Sundays at 1 AM
-echo "0 1 * * 0 root /opt/mailyte/scripts/backup.sh weekly >> /var/log/mailyte-backup.log 2>&1" \
-  | sudo tee -a /etc/cron.d/mailyte-backup
-```
+Verify the escrow bundle exists after any secret changes — a lost `encryption_kek` or mail_crypt key is permanent data loss no matter how many backups you have.
 
 ## Verifying Backups
 
 A backup you haven't tested is not a backup.
 
 ```bash
-# Test MySQL restore to a temporary database
-docker run --rm -v /opt/mailyte/backups/mysql:/backups mysql:8.0 \
-  bash -c "
-    mysqld --skip-grant-tables &
-    sleep 10
-    zcat /backups/mailyte_latest.sql.gz | mysql
-    mysql -e 'SELECT COUNT(*) FROM mailyte.users;'
-    echo 'Restore test passed'
-  "
+# Built-in verification of existing sets
+./scripts/backup.sh --verify
 
-# Test config archive
-tar tzf /opt/mailyte/backups/config/config_latest.tar.gz | head -20
+# List what exists (local and, with configuration, S3)
+./scripts/restore.sh --list
+
+# Rehearse a restore without touching anything
+./scripts/restore.sh --latest --dry-run
+
+# Full disaster-recovery drill against a local throwaway environment
+./scripts/dr-drill.sh
 ```
 
-> **Tip:** Schedule a monthly "restore drill" where you restore from backup to a test environment. It takes an hour and saves you days of panic during a real disaster.
+`monitoring/prometheus/rules/backup_alerts.yml` alerts when backups go stale — make sure Alertmanager routing is configured so those alerts reach a human.
+
+> **Tip:** Schedule a monthly restore drill. It takes an hour and saves you days of panic during a real disaster. The [Disaster Recovery](disaster-recovery.md) page covers the restore side in full.

@@ -1,7 +1,7 @@
 
 # Certificate Manager
 
-The Certificate Manager is a critical component of the Mailyte Mail Server that handles SSL/TLS certificate management, including automated provisioning, renewal, and validation for secure email communication.
+The Certificate Manager is a critical component of the Enterprise Mail Server that handles SSL/TLS certificate management, including automated provisioning, renewal, and validation for secure email communication.
 
 ## Overview
 

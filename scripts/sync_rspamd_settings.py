@@ -40,6 +40,13 @@ logger = logging.getLogger("rspamd-sync")
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
 
+# The multimap sender/domain lists MUST land in the Redis db the rspamd
+# multimap module reads them from: mailer/rspamd/config/local.d/multimap.conf
+# maps are "redis://redis:6379/3/org_sender_whitelist_${rcpt_domain}" etc.
+# The settings module (settings.conf) uses the default db 0. Writing both to
+# db 0 (the old behaviour) meant per-org sender lists never matched anything.
+MULTIMAP_REDIS_DB = 3
+
 DB_HOST = os.getenv("DB_HOST", "mysql")
 DB_PORT = int(os.getenv("DB_PORT", 3306))
 DB_NAME = os.getenv("DB_NAME", "mailserver")
@@ -55,8 +62,8 @@ DEFAULT_GREYLIST_THRESHOLD = 4
 DEFAULT_REWRITE_THRESHOLD = 10
 
 
-def get_redis():
-    return redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0, decode_responses=True)
+def get_redis(db: int = 0):
+    return redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=db, decode_responses=True)
 
 
 def get_db():
@@ -65,17 +72,23 @@ def get_db():
     )
 
 
-def sync_all_orgs(r, conn):
-    """Sync settings for all active organizations."""
+def sync_all_orgs(r, r_multimap, conn):
+    """Sync settings for all active organizations.
+
+    r writes the settings-module keys (db 0); r_multimap writes the
+    sender/domain list keys the multimap module reads (db 3)."""
     cursor = conn.cursor(dictionary=True)
 
-    # Get all active organizations with their domains
+    # Get all active organizations with their domains. organizations has an
+    # `active` tinyint, not a `status` column (0001_baseline) -- the old
+    # `o.status = 'active'` filter crashed the whole sync with
+    # "Unknown column" before anything was written.
     cursor.execute("""
         SELECT o.id AS org_id, o.name AS org_name, o.settings AS org_settings,
                GROUP_CONCAT(d.domain) AS domains
         FROM organizations o
         JOIN domains d ON d.organization_id = o.id AND d.active = 1
-        WHERE o.status = 'active'
+        WHERE o.active = 1
         GROUP BY o.id
     """)
 
@@ -136,7 +149,8 @@ def sync_all_orgs(r, conn):
             active_keys.add(settings_key)
             synced += 1
 
-        # Sync sender whitelists/blacklists to Redis multimap keys
+        # Sync sender whitelists/blacklists to Redis multimap keys -- in the
+        # db multimap.conf actually reads (see MULTIMAP_REDIS_DB above).
         sender_whitelist = spam_settings.get("sender_whitelist", [])
         sender_blacklist = spam_settings.get("sender_blacklist", [])
         domain_whitelist = spam_settings.get("domain_whitelist", [])
@@ -145,35 +159,35 @@ def sync_all_orgs(r, conn):
             # Sender whitelist
             wl_key = f"org_sender_whitelist_{domain}"
             if sender_whitelist:
-                r.delete(wl_key)
+                r_multimap.delete(wl_key)
                 for addr in sender_whitelist:
-                    r.sadd(wl_key, addr)
+                    r_multimap.sadd(wl_key, addr)
             else:
-                r.delete(wl_key)
+                r_multimap.delete(wl_key)
 
             # Sender blacklist
             bl_key = f"org_sender_blacklist_{domain}"
             if sender_blacklist:
-                r.delete(bl_key)
+                r_multimap.delete(bl_key)
                 for addr in sender_blacklist:
-                    r.sadd(bl_key, addr)
+                    r_multimap.sadd(bl_key, addr)
             else:
-                r.delete(bl_key)
+                r_multimap.delete(bl_key)
 
             # Domain whitelist
             dwl_key = f"org_domain_whitelist_{domain}"
             if domain_whitelist:
-                r.delete(dwl_key)
+                r_multimap.delete(dwl_key)
                 for d in domain_whitelist:
-                    r.sadd(dwl_key, d)
+                    r_multimap.sadd(dwl_key, d)
             else:
-                r.delete(dwl_key)
+                r_multimap.delete(dwl_key)
 
     cursor.close()
     return synced
 
 
-def sync_single_org(r, conn, org_id):
+def sync_single_org(r, r_multimap, conn, org_id):
     """Sync settings for a single organization."""
     cursor = conn.cursor(dictionary=True)
     cursor.execute(
@@ -182,7 +196,7 @@ def sync_single_org(r, conn, org_id):
                GROUP_CONCAT(d.domain) AS domains
         FROM organizations o
         JOIN domains d ON d.organization_id = o.id AND d.active = 1
-        WHERE o.id = %s AND o.status = 'active'
+        WHERE o.id = %s AND o.active = 1
         GROUP BY o.id
     """,
         (org_id,),
@@ -196,7 +210,7 @@ def sync_single_org(r, conn, org_id):
         return 0
 
     # Delegate to full sync logic (it handles a list, so wrap in one)
-    return sync_all_orgs(r, conn)
+    return sync_all_orgs(r, r_multimap, conn)
 
 
 def main():
@@ -219,8 +233,9 @@ def main():
         while True:
             try:
                 r = get_redis()
+                r_multimap = get_redis(MULTIMAP_REDIS_DB)
                 conn = get_db()
-                count = sync_all_orgs(r, conn)
+                count = sync_all_orgs(r, r_multimap, conn)
                 conn.close()
                 logger.info(f"Synced {count} organization settings to Rspamd")
             except Exception as e:
@@ -228,11 +243,12 @@ def main():
             time.sleep(args.interval)
     else:
         r = get_redis()
+        r_multimap = get_redis(MULTIMAP_REDIS_DB)
         conn = get_db()
         if args.org:
-            count = sync_single_org(r, conn, args.org)
+            count = sync_single_org(r, r_multimap, conn, args.org)
         else:
-            count = sync_all_orgs(r, conn)
+            count = sync_all_orgs(r, r_multimap, conn)
         conn.close()
         logger.info(f"Synced {count} organization settings to Rspamd")
 

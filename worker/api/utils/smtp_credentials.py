@@ -16,7 +16,7 @@ import logging
 import os
 import re
 import secrets
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import requests
 from fastapi import Request
@@ -80,7 +80,7 @@ def parse_expires_at(value):
     except ValueError:
         return None, f"'{value}' is not a valid ISO-8601 timestamp"
     if parsed.tzinfo is not None:
-        parsed = parsed.astimezone(timezone.utc).replace(tzinfo=None)
+        parsed = parsed.astimezone(UTC).replace(tzinfo=None)
     if parsed <= datetime.utcnow():
         return None, "expires_at must be in the future"
     return parsed, None

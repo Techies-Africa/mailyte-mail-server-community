@@ -23,8 +23,10 @@ from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel, Field
+from schemas.common import ErrorResponse
 from utils.auth import require_api_key
 from utils.db import get_db
+from utils.managesieve import ManageSieveClient, ManageSieveError
 
 project_root = Path(__file__).parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
@@ -41,15 +43,14 @@ def _email_belongs_to_org(db, ctx, email: str) -> bool:
     """Check that the mailbox is reachable by the caller.
 
     Every handler below previously took `email` as a bare query parameter
-    with no authentication and no ownership check at all -- some did not
-    even check the account existed. Sieve scripts decide where mail goes, so
-    an unauthenticated caller could file any mailbox's incoming mail into a
-    forward, or discard it, just by naming the address.
+    with no ownership check at all (some didn't even check the account
+    existed) -- any authenticated caller could read/write/delete Sieve
+    filters for any mailbox in any organization just by naming its email.
 
     Organization scope requires the mailbox to be its own. Platform scope
-    reaches every organization (ADR-002 SS8) but the account must still exist
-    and be active, so a bad address is a 404 for operators too. This is the
-    single choke point all six filter handlers share.
+    reaches every organization (ADR-002 SS8) but the account must still
+    exist and be active, so a bad address is a 404 for operators too. This
+    is the single choke point all six filter handlers share.
     """
     cursor = db.cursor(dictionary=True)
     sql = "SELECT id FROM email_accounts WHERE email = %s AND status = 'active'"
@@ -151,18 +152,19 @@ FILTER_TEMPLATES = [
 # ---------------------------------------------------------------------------
 # Helper: Sieve file paths
 # ---------------------------------------------------------------------------
-def _get_sieve_dir(email: str) -> str:
-    """Get the Sieve directory for a user email address."""
-    domain = email.split("@")[1]
-    local_part = email.split("@")[0]
-    return os.path.join(VHOSTS_DIR, domain, local_part, "sieve")
+def _sieve_error(exc: ManageSieveError) -> HTTPException:
+    """
+    Turn a Sieve failure into the right HTTP status.
 
-
-def _get_active_link(email: str) -> str:
-    """Get the active Sieve symlink path."""
-    domain = email.split("@")[1]
-    local_part = email.split("@")[0]
-    return os.path.join(VHOSTS_DIR, domain, local_part, ".dovecot.sieve")
+    A refused PUTSCRIPT is almost always the compiler rejecting the user's
+    filter, which is a 400 with the compiler's own diagnostic -- not a 500.
+    A connection or auth failure is genuinely ours, so that stays a 502.
+    """
+    message = str(exc)
+    if message.startswith("Cannot reach") or "authentication failed" in message.lower():
+        logger.error("Sieve backend unavailable: %s", message)
+        return HTTPException(status_code=502, detail="Filter service is unavailable")
+    return HTTPException(status_code=400, detail=message)
 
 
 # ---------------------------------------------------------------------------
@@ -175,47 +177,45 @@ def _get_active_link(email: str) -> str:
     response_model=list[SieveScriptResponse],
     summary="List Sieve filter scripts",
     description="List all Sieve scripts for a user, including each script's content, size, creation date, and whether it is the currently active script.",
+    responses={
+        404: {
+            "model": ErrorResponse,
+            "description": "Account not found (email doesn't belong to the caller's organization)",
+        },
+        500: {
+            "model": ErrorResponse,
+            "description": "Unhandled internal error (e.g. database connectivity or filesystem failure)",
+        },
+    },
 )
 @require_api_key("read")
 async def list_filters(
-    request: Request,
-    email: str = Query(..., description="User email address"),
-    db=Depends(get_db),
+    request: Request, email: str = Query(..., description="User email address"), db=Depends(get_db)
 ):
     """List all Sieve scripts for a user."""
     ctx = request.state.auth_context
     if not _email_belongs_to_org(db, ctx, email):
         raise HTTPException(status_code=404, detail=f"Account {email} not found")
 
-    sieve_dir = _get_sieve_dir(email)
-    active_link = _get_active_link(email)
-    scripts = []
-
-    # Get the active script name
-    active_name = None
-    if os.path.islink(active_link):
-        active_target = os.readlink(active_link)
-        active_name = os.path.basename(active_target).replace(".sieve", "")
-
-    if os.path.isdir(sieve_dir):
-        for f in os.listdir(sieve_dir):
-            if f.endswith(".sieve"):
-                name = f.replace(".sieve", "")
-                filepath = os.path.join(sieve_dir, f)
-                with open(filepath) as fh:
-                    content = fh.read()
-                stat = os.stat(filepath)
+    try:
+        with ManageSieveClient(email) as sieve:
+            scripts = []
+            for entry in sieve.list_scripts():
+                content = sieve.get_script(entry["name"]) or ""
                 scripts.append(
                     SieveScriptResponse(
-                        name=name,
+                        name=entry["name"],
                         content=content,
-                        active=(name == active_name),
-                        size=stat.st_size,
-                        created_at=datetime.fromtimestamp(stat.st_ctime).isoformat(),
+                        active=entry["active"],
+                        size=len(content.encode("utf-8")),
+                        # ManageSieve does not carry a creation time. Inventing
+                        # one from "now" would be worse than admitting it.
+                        created_at=None,
                     )
                 )
-
-    return scripts
+            return scripts
+    except ManageSieveError as exc:
+        raise _sieve_error(exc) from exc
 
 
 @router.get(
@@ -248,27 +248,20 @@ async def get_filter(
     if not _email_belongs_to_org(db, ctx, email):
         raise HTTPException(status_code=404, detail=f"Account {email} not found")
 
-    sieve_dir = _get_sieve_dir(email)
-    filepath = os.path.join(sieve_dir, f"{name}.sieve")
+    try:
+        with ManageSieveClient(email) as sieve:
+            content = sieve.get_script(name)
+            if content is None:
+                raise HTTPException(status_code=404, detail=f"Script '{name}' not found")
+            active_name = next((e["name"] for e in sieve.list_scripts() if e["active"]), None)
+    except ManageSieveError as exc:
+        raise _sieve_error(exc) from exc
 
-    if not os.path.exists(filepath):
-        raise HTTPException(status_code=404, detail=f"Script '{name}' not found")
-
-    with open(filepath) as f:
-        content = f.read()
-
-    active_link = _get_active_link(email)
-    active_name = None
-    if os.path.islink(active_link):
-        active_target = os.readlink(active_link)
-        active_name = os.path.basename(active_target).replace(".sieve", "")
-
-    stat = os.stat(filepath)
     return SieveScriptResponse(
         name=name,
         content=content,
         active=(name == active_name),
-        size=stat.st_size,
+        size=len(content.encode("utf-8")),
         created_at=datetime.fromtimestamp(stat.st_ctime).isoformat(),
     )
 
@@ -298,23 +291,16 @@ async def create_filter(
             status_code=400, detail="Script name must be alphanumeric (with hyphens/underscores)"
         )
 
-    sieve_dir = _get_sieve_dir(email)
-    os.makedirs(sieve_dir, exist_ok=True)
-
-    filepath = os.path.join(sieve_dir, f"{script.name}.sieve")
-    with open(filepath, "w") as f:
-        f.write(script.content)
-
-    # Set ownership (vmail:vmail = 5000:5000)
-    os.chown(filepath, 5000, 5000)
-
-    # If this script should be active, update the symlink
-    if script.active:
-        active_link = _get_active_link(email)
-        if os.path.exists(active_link) or os.path.islink(active_link):
-            os.unlink(active_link)
-        os.symlink(filepath, active_link)
-        os.lchown(active_link, 5000, 5000)
+    # Dovecot compiles the script as part of PUTSCRIPT, so an invalid filter
+    # is refused here with the compiler's own message rather than being
+    # stored and silently breaking this mailbox's delivery.
+    try:
+        with ManageSieveClient(email) as sieve:
+            sieve.put_script(script.name, script.content)
+            if script.active:
+                sieve.set_active(script.name)
+    except ManageSieveError as exc:
+        raise _sieve_error(exc) from exc
 
     dispatch_event(
         Events.FILTER_CREATED,
@@ -342,24 +328,17 @@ async def delete_filter(
     if not _email_belongs_to_org(db, ctx, email):
         raise HTTPException(status_code=404, detail=f"Account {email} not found")
 
-    sieve_dir = _get_sieve_dir(email)
-    filepath = os.path.join(sieve_dir, f"{name}.sieve")
-
-    if not os.path.exists(filepath):
-        raise HTTPException(status_code=404, detail=f"Script '{name}' not found")
-
-    # Check if this is the active script
-    active_link = _get_active_link(email)
-    if os.path.islink(active_link):
-        active_target = os.readlink(active_link)
-        if os.path.basename(active_target) == f"{name}.sieve":
-            os.unlink(active_link)
-
-    os.unlink(filepath)
-    # Also remove compiled version if exists
-    compiled = filepath + "c"  # .sievec
-    if os.path.exists(compiled):
-        os.unlink(compiled)
+    try:
+        with ManageSieveClient(email) as sieve:
+            existing = sieve.list_scripts()
+            if not any(e["name"] == name for e in existing):
+                raise HTTPException(status_code=404, detail=f"Script '{name}' not found")
+            # A script cannot be deleted while it is the active one.
+            if any(e["name"] == name and e["active"] for e in existing):
+                sieve.set_active(None)
+            sieve.delete_script(name)
+    except ManageSieveError as exc:
+        raise _sieve_error(exc) from exc
 
     dispatch_event(
         Events.FILTER_DELETED,
@@ -387,17 +366,13 @@ async def activate_filter(
     if not _email_belongs_to_org(db, ctx, email):
         raise HTTPException(status_code=404, detail=f"Account {email} not found")
 
-    sieve_dir = _get_sieve_dir(email)
-    filepath = os.path.join(sieve_dir, f"{name}.sieve")
-
-    if not os.path.exists(filepath):
-        raise HTTPException(status_code=404, detail=f"Script '{name}' not found")
-
-    active_link = _get_active_link(email)
-    if os.path.exists(active_link) or os.path.islink(active_link):
-        os.unlink(active_link)
-    os.symlink(filepath, active_link)
-    os.lchown(active_link, 5000, 5000)
+    try:
+        with ManageSieveClient(email) as sieve:
+            if not any(e["name"] == name for e in sieve.list_scripts()):
+                raise HTTPException(status_code=404, detail=f"Script '{name}' not found")
+            sieve.set_active(name)
+    except ManageSieveError as exc:
+        raise _sieve_error(exc) from exc
 
     dispatch_event(
         Events.FILTER_UPDATED,
@@ -425,7 +400,7 @@ async def manage_vacation(
 
     # Verify user exists and belongs to the caller's org. Inline rather than
     # via _email_belongs_to_org because this one also needs vacation_enabled,
-    # but the scope rule is identical: platform reaches every org (ADR-002
+    # but the scope rule is the same: platform reaches every org (ADR-002
     # SS8), the account must still exist and be active either way.
     cursor = db.cursor(dictionary=True)
     account_sql = (
@@ -474,20 +449,13 @@ async def manage_vacation(
             sieve += f"{indent}}}\n"
             conditions.pop()
 
-        # Save as vacation script
-        sieve_dir = _get_sieve_dir(email)
-        os.makedirs(sieve_dir, exist_ok=True)
-        filepath = os.path.join(sieve_dir, "vacation.sieve")
-        with open(filepath, "w") as f:
-            f.write(sieve)
-        os.chown(filepath, 5000, 5000)
-
-        # Activate it
-        active_link = _get_active_link(email)
-        if os.path.exists(active_link) or os.path.islink(active_link):
-            os.unlink(active_link)
-        os.symlink(filepath, active_link)
-        os.lchown(active_link, 5000, 5000)
+        # Save and activate the vacation script over ManageSieve.
+        try:
+            with ManageSieveClient(email) as client:
+                client.put_script("vacation", sieve)
+                client.set_active("vacation")
+        except ManageSieveError as exc:
+            raise _sieve_error(exc) from exc
 
     # Update database
     cursor.execute(

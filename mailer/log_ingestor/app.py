@@ -49,6 +49,7 @@ import time
 from base64 import b32encode
 from collections import OrderedDict
 from datetime import datetime, timedelta
+from email.header import decode_header
 from pathlib import Path
 
 import mysql.connector
@@ -212,7 +213,39 @@ def extract_subject(rest: str) -> str:
     head, sep, tail = value.rpartition(" from ")
     if sep and tail and " " not in tail.strip():
         value = head
-    return value.strip()[:1000]
+    return decode_mime_words(value.strip())[:1000]
+
+
+def decode_mime_words(value: str) -> str:
+    """Turn RFC 2047 encoded-words into the text they stand for.
+
+    A Subject header carrying anything outside ASCII is transmitted encoded,
+    so what Postfix logs -- and what we were storing verbatim -- looks like
+
+        =?utf-8?q?=F0=9F=8E=89_Your_GITEX50_discount_is_ready_=E2=80=94_claim?=
+
+    rather than "🎉 Your GITEX50 discount is ready — claim". Every activity
+    row for a sender using an emoji, an em dash or an accent was unreadable.
+    Plain-ASCII subjects were unaffected, which is why only some rows looked
+    broken.
+
+    Tolerant on purpose: this runs over log lines that Postfix may have
+    truncated mid-encoded-word, and a malformed or unknown-charset word must
+    not cost us the row. Anything that fails to decode is returned as it
+    arrived.
+    """
+    if "=?" not in value:
+        return value
+    try:
+        parts = []
+        for chunk, charset in decode_header(value):
+            if isinstance(chunk, bytes):
+                parts.append(chunk.decode(charset or "utf-8", errors="replace"))
+            else:
+                parts.append(chunk)
+        return "".join(parts)
+    except Exception:
+        return value
 
 
 def row_id(qid: str, recipient: str, status: str, ts: datetime) -> str:
@@ -221,9 +254,7 @@ def row_id(qid: str, recipient: str, status: str, ts: datetime) -> str:
     duplicate. char(26) matches the ULID column width the rest of the schema
     uses; base32 keeps it in the same alphabet family.
     """
-    digest = hashlib.sha256(
-        f"{qid}|{recipient}|{status}|{ts.isoformat()}".encode()
-    ).digest()
+    digest = hashlib.sha256(f"{qid}|{recipient}|{status}|{ts.isoformat()}".encode()).digest()
     return b32encode(digest).decode("ascii")[:26].upper()
 
 
@@ -313,7 +344,9 @@ class Ingestor:
         """
         try:
             cur = self.conn().cursor()
-            cur.execute("DELETE FROM email_bodies WHERE expires_at IS NOT NULL AND expires_at < NOW()")
+            cur.execute(
+                "DELETE FROM email_bodies WHERE expires_at IS NOT NULL AND expires_at < NOW()"
+            )
             if cur.rowcount:
                 logger.info("pruned %d expired message bodies", cur.rowcount)
             cur.close()
@@ -403,7 +436,9 @@ class Ingestor:
                 )
                 logger.warning(
                     "auto-suspended SMTP credential %s: %d/%d recent messages failed",
-                    username, failed, total,
+                    username,
+                    failed,
+                    total,
                 )
                 self._flush_dovecot_cache(username)
             cur.close()
@@ -431,8 +466,23 @@ class Ingestor:
         except Exception as exc:
             logger.error("doveadm cache flush failed for %s: %s", username, exc)
 
-    def record(self, *, qid, ts, sender, recipient, status, message_id,
-               size, relay, delays, dsn, detail, subject=None, sasl_username=None):
+    def record(
+        self,
+        *,
+        qid,
+        ts,
+        sender,
+        recipient,
+        status,
+        message_id,
+        size,
+        relay,
+        delays,
+        dsn,
+        detail,
+        subject=None,
+        sasl_username=None,
+    ):
         org_id, domain = self.resolve_org(sender, recipient)
         rid = row_id(qid, recipient, status, ts)
         bounce_reason = detail if status in ("bounced", "deferred", "rejected") else None
@@ -447,9 +497,22 @@ class Ingestor:
                      sasl_username)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
-                (rid, ts, sender or "", recipient or "", org_id, status,
-                 message_id, size, relay, delays, dsn, bounce_reason, subject,
-                 sasl_username),
+                (
+                    rid,
+                    ts,
+                    sender or "",
+                    recipient or "",
+                    org_id,
+                    status,
+                    message_id,
+                    size,
+                    relay,
+                    delays,
+                    dsn,
+                    bounce_reason,
+                    subject,
+                    sasl_username,
+                ),
             )
             inserted = cur.rowcount > 0
             cur.close()
@@ -537,12 +600,17 @@ class Ingestor:
                 code = REPLY_CODE_RE.search(detail)
                 temporary = bool(code) and code["code"].startswith("4")
                 self.record(
-                    qid="NOQUEUE", ts=ts,
+                    qid="NOQUEUE",
+                    ts=ts,
                     sender=sender_m["sender"] if sender_m else "",
                     recipient=rcpt_m["rcpt"],
                     status="deferred" if temporary else "rejected",
                     message_id=None,
-                    size=None, relay=None, delays=None, dsn=None, detail=detail[:2000],
+                    size=None,
+                    relay=None,
+                    delays=None,
+                    dsn=None,
+                    detail=detail[:2000],
                 )
             return
 
@@ -608,7 +676,8 @@ class Ingestor:
         delays = DELAYS_RE.search(body)
         dsn = DSN_RE.search(body)
         self.record(
-            qid=qid, ts=ts,
+            qid=qid,
+            ts=ts,
             sender=cached.get("sender", ""),
             recipient=to["rcpt"],
             status=mapped,

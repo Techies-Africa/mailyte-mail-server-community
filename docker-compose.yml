@@ -1,32 +1,34 @@
 
 services:
-  # Fail-closed secrets validation (C3) -- runs to completion before MySQL
-  # initialises its data directory or the API starts.
-  #
-  # Every `${DB_PASSWORD:-mailpassword}`-style default in this file is a
-  # publicly-known value in a public repository. Without this gate a
-  # `docker compose up` on a fresh host produced a fully functional,
-  # internet-facing mail server whose database root password was
-  # `rootpassword` -- and said nothing about it.
-  #
-  # Ordering is the point. MySQL bakes MYSQL_ROOT_PASSWORD into its data
-  # directory on first boot and ignores the variable on every boot after,
-  # so a weak password caught *after* mysql starts is already permanent.
-  # Hence `service_completed_successfully` on mysql below, not just on api.
-  #
-  # No custom image: worker/api/startup_checks.py is deliberately
-  # stdlib-only, so a stock python:3.11-slim runs it bind-mounted.
+  # Fail-closed secrets validation (phase-07 C3) -- runs before anything
+  # else in the stack. Nine security-relevant values (DB_ROOT_PASSWORD,
+  # DB_PASSWORD, WEBHOOK_SECRET, OAUTH_TOKEN_SECRET, URL_HMAC_SECRET,
+  # ADMIN_PASSWORD, ADMIN_TOKEN_SECRET, GRAFANA_ADMIN_PASSWORD) used to
+  # fall back to publicly-known-weak defaults if `.env` was missing or
+  # incomplete -- a fully functional, internet-facing mail server with
+  # `rootpassword` as its DB root password (security-model.md C3). No
+  # custom image: worker/api/startup_checks.py is deliberately
+  # stdlib-only so a stock python:3.9-slim can run it directly, bind-mounted.
   secrets-check:
-    image: python:3.11-slim
+    image: python:3.9-slim
     container_name: secrets-check
     environment:
-      - DB_ROOT_PASSWORD=${DB_ROOT_PASSWORD:-}
-      - DB_PASSWORD=${DB_PASSWORD:-}
-      - WEBHOOK_SECRET=${WEBHOOK_SECRET:-}
-      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-}
-      - ADMIN_TOKEN_SECRET=${ADMIN_TOKEN_SECRET:-}
+      # DB_ROOT_PASSWORD_FILE, not DB_ROOT_PASSWORD (phase-07 H6): validates
+      # the same secrets/db_root_password file mysql itself now boots from
+      # (see the mysql service above) -- startup_checks.py's _resolve()
+      # transparently reads either form, so this is the one env-var-to-file
+      # swap that needed no code change beyond that helper.
+      - DB_ROOT_PASSWORD_FILE=/run/secrets/db_root_password
+      - DB_PASSWORD=${DB_PASSWORD}
+      - WEBHOOK_SECRET=${WEBHOOK_SECRET}
+      - OAUTH_TOKEN_SECRET=${OAUTH_TOKEN_SECRET}
+      - URL_HMAC_SECRET=${URL_HMAC_SECRET}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
+      - ADMIN_TOKEN_SECRET=${ADMIN_TOKEN_SECRET}
+      - GRAFANA_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD}
     volumes:
       - ./worker/api/startup_checks.py:/check.py:ro
+      - ./secrets/db_root_password:/run/secrets/db_root_password:ro
     command: ["python3", "/check.py"]
     restart: "no"
 
@@ -34,9 +36,7 @@ services:
   redis:
     image: redis:7-alpine
     container_name: redis
-    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
-    ports:
-      - "${REDIS_PORT:-6379}:6379"
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru ${REDIS_PASSWORD:+--requirepass ${REDIS_PASSWORD}}
     volumes:
       - redis_data:/data
     networks:
@@ -47,43 +47,63 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-
-  # Database Service
-  mysql:
-    image: mysql:8.0
-    container_name: mysql
-    environment:
-      - MYSQL_ROOT_PASSWORD=${DB_ROOT_PASSWORD:-rootpassword}
-      - MYSQL_DATABASE=${DB_NAME:-mailserver}
-      - MYSQL_USER=${DB_USER:-mailuser}
-      - MYSQL_PASSWORD=${DB_PASSWORD:-mailpassword}
-      - MYSQL_ROUNDCUBE_DATABASE=${ROUNDCUBE_DB_NAME:-roundcubemail}
-    ports:
-      - "${DB_PORT:-3306}:3306"
-    # docker-entrypoint-initdb.d stays mounted here (phase-08) -- this repo's
-    # first-boot path only ever runs it once on a truly empty data
-    # directory. It produces exactly the 0001_baseline schema; the
-    # `migrate` service below is what makes every schema change *after*
-    # that reach a running deployment, including on upgrade -- initdb.d
-    # alone cannot do that, which was the whole defect this phase exists
-    # to fix. See mailyte-email-server's phase-08 build notes for why that
-    # repo removes this mount entirely instead: it ships a service with an
-    # ad-hoc-table race bad enough to justify it, this one doesn't.
-    volumes:
-      - mysql_data:/var/lib/mysql
-      - ./database/migrations/sql:/docker-entrypoint-initdb.d
-    # MySQL writes MYSQL_ROOT_PASSWORD into its data directory on first boot
-    # and ignores the variable forever after. Validating secrets after this
-    # container starts would therefore be too late to matter, so the gate is
-    # a hard precondition rather than an advisory sibling.
     depends_on:
       secrets-check:
         condition: service_completed_successfully
+
+  # Database Service
+  mysql:
+    # Pinned, not floating 8.0 -- more recent 8.0.x base-image builds
+    # require the x86-64-v2 microarchitecture level (sse4_2/popcnt/movbe).
+    # Confirmed live: this crash-loops with "Fatal glibc error: CPU does
+    # not support x86-64-v2" on a QEMU "Virtual CPU version 2.5+" host
+    # (a generic/minimal virtual CPU model some VPS providers use), which
+    # has none of those instructions. 8.0.35 predates that requirement and
+    # was confirmed working (`docker run --rm mysql:8.0.35 mysqld --version`)
+    # on the same host. If the VPS provider can expose a newer CPU model
+    # (host passthrough, or any modern Intel/AMD baseline) this pin can be
+    # dropped -- that's a hypervisor-level fix, not an application one.
+    image: mysql:8.0.35
+    container_name: mysql
+    depends_on:
+      secrets-check:
+        condition: service_completed_successfully
+    environment:
+      # MYSQL_ROOT_PASSWORD_FILE, not MYSQL_ROOT_PASSWORD (phase-07 H6,
+      # security-model.md H6): the official mysql image supports both, and
+      # a plain env var on a running container is readable by anything with
+      # Docker API access (`docker inspect`/`docker exec env` -- the
+      # docker-proxy container, for one) for the container's entire
+      # lifetime, while a 0400-mounted file isn't. scripts/generate-secrets.sh
+      # keeps secrets/db_root_password (git-ignored) in sync with .env's
+      # DB_ROOT_PASSWORD, which remains the source of truth for
+      # start.sh/scripts/mailyte-ctl.sh's own backup/restore/console commands.
+      - MYSQL_ROOT_PASSWORD_FILE=/run/secrets/db_root_password
+      - MYSQL_DATABASE=${DB_NAME:-mailserver}
+      - MYSQL_USER=${DB_USER:-mailuser}
+      - MYSQL_PASSWORD=${DB_PASSWORD}
+    # Database port not exposed to host - access via Docker network only
+    #
+    # No docker-entrypoint-initdb.d mount here (phase-08): that only ever ran
+    # once, on a truly empty data directory, and nothing could touch the
+    # schema again afterwards -- the defect this phase exists to fix. Schema
+    # is now owned entirely by the `migrate` service below (Alembic), for
+    # both a brand new volume and every upgrade after it. The frozen SQL
+    # files under database/migrations/sql/ remain in the repo as the
+    # historical source the Alembic baseline was generated from, and as
+    # mailyte-mail-server-community's own first-boot path (CE keeps the
+    # initdb.d mount -- see that repo's docker-compose.yml) -- not as
+    # anything EE executes anymore.
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./secrets/db_root_password:/run/secrets/db_root_password:ro
     networks:
       - mailserver_network
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${DB_ROOT_PASSWORD:-rootpassword}"]
+      # CMD-SHELL, not CMD's exec array -- reading the password out of the
+      # mounted file needs a shell for the command substitution.
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -u root -p\"$$(cat /run/secrets/db_root_password)\""]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -94,7 +114,8 @@ services:
   # migration must stop the deploy, not let a half-migrated API start:
   # `restart: "no"` plus every dependent service's
   # `condition: service_completed_successfully` (not just service_started)
-  # is what enforces that.
+  # is what enforces that -- Compose won't start api/cert_manager/
+  # delivery_optimizer at all if this container exits non-zero.
   migrate:
     build:
       context: .
@@ -105,7 +126,7 @@ services:
       - DB_PORT=3306
       - DB_NAME=${DB_NAME:-mailserver}
       - DB_USER=${DB_USER:-mailuser}
-      - DB_PASSWORD=${DB_PASSWORD:-mailpassword}
+      - DB_PASSWORD=${DB_PASSWORD}
     depends_on:
       mysql:
         condition: service_healthy
@@ -113,35 +134,26 @@ services:
       - mailserver_network
     restart: "no"
 
-  # ========================================================================
-  # Docker socket proxy (C1, 00-foundation/07-security-model.md) -- the *only*
-  # thing in this stack that touches /var/run/docker.sock.
-  #
-  # cert_manager needs to SIGHUP postfix and dovecot after a certificate
-  # rotation so they pick up the new TLS material without dropping
-  # connections (see _reload_services() in
-  # mailer/cert_manager/scripts/cert_manager.py). It needs nothing else the
-  # Docker API exposes.
-  #
-  # It previously got that by bind-mounting the socket itself with `:ro`. That
-  # flag only makes the *socket file* read-only; it does nothing to restrict
-  # which Docker API calls a client can make once connected, so it was full
-  # unrestricted API access -- which is equivalent to root on the host -- while
-  # looking safe. This proxy is what actually narrows the surface, to exactly
-  # "list/inspect containers, POST restart/stop/kill": no exec, no image
-  # pulls, no volume or network access, no creating containers.
-  #
-  # On `internal_only`, not `mailserver_network`, so nothing else in the stack
-  # can reach it even if it wanted to. No published port.
-  # ========================================================================
+  # Docker socket proxy (phase-07 C1) -- the *only* thing in this stack that
+  # touches /var/run/docker.sock. monitoring needs to restart containers
+  # (worker/monitoring/services/service_monitor.py) and cert_manager needs
+  # to SIGHUP postfix/dovecot after a cert rotation
+  # (mailer/cert_manager/scripts/cert_manager.py); neither needs anything
+  # else the Docker API exposes. Write access to the raw socket is
+  # equivalent to root on the host (security-model.md C1) -- this narrows
+  # that down to exactly "list/inspect containers, POST restart/stop/kill,
+  # nothing else": no exec, no image pulls, no volume/network access, no
+  # new containers. On `internal_only`, not `mailserver_network` -- nothing
+  # else in the stack can reach it even if it wanted to.
   docker-proxy:
     image: tecnativa/docker-socket-proxy:latest
     container_name: docker-proxy
-    # Upstream's own docs say --privileged is only needed under SELinux or
-    # AppArmor enforcement that would otherwise lock a bind-mounted socket. H1
-    # rules out `privileged: true` stack-wide, and the image starts and proxies
-    # correctly without it. Add it back only if a specific host's mandatory
-    # access control policy actually requires it -- not by default.
+    # Upstream's own docs say --privileged is only needed under
+    # SELinux/AppArmor enforcement that would otherwise lock a bind-mounted
+    # socket. H1 (security-model.md) explicitly rules out `privileged: true`
+    # stack-wide; verified this image starts and proxies correctly without
+    # it on this host (phase-07 build notes) -- add it back only if a
+    # target host's MAC policy actually requires it, not by default.
     environment:
       - CONTAINERS=1
       - POST=1
@@ -150,11 +162,14 @@ services:
       # NETWORKS, VOLUMES, SERVICES, SWARM, NODES, PLUGINS, ...
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      secrets-check:
+        condition: service_completed_successfully
     networks:
       - internal_only
     restart: unless-stopped
 
-  # Postfix - SMTP Server
+  # Mailer Services
   postfix:
      build: ./mailer/postfix
      container_name: postfix
@@ -166,19 +181,33 @@ services:
        - DB_PORT=3306
        - DB_NAME=${DB_NAME:-mailserver}
        - DB_USER=${DB_USER:-mailuser}
-       - DB_PASSWORD=${DB_PASSWORD:-mailpassword}
+       - DB_PASSWORD=${DB_PASSWORD}
+       # Outbound archive producer, in tracking_injector.py.
+       - ARCHIVE_OUTBOUND_ENABLED=${ARCHIVE_OUTBOUND_ENABLED:-true}
+       - ARCHIVE_SERVICE_URL=${ARCHIVE_SERVICE_URL:-http://archiver:8083}
+       - ARCHIVE_TIMEOUT=${ARCHIVE_TIMEOUT:-3}
        - REDIS_HOST=redis
        - REDIS_PORT=6379
-       - DEFAULT_TENANT_ID=${DEFAULT_TENANT_ID:-default}
-       - DEFAULT_DOMAIN_ID=${DEFAULT_DOMAIN_ID:-default}
        - TRACKING_SERVICE_URL=http://tracking:8086
        - TRACKING_ENABLED=${TRACKING_ENABLED:-true}
-       - WEBHOOK_SECRET=${WEBHOOK_SECRET:-webhooksecret}
+       - DEFAULT_TENANT_ID=${DEFAULT_TENANT_ID:-default}
+       - DEFAULT_DOMAIN_ID=${DEFAULT_DOMAIN_ID:-default}
+       - WEBHOOK_SECRET=${WEBHOOK_SECRET}
        - WEBHOOK_SERVICE_URL=http://webhooks:8081
+       - DELIVERY_OPTIMIZER_URL=http://delivery_optimizer:8088
+       # Marketing stream (phase-01): unset = stream disabled, routing
+       # identical to before. Set only once the second IP exists on the host.
+       - MARKETING_BIND_IP=${MARKETING_BIND_IP:-}
+       - MARKETING_HELO_NAME=${MARKETING_HELO_NAME:-}
+       # Bridge-internal address the marketing transport binds; a host SNAT rule
+       # maps it to MARKETING_BIND_IP (Docker MASQUERADE would otherwise send it
+       # from the primary IP). Unset = bind MARKETING_BIND_IP directly.
+       - MARKETING_CONTAINER_BIND_IP=${MARKETING_CONTAINER_BIND_IP:-}
      ports:
        - "25:25"
        - "587:587"
        - "465:465"
+       - "10026:10026"
      volumes:
        - ./storage/mail_data:/var/mail/vhosts
        - ./storage/ssl_certs:/etc/ssl/certs/custom
@@ -186,12 +215,17 @@ services:
        - ./storage/sni_config:/etc/ssl/sni:ro
        - ./logs/mailer/postfix:/var/log/postfix
        - ./config/mailer/postfix:/etc/postfix/custom
-     healthcheck:
-       test: ["CMD-SHELL", "postfix status || exit 1"]
-       interval: 30s
-       timeout: 10s
-       retries: 3
-       start_period: 20s
+       # The Postfix spool. A named volume for two reasons:
+       #
+       # 1. Durability. This was container-local, so `docker compose up -d
+       #    --force-recreate postfix` silently destroyed every queued message
+       #    -- mail that had been accepted and not yet delivered, which the
+       #    sender was told we had taken responsibility for.
+       # 2. queue_manager mounts the same volume so `postqueue -p` can reach
+       #    the showq socket at public/showq. It cannot read the queue any
+       #    other way: postqueue talks to the showq daemon over that socket
+       #    rather than parsing queue files.
+       - postfix_spool:/var/spool/postfix
      depends_on:
        mysql:
          condition: service_healthy
@@ -204,26 +238,28 @@ services:
      networks:
        - mailserver_network
      restart: unless-stopped
-     # H1 (00-foundation/07-security-model.md): postfix's master process
-     # legitimately needs root to bind port 25 (<1024) and to chown/setuid per
-     # recipient during local delivery -- that's Postfix's own internal
-     # privilege-separation model (queue/pickup/local processes drop to the
-     # postfix/postdrop system users the Dockerfile creates at build time), the
-     # documented alternative to a blanket non-root USER for an MTA. So no
-     # `USER` in mailer/postfix/Dockerfile -- capabilities are narrowed to
-     # exactly what that model needs instead, never `privileged: true`.
+     # H1 (security-model.md): postfix's master process legitimately needs
+     # root to bind port 25 (<1024) and to chown/setuid per recipient during
+     # local delivery -- that's Postfix's own internal privilege-separation
+     # model (queue/pickup/local processes drop to the postfix/postdrop
+     # system users it creates at build time), the documented alternative
+     # to a blanket non-root USER for an MTA. Capabilities are still
+     # narrowed to exactly what that model needs, not `privileged: true`.
      security_opt: ["no-new-privileges:true"]
      cap_drop: ["ALL"]
-     # SYS_CHROOT is not optional: Postfix's pickup/tlsmgr/postscreen (and
-     # smtpd, on real connections) all chroot() into /var/spool/postfix as part
-     # of the privilege-separation model above. Without it every one of them
-     # fatals on startup ("chroot(/var/spool/postfix): Operation not
-     # permitted") and the service throttles forever -- found live in
-     # mailyte-email-server, which is why it is listed explicitly here rather
-     # than left to a generic hardening template.
-     cap_add: ["NET_BIND_SERVICE", "CHOWN", "FOWNER", "SETUID", "SETGID", "DAC_OVERRIDE", "SYS_CHROOT"]
+     # SYS_CHROOT added (was missing) -- Postfix's pickup/tlsmgr/postscreen
+     # (and smtpd, on real connections) all chroot() into /var/spool/postfix
+     # as part of the internal privilege-separation model described above;
+     # without this capability every one of them fatals on startup
+     # ("chroot(/var/spool/postfix): Operation not permitted") and the
+     # service throttles forever -- confirmed live via mail.log, found
+     # while verifying the SMTP-credentials workstream end to end.
+     cap_add: ["NET_BIND_SERVICE", "CHOWN", "FOWNER", "SETUID", "SETGID", "DAC_OVERRIDE", "SYS_CHROOT", "NET_ADMIN"]
 
-  # Dovecot - IMAP/POP3 Mail Server
+  # # DOVECOT - IMAP/POP3 Mail Server
+  # # Provides email access protocols for mail clients
+  # # Handles user authentication via MySQL database
+  # # Manages mailbox storage and quota enforcement
   dovecot:
      build: ./mailer/dovecot
      container_name: dovecot
@@ -238,13 +274,19 @@ services:
        - DB_PORT=3306
        - DB_NAME=${DB_NAME:-mailserver}
        - DB_USER=${DB_USER:-mailuser}
-       - DB_PASSWORD=${DB_PASSWORD:-mailpassword}
+       - DB_PASSWORD=${DB_PASSWORD}
        # Authenticates the doveadm HTTP listener (port 24180, internal
        # network only) that the api service flushes the auth cache through
-       # when an SMTP API key changes (00-PRD-smtp-api-keys K6).
+       # when an SMTP API key changes (00-PRD-smtp-api-keys K1).
        - DOVEADM_API_KEY=${DOVEADM_API_KEY:-}
        - REDIS_HOST=redis
        - REDIS_PORT=6379
+       # Inbound archive producer (DR-2). The global sieve pipes every
+       # delivered message to archive-message, which POSTs it here. Setting
+       # ARCHIVE_OUTBOUND_ENABLED=false on postfix and pointing this nowhere
+       # are the two ways to turn archiving off.
+       - ARCHIVE_SERVICE_URL=${ARCHIVE_SERVICE_URL:-http://archiver:8083}
+       - ARCHIVE_TIMEOUT=${ARCHIVE_TIMEOUT:-3}
      volumes:
        - ./storage/mail_data:/var/mail/vhosts
        - ./storage/ssl_certs:/etc/ssl/certs/custom
@@ -252,12 +294,6 @@ services:
        - ./storage/sni_config:/etc/ssl/sni:ro
        - ./logs/mailer/dovecot:/var/log/dovecot
        - ./config/mailer/dovecot:/etc/dovecot/custom
-     healthcheck:
-       test: ["CMD-SHELL", "doveadm service status imap || exit 1"]
-       interval: 30s
-       timeout: 10s
-       retries: 3
-       start_period: 15s
      depends_on:
        mysql:
          condition: service_healthy
@@ -268,23 +304,24 @@ services:
      networks:
        - mailserver_network
      restart: unless-stopped
-     # H1: same rationale as postfix -- Dovecot's login process needs root to
-     # bind ports <1024 (110, 143) and to setuid/chown per mailbox owner, then
-     # drops to its own unprivileged users for the actual IMAP/POP3 session.
-     # Hence no `USER` in mailer/dovecot/Dockerfile, capabilities instead.
+     # H1: same rationale as postfix -- Dovecot's login process needs root
+     # to bind ports <1024 (110, 143) and to setuid/chown per mailbox owner
+     # on login; it drops to its own unprivileged users for the actual
+     # IMAP/POP3 session handling. SYS_CHROOT found live (01-mailyte-email-server
+     # /phase-09-jmap-message-content verification): imap-login/pop3-login/anvil
+     # chroot() into /run/dovecot/{login,empty} on every start, unconditionally --
+     # not just "on login" as this comment originally assumed. Without it every
+     # login/anvil process crash-loops (Errno 1 Operation not permitted) and no
+     # IMAP/POP3/LMTP session can ever be established, a total outage this
+     # cap_drop introduced silently (no healthcheck caught it -- see test-debt.md).
      security_opt: ["no-new-privileges:true"]
      cap_drop: ["ALL"]
-     # SYS_CHROOT is load-bearing here too, and for a *different* reason than
-     # postfix's: imap-login/pop3-login/anvil chroot() into
-     # /run/dovecot/{login,empty} on every start, unconditionally -- not only
-     # when a user logs in. Found live in mailyte-email-server: without it
-     # every login/anvil process crash-loops (Errno 1 Operation not permitted)
-     # and no IMAP/POP3/LMTP session can ever be established. A total outage,
-     # and no healthcheck caught it -- which is exactly why this capability
-     # list is copied from what EE actually settled on rather than derived.
      cap_add: ["NET_BIND_SERVICE", "CHOWN", "FOWNER", "SETUID", "SETGID", "DAC_OVERRIDE", "SYS_CHROOT"]
 
-  # Rspamd - Anti-spam and Email Filtering
+  # # RSPAMD - Anti-spam and Email Filtering
+  # # Advanced spam detection using machine learning
+  # # DKIM signing and verification
+  # # Virus scanning and content filtering
   rspamd:
      build: ./mailer/rspamd
      container_name: rspamd
@@ -292,80 +329,137 @@ services:
        - "11332:11332"
        - "11334:11334"
      environment:
+       # Transport rule enforcement. OFF by default and deliberately so: rules
+       # written before enforcement existed were drafts, and turning this on
+       # puts every one of them into force at once. Read what your rules say,
+       # then set it true.
+       - TRANSPORT_RULES_ENABLED=${TRANSPORT_RULES_ENABLED:-false}
        - REDIS_HOST=redis
        - REDIS_PORT=6379
+       # For scripts/generate_dkim.py -- this container is the only one
+       # that mounts both /var/lib/rspamd/dkim (private key files) AND
+       # /etc/rspamd/dkim_selectors.map (image-baked, not a bind mount --
+       # a different container writing the map wouldn't reach this one's
+       # actual filesystem), so it's the only place that script can
+       # actually run and have rspamd see the result.
+       - DB_HOST=mysql
+       - DB_PORT=3306
+       - DB_NAME=${DB_NAME:-mailserver}
+       - DB_USER=${DB_USER:-mailuser}
+       - DB_PASSWORD=${DB_PASSWORD}
      volumes:
        - rspamd_data:/var/lib/rspamd
        - ./storage/dkim_keys:/var/lib/rspamd/dkim
        - ./logs/mailer/rspamd:/var/log/rspamd
        - ./config/mailer/rspamd:/etc/rspamd/custom
-     healthcheck:
-       test: ["CMD-SHELL", "python3 -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:11334/ping\")'"]
-       interval: 30s
-       timeout: 10s
-       retries: 3
-       start_period: 15s
+       # generate_dkim.py calls shared.envelope_encryption.encrypt_private_key()
+       - ./secrets/encryption_kek:/run/secrets/encryption_kek:ro
      depends_on:
        redis:
          condition: service_healthy
      networks:
        - mailserver_network
      restart: unless-stopped
-     # H1: rspamd binds no port <1024 and doesn't need to change file
-     # ownership by uid the way postfix/dovecot do -- but the three
-     # capabilities below are each required by something that was found live
-     # in mailyte-email-server under `cap_drop: ALL` with no additions:
+     # H1: rspamd itself binds no port <1024 and doesn't need to change
+     # file ownership by uid the way postfix/dovecot do -- but rsyslogd
+     # (runs alongside it via supervisord, mailer/rspamd/supervisord.conf)
+     # drops privileges internally the same way postfix/dovecot's own
+     # processes do, and needs SETUID/SETGID to do that cleanly. Found live:
+     # rsyslogd looped "could not remove supplemental group IDs" under
+     # cap_drop: ALL with no additions.
      #
-     #   SETUID/SETGID -- rsyslogd (runs alongside rspamd via supervisord,
-     #     mailer/rspamd/supervisord.conf) drops privileges internally the
-     #     same way postfix/dovecot's own processes do. It looped "could not
-     #     remove supplemental group IDs" without these.
-     #   CHOWN -- entrypoint.sh chowns /var/log/rspamd and /var/lib/rspamd to
-     #     _rspamd before dropping privileges, since both are bind-mounted
-     #     from the host and shadow the ownership baked in at build time.
-     #     Under cap_drop: ALL, UID 0 by itself does NOT gate that syscall --
-     #     CAP_CHOWN does. Symptom: "cannot chown desired log file:
-     #     /var/log/rspamd/rspamd.log, Operation not permitted", crash-looping
-     #     to FATAL.
-     #   DAC_OVERRIDE -- rspamd opens its own log file while still briefly
-     #     root. Under cap_drop: ALL, plain UID 0 does not bypass permission
-     #     bits; that bypass is specifically what CAP_DAC_OVERRIDE grants.
-     #     Symptom: "cannot open desired log file ... Permission denied", and
-     #     it persisted even with ownership and mode both already correct.
+     # CHOWN added -- entrypoint.sh chowns /var/log/rspamd and
+     # /var/lib/rspamd to _rspamd before dropping privileges (same pattern
+     # as dovecot/postfix's own entrypoints), since those are bind-mounted
+     # from the host and shadow whatever ownership was baked into the image
+     # at build time. Without it, even running as root inside the container
+     # cannot chown: CAP_CHOWN is what actually gates that syscall, not
+     # UID 0 by itself, under cap_drop: ALL. Confirmed live: "cannot chown
+     # desired log file: /var/log/rspamd/rspamd.log, Operation not
+     # permitted" from rspamd itself (which drops to _rspamd via
+     # supervisord's `-u _rspamd -g _rspamd`), crash-looping to FATAL.
      #
-     # The imklog module is disabled in the Dockerfile rather than re-granting
-     # CAP_SYSLOG -- reading the *host* kernel ring buffer is not something
-     # this container should be able to do at all.
+     # DAC_OVERRIDE added -- rspamd opens its own log file before it
+     # finishes dropping to _rspamd, while briefly still root. Under
+     # cap_drop: ALL, plain UID 0 does NOT bypass file permission bits the
+     # way root normally does -- that bypass is specifically what
+     # CAP_DAC_OVERRIDE grants. Without it, opening a file owned by
+     # _rspamd (not root) for writing fails even as root. Confirmed live:
+     # "cannot open desired log file: /var/log/rspamd/rspamd.log,
+     # Permission denied" -- persisted even after the file's ownership and
+     # mode were both already correct. Same capability dovecot/postfix/docs
+     # already carry in this file for the identical reason.
      security_opt: ["no-new-privileges:true"]
      cap_drop: ["ALL"]
      cap_add: ["SETUID", "SETGID", "CHOWN", "DAC_OVERRIDE"]
 
-  # Certificate Manager - Let's Encrypt SSL
   cert_manager:
      build: ./mailer/cert_manager
      container_name: cert_manager
-     ports:
-       - "80:80"
+     # No port 80 binding -- Traefik (docker-compose.prod.yml) owns port 80
+     # permanently as the reverse proxy, and only one process can bind it.
+     # ACME challenges now go through --webroot (see cert_manager.py), with
+     # the acme_webroot service below serving the shared challenge files;
+     # Traefik routes /.well-known/acme-challenge/* to it.
      environment:
        - DB_HOST=mysql
        - DB_PORT=3306
        - DB_NAME=${DB_NAME:-mailserver}
        - DB_USER=${DB_USER:-mailuser}
-       - DB_PASSWORD=${DB_PASSWORD:-mailpassword}
+       - DB_PASSWORD=${DB_PASSWORD}
        - ACME_EMAIL=${ACME_EMAIL:-admin@example.com}
        - HOSTNAME=${HOSTNAME:-mail.example.com}
+       - MAIL_HOSTNAME=${MAIL_HOSTNAME:-}
        - DOMAIN=${DOMAIN:-example.com}
+       # This server's PUBLIC address(es), used to skip SAN candidates that
+       # point somewhere else -- one such name fails the whole certbot order.
+       #
+       # Must be given explicitly: Docker writes the container's own hostname
+       # into /etc/hosts, and these containers run with
+       # HOSTNAME=${DOMAIN}, so resolving it from inside answers with the
+       # container's private 172.x address. Left to work that out for itself,
+       # cert_manager concluded that nothing resolved here and issued nothing.
+       - CERT_SERVER_IPS=${CERT_SERVER_IPS:-}
+       # Which <sub>.${DOMAIN} hostnames cert_manager issues Traefik certs for.
+       # This MUST be passed through: cert_manager.py reads it via os.getenv, so
+       # setting it in .env alone does nothing -- Compose only injects variables
+       # named here. It was set in production .env (including `console`) while
+       # the container never received it, so cert_manager silently fell back to
+       # its built-in default, never requested a cert for console.${DOMAIN}, and
+       # Traefik served its self-signed TRAEFIK DEFAULT CERT for the console.
+       # Keep `console` in the default too, so a fresh install works unset.
+       - TRAEFIK_ADMIN_SUBDOMAINS=${TRAEFIK_ADMIN_SUBDOMAINS:-api,autoconfig,jmap,caldav,docs,grafana,traefik,console}
+       # Fully-qualified hostnames that are NOT <sub>.${DOMAIN}. On this
+       # deployment DOMAIN is itself a subdomain (courier.mailyte.com), so the
+       # list above cannot express a name on the apex -- and the webmail is
+       # exactly that: users type webmail.mailyte.com. Comma-separated, each a
+       # complete hostname that already resolves to this host.
+       #
+       # MUST be named here, like TRAEFIK_ADMIN_SUBDOMAINS above: Compose only
+       # injects variables it is told about, so setting it in .env alone means
+       # cert_manager never sees it -- precisely how the console ended up with
+       # no certificate and Traefik's self-signed default.
+       - TRAEFIK_EXTRA_HOSTNAMES=${TRAEFIK_EXTRA_HOSTNAMES:-}
        - ACME_STAGING=${ACME_STAGING:-true}
        - SSL_CERT_PATH=/etc/ssl/certs
        - SSL_KEY_PATH=/etc/ssl/private
        - CERT_RENEWAL_DAYS=${CERT_RENEWAL_DAYS:-30}
        - CERT_CHECK_INTERVAL=${CERT_CHECK_INTERVAL:-21600}
+       - WEBHOOK_URLS=${WEBHOOK_URLS:-}
+       - WEBHOOK_SECRET=${WEBHOOK_SECRET}
+       # Wildcard cert — covers *.WILDCARD_DOMAIN as the shared server cert
+       # Set WILDCARD_DOMAIN=mailyte.com and DNS_PROVIDER=route53 (or cloudflare, etc.)
+       # All orgs using smtp.mailyte.com / imap.mailyte.com are covered by this one cert
+       - WILDCARD_DOMAIN=${WILDCARD_DOMAIN:-}
+       - DNS_PROVIDER=${DNS_PROVIDER:-}
+       # SNI map path — cert_manager writes here; Postfix/Dovecot read it
        - SNI_CONFIG_PATH=/etc/ssl/sni
+       # HTTP-01 webroot -- shared with the acme_webroot service below
+       - ACME_WEBROOT_PATH=/var/www/acme-challenge
        # Live reload — send SIGHUP to Postfix/Dovecot after cert changes, via
-       # the docker-proxy service above (C1) rather than a socket mount. The
-       # `/var/run/docker.sock:...:ro` bind that used to be in the volumes list
-       # below did not actually restrict anything — see the comment on
-       # docker-proxy for why.
+       # docker-proxy (phase-07 C1) rather than a socket mount -- see
+       # reload_dependent_services() in cert_manager.py for why the previous
+       # `:ro` socket mount here didn't actually restrict anything.
        - DOCKER_RELOAD_ENABLED=${DOCKER_RELOAD_ENABLED:-true}
        - DOCKER_PROXY_URL=http://docker-proxy:2375
        - POSTFIX_CONTAINER=postfix
@@ -375,16 +469,18 @@ services:
        - ./storage/ssl_private:/etc/ssl/private
        - ./storage/sni_config:/etc/ssl/sni
        - letsencrypt_data:/etc/letsencrypt
+       - ./storage/acme_challenge:/var/www/acme-challenge
      depends_on:
        mysql:
          condition: service_healthy
        migrate:
          condition: service_completed_successfully
        # Not condition: service_healthy -- docker-proxy is a thin HAProxy
-       # image with no HTTP tooling on board to build a meaningful healthcheck
-       # from, and cert_manager doesn't need it up front anyway:
-       # _reload_services() only calls it on demand when a cert actually
-       # changes, and logs-and-continues on failure rather than crashing.
+       # image with no HTTP tooling on board to build a meaningful
+       # healthcheck from, and cert_manager doesn't need it up-front
+       # anyway: reload_dependent_services() only calls it on-demand when a
+       # cert actually changes, and already logs+continues on failure
+       # rather than crashing.
        docker-proxy:
          condition: service_started
      networks:
@@ -392,7 +488,6 @@ services:
        - internal_only
      restart: unless-stopped
 
-  # API - Management REST API
   api:
      build: ./worker/api
      container_name: api
@@ -400,43 +495,118 @@ services:
        - "8083:8080"
      environment:
        - PORT=8080
-       - DB_HOST=mysql
-       - DB_PORT=3306
-       - DB_NAME=${DB_NAME:-mailserver}
-       - DB_USER=${DB_USER:-mailuser}
-       - DB_PASSWORD=${DB_PASSWORD:-mailpassword}
-       - REDIS_HOST=redis
-       - REDIS_PORT=6379
-       # doveadm HTTP API (SMTP API keys K6): revoking/rotating/updating a
+       # ManageSieve (RFC 5804) on Dovecot. The Sieve endpoints used to write
+       # scripts onto the maildir filesystem, which this container neither
+       # mounts nor has the uid to chown -- see utils/managesieve.py for the
+       # full finding. Speaking the protocol instead needs the same master
+       # credentials worker/jmap already uses for IMAP impersonation.
+       - SIEVE_HOST=dovecot
+       - SIEVE_PORT=4190
+       # doveadm HTTP API (SMTP API keys K1): revoking/rotating/updating a
        # credential must flush Dovecot's auth cache or the old state keeps
        # authenticating for up to auth_cache_ttl (1h). Internal network only.
        - DOVEADM_URL=http://dovecot:24180
        - DOVEADM_API_KEY=${DOVEADM_API_KEY:-}
-       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-adminpass}
-       - ADMIN_TOKEN_SECRET=${ADMIN_TOKEN_SECRET:-tokensecret}
+       - IMAP_MASTER_USER=${IMAP_MASTER_USER:-}
+       - IMAP_MASTER_PASSWORD=${IMAP_MASTER_PASSWORD:-}
+       # Mailbox AI (webmail + mobile): routes/mailbox.py reads AI_BASE_URL and
+       # AI_API_KEY; both unset => capabilities.ai=false and every AI endpoint
+       # answers 503 ai_not_configured. Compose only injects NAMED variables,
+       # so a value in .env is invisible to this container without these lines
+       # (found 2026-08-31 -- "AI is implemented but not configured" was
+       # actually "not wired").
+       - AI_BASE_URL=${AI_BASE_URL:-}
+       - AI_API_KEY=${AI_API_KEY:-}
+       - AI_MODEL=${AI_MODEL:-gpt-4o-mini}
+       # Client version negotiation (utils/client_versions.py). Unset =
+       # unrestricted; see .env.example for the per-platform knobs.
+       - MIN_CLIENT_VERSION_IOS=${MIN_CLIENT_VERSION_IOS:-}
+       - MIN_CLIENT_VERSION_ANDROID=${MIN_CLIENT_VERSION_ANDROID:-}
+       - MIN_CLIENT_VERSION_WEB=${MIN_CLIENT_VERSION_WEB:-}
+       - MIN_CLIENT_VERSION_MACOS=${MIN_CLIENT_VERSION_MACOS:-}
+       - MIN_CLIENT_VERSION_WINDOWS=${MIN_CLIENT_VERSION_WINDOWS:-}
+       - MIN_CLIENT_VERSION_LINUX=${MIN_CLIENT_VERSION_LINUX:-}
+       - LATEST_CLIENT_VERSION_IOS=${LATEST_CLIENT_VERSION_IOS:-}
+       - LATEST_CLIENT_VERSION_ANDROID=${LATEST_CLIENT_VERSION_ANDROID:-}
+       - LATEST_CLIENT_VERSION_WEB=${LATEST_CLIENT_VERSION_WEB:-}
+       - UPDATE_URL_IOS=${UPDATE_URL_IOS:-}
+       - UPDATE_URL_ANDROID=${UPDATE_URL_ANDROID:-}
+       - UPDATE_URL_WEB=${UPDATE_URL_WEB:-}
+       - FORCE_UPDATE_IOS=${FORCE_UPDATE_IOS:-}
+       - FORCE_UPDATE_ANDROID=${FORCE_UPDATE_ANDROID:-}
+       - FORCE_UPDATE_WEB=${FORCE_UPDATE_WEB:-}
+       # The public mail hostname this server answers as. Without it Docker
+       # sets HOSTNAME to the container ID, and routes/domains.py bakes that
+       # into the MX/SPF records it hands customers and checks live DNS
+       # against -- so DNS verification could never pass. Same line the
+       # postfix/autoconfig/tracking services already carry.
+       - HOSTNAME=${HOSTNAME:-mail.example.com}
+       # Submit through Postfix's internal submission listener, not port 25.
+       # That port carries the tracking content_filter; 25 deliberately does
+       # not, because 25 also receives all INBOUND mail and tracking must
+       # never touch messages arriving for our users. Sending on 25 is why no
+       # webmail message was ever tracked. See master.cf's 10587 block.
+       - MAIL_SUBMIT_HOST=${MAIL_SUBMIT_HOST:-postfix}
+       - MAIL_SUBMIT_PORT=${MAIL_SUBMIT_PORT:-10587}
+       # The public MX name, and the host customers `include:` in SPF.
+       # Two settings on purpose: SPF used to be derived as spf.${HOSTNAME},
+       # so renaming the mail host silently repointed every customer's SPF at
+       # a hostname that might not exist yet -- and the verifier only checks
+       # that the string is present, never that it resolves. See
+       # get_spf_host() in routes/domains.py.
+       - MAIL_HOSTNAME=${MAIL_HOSTNAME:-}
+       - MAIL_SPF_HOST=${MAIL_SPF_HOST:-}
+       - DB_HOST=mysql
+       - DB_PORT=3306
+       - DB_NAME=${DB_NAME:-mailserver}
+       - DB_USER=${DB_USER:-mailuser}
+       - DB_PASSWORD=${DB_PASSWORD}
+       - REDIS_HOST=redis
+       - REDIS_PORT=6379
+       - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+       - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+       - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-eu-west-2}
+       - AWS_BUCKET=${AWS_BUCKET:-development-local-1}
+       - AWS_S3_PREFIX=${AWS_S3_PREFIX:-mailyte}
        - FLASK_ENV=${FLASK_ENV:-development}
        - FLASK_DEBUG=${FLASK_DEBUG:-1}
-       # --- Mailyte Console / operator identity (ADR-002, ADR-004) ---------
-       # Set false ONLY while bringing the console up over plain
-       # http://localhost. With it true (the default) the operator session
-       # cookie carries Secure, a browser on an http:// origin silently drops
-       # it, and login appears to succeed and then bounce back to the sign-in
-       # screen. Never false on a real deployment.
+       - CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS:-http://localhost:3000}
        - MAILYTE_COOKIE_SECURE=${MAILYTE_COOKIE_SECURE:-true}
-       # MFA is mandatory for every operator (ADR-002 §3). ADR-004 allows one
-       # escape hatch for a single-user homelab -- MAILYTE_CONSOLE_MFA=optional
-       # -- and the default deliberately stays on. It only ever applies to an
-       # operator who has not enrolled an authenticator at all; once enrolled,
-       # MFA is enforced regardless.
-       - MAILYTE_CONSOLE_MFA=${MAILYTE_CONSOLE_MFA:-required}
-       - TOTP_ISSUER=${TOTP_ISSUER:-Mailyte}
-       # Optional proxy targets. Left unset on purpose: this compose file
-       # ships no monitoring or queue-manager container, and the API returns a
-       # clear 503 naming the missing service rather than proxying to a
-       # default that does not exist. Point these at your own services to
-       # light up /api/v1/monitoring/* and /api/v1/queue/*.
-       - MONITORING_SERVICE_URL=${MONITORING_SERVICE_URL:-}
-       - QUEUE_SERVICE_URL=${QUEUE_SERVICE_URL:-}
+       # Operator MFA (phase-06 task 6.7) -- routes/platform_auth.py calls
+       # the existing totp service rather than reimplementing TOTP.
+       - TOTP_SERVICE_URL=http://totp:8103
+       # Which edition this deployment is. routes/capabilities.py defaults to
+       # "community" when unset -- the fail-safe direction for the CODE, since
+       # advertising a module the instance does not ship is worse than hiding
+       # one it does. But this repo IS the enterprise edition, and the variable
+       # was set nowhere: not here, not in prod, not in .env.example. The
+       # console gates its nav on this manifest, so every enterprise-only
+       # module -- DLP, reputation, compliance, engagement analytics, reports --
+       # silently did not appear.
+       - MAILYTE_EDITION=${MAILYTE_EDITION:-enterprise}
+       # Alert delivery. Without SMTP_HOST an email channel cannot send and
+       # says so; postfix is on this network and already accepts mail on 25,
+       # so there is no reason for that gap to persist.
+       - SMTP_HOST=${ALERT_SMTP_HOST:-postfix}
+       - SMTP_PORT=${ALERT_SMTP_PORT:-25}
+       # The envelope sender for alert mail. PRD §17 fixes this to the
+       # instance ADMIN_EMAIL identity.
+       - ALERT_FROM_ADDRESS=${ALERT_FROM_ADDRESS:-${ADMIN_EMAIL:-}}
+       # How often enabled rules are evaluated. One evaluator runs at a time
+       # regardless of replica count (MySQL advisory lock).
+       - ALERT_EVAL_INTERVAL_SECONDS=${ALERT_EVAL_INTERVAL_SECONDS:-60}
+       # Where the api reaches its sibling gateways. These have working
+       # defaults in code now, but naming them here keeps the wiring visible in
+       # one place and lets a split deployment point them elsewhere. Each port
+       # is the service's own bind port, not its published host port.
+       - MONITORING_SERVICE_URL=${MONITORING_SERVICE_URL:-http://monitoring:8085}
+       - QUEUE_SERVICE_URL=${QUEUE_SERVICE_URL:-http://queue_manager:8090}
+       - STORAGE_SERVICE_URL=${STORAGE_SERVICE_URL:-http://storage_usage:8092}
+       - RAG_SERVICE_URL=${RAG_SERVICE_URL:-http://rag:8090}
+       # Backs the console's system-metrics screen (PRD SS12 gap #7). Without it
+       # the range proxy answers 404 "no metrics backend configured" even though
+       # prometheus is running right beside it in this same file.
+       - PROMETHEUS_URL=${PROMETHEUS_URL:-http://prometheus:9090}
      healthcheck:
        test: ["CMD-SHELL", "python3 -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:8080/health\")'"]
        interval: 30s
@@ -444,62 +614,22 @@ services:
        retries: 3
        start_period: 15s
      volumes:
-       # ── HOST OWNERSHIP REQUIREMENT (H1) ─────────────────────────────────
-       # This mount, and the identical ones on webhooks, tracking and
-       # rate_limiter, MUST be writable by UID 10001 -- the unprivileged user
-       # those four Dockerfiles now run as. They stay host bind mounts rather
-       # than named volumes on purpose: the fail2ban jail in
-       # docs/security/intrusion-detection.md and the logrotate config in
-       # docs/guides/troubleshooting/service-failures.md both read these paths
-       # from the host, so moving them into Docker volumes would break
-       # documented, security-relevant integration.
-       #
-       # shared/logging_config.py's ServiceLogger creates /app/logs/<service>/
-       # at import time. It now degrades to stdout-only logging when that
-       # directory is not writable, instead of raising out of the constructor
-       # and crash-looping the service -- so getting the chown below wrong
-       # costs you the log FILES, not the mail server.
-       #
-       # Still worth doing: without it these logs exist only in
-       # `docker logs`, and the fail2ban jail in
-       # docs/security/intrusion-detection.md reads them from the host.
-       # Run once, before the first `docker compose up` (root, because chown
-       # to another uid always requires it):
-       #
-       #   sudo chown -R 10001:10001 logs/worker/api logs/worker/webhooks \
-       #                             logs/worker/tracking logs/worker/rate_limiter
-       #
-       # mailyte-email-server does the same thing from its deploy.sh; CE has no
-       # equivalent deploy step, and start.sh cannot do it because it does not
-       # run as root.
-       # ────────────────────────────────────────────────────────────────────
        - ./logs/worker/api:/app/logs
-       # H1 follow-through: worker/api/Dockerfile now runs this container as
-       # UID 10001, and /app below is bind-mounted from the host source tree,
-       # owned by whoever checked the repo out. app.py writes the single-use
-       # operator bootstrap token to /app/data/operator-bootstrap-token and
-       # removes it once consumed, and an unprivileged process cannot create
-       # that subdirectory under a host-owned bind mount.
-       #
-       # A Docker-managed named volume, not a host directory: it takes its
-       # ownership from the image's own /app/data (created and chowned to
-       # 10001 in the Dockerfile) on first use, so it needs no host-side
-       # chown. mailyte-email-server binds ./storage/api_data here instead and
-       # has its deploy.sh chown it -- CE has no deploy step to hang that on,
-       # a self-hoster just runs `docker compose up`, so the self-correcting
-       # form is the right one for this edition.
-       - api_data:/app/data
+       # /app itself is bind-mounted from source below, owned by whatever
+       # user checked out the release on the host -- the container runs as
+       # unprivileged UID 10001, which can't create new subdirectories
+       # under it (confirmed live: bootstrap.py's single-use token write to
+       # /app/data failed with "Permission denied: '/app/data'" since that
+       # path doesn't exist in the source tree). Same fix as the logs/
+       # mounts above: a dedicated host directory outside the source tree,
+       # pre-created and chowned to 10001 by deploy.sh.
+       - ./storage/api_data:/app/data
        - ./worker/api:/app
        - ./shared:/app/shared
        - ./database:/app/database
-       # Key Encryption Key for the envelope-encrypted DKIM private keys (C2).
-       # A file, never an env var: env vars leak through `docker inspect`, the
-       # process list, and crash reporters, and this key decrypts every signing
-       # key in the database.
-       #
-       # Created by scripts/generate_dkim_kek.sh, which start.sh runs. Without
-       # it, create_domain() raises KEKNotConfiguredError -- caught, so the
-       # domain is still created, but with NO DKIM key and a logged failure.
+       # KEK for DKIM/PGP/S-MIME envelope encryption (phase-07 C2) --
+       # generate with scripts/generate_dkim_kek.sh. Mounted read-only; the
+       # api container never writes to it.
        - ./secrets/encryption_kek:/run/secrets/encryption_kek:ro
      depends_on:
        mysql:
@@ -512,10 +642,242 @@ services:
        - mailserver_network
      restart: unless-stopped
 
-  # Postfix log ingestor -- the producer for mail_logs and the SMTP API
-  # keys' usage attribution (00-PRD-smtp-api-keys K6, parity of EE K2).
-  # Without it the per-key usage endpoint answers honest zeros and
-  # last_used_at stays NULL.
+  # # WEBHOOKS SERVICE - Real-time Event Notifications
+  # # Sends HTTP webhooks for email events (sent, delivered, bounced, etc.)
+  # # Handles webhook retries and failure management
+  # # Supports multiple webhook endpoints with authentication
+  webhooks:
+     build: ./worker/webhooks
+     container_name: webhooks
+     ports:
+       - "8081:8081"
+     # Task 7.0: host.docker.internal did not resolve on this custom bridge
+     # network without an explicit mapping, even on a recent Docker Desktop
+     # (verified live -- getaddrinfo failure from inside the container until
+     # this was added). host-gateway is Docker's own portable special value,
+     # works identically on Linux and Docker Desktop.
+     extra_hosts:
+       - "host.docker.internal:host-gateway"
+     environment:
+       - WEBHOOK_URLS=${WEBHOOK_URLS:-http://0.0.0.0:5000/webhook/test}
+       # Task 7.0 (03-mailyte-api/phase-07-tenant-surface.md): shared/webhook_dispatcher.py
+       # (imported by this service to call dispatch_event()) reads WEBHOOK_URL,
+       # singular -- WEBHOOK_URLS above is a different var read directly by
+       # this service's own notification_sender.py, not by the dispatcher.
+       # Without this line dispatch_event() silently no-ops for every event
+       # this container fires, regardless of what WEBHOOK_URLS is set to.
+       - WEBHOOK_URL=${WEBHOOK_URLS:-}
+       - WEBHOOK_SECRET=${WEBHOOK_SECRET}
+       - DB_HOST=mysql
+       - DB_PORT=3306
+       - DB_NAME=${DB_NAME:-mailserver}
+       - DB_USER=${DB_USER:-mailuser}
+       - DB_PASSWORD=${DB_PASSWORD}
+       - REDIS_HOST=redis
+       - REDIS_PORT=6379
+       - FLASK_ENV=${FLASK_ENV:-development}
+       - FLASK_DEBUG=${FLASK_DEBUG:-1}
+     healthcheck:
+       test: ["CMD-SHELL", "python3 -c 'import socket; s=socket.socket(); s.settimeout(2); s.connect((\"localhost\", 8081)); s.close()'"]
+       interval: 30s
+       timeout: 10s
+       retries: 3
+       start_period: 15s
+     volumes:
+       - ./logs/worker/webhooks:/app/logs
+       - ./worker/webhooks:/app
+       - ./shared:/app/shared
+       - ./database:/app/database
+     depends_on:
+       mysql:
+         condition: service_healthy
+       migrate:
+         condition: service_completed_successfully
+       redis:
+         condition: service_healthy
+     networks:
+       - mailserver_network
+     restart: unless-stopped
+
+  # # RATE LIMITER - Email Sending Rate Control
+  # # Prevents spam and enforces sending quotas
+  # # Tracks usage per user, domain, and IP address
+  # # Configurable limits with automatic blocking
+  rate_limiter:
+    build:
+      context: .
+      dockerfile: ./worker/rate_limiter/Dockerfile
+    container_name: rate_limiter
+    ports:
+      - "8082:8082"
+    environment:
+      - DB_HOST=mysql
+      - DB_PORT=3306
+      - DB_NAME=${DB_NAME:-mailserver}
+      - DB_USER=${DB_USER:-mailuser}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_URL=redis://redis:6379/0
+      - FLASK_ENV=${FLASK_ENV:-development}
+      - FLASK_DEBUG=${FLASK_DEBUG:-1}
+      # Bounce-rate tripwire (phase-01): scanning OFF by default until the
+      # thresholds have been watched against real traffic; a pause key set
+      # by hand is enforced regardless of the flag.
+      - TRIPWIRE_ENABLED=${TRIPWIRE_ENABLED:-false}
+      - TRIPWIRE_WINDOW_MINUTES=${TRIPWIRE_WINDOW_MINUTES:-60}
+      - TRIPWIRE_MIN_MESSAGES=${TRIPWIRE_MIN_MESSAGES:-50}
+      - TRIPWIRE_BOUNCE_RATE=${TRIPWIRE_BOUNCE_RATE:-0.05}
+      - TRIPWIRE_COMPLAINT_RATE=${TRIPWIRE_COMPLAINT_RATE:-0.003}
+      - TRIPWIRE_PAUSE_TTL_SECONDS=${TRIPWIRE_PAUSE_TTL_SECONDS:-21600}
+      # Send-credit enforcement (phase-03): OFF by default -- deploying the
+      # code and enabling it are two separate decisions, and the second
+      # needs someone watching real traffic.
+      - SEND_CREDIT_ENFORCEMENT=${SEND_CREDIT_ENFORCEMENT:-false}
+      # Inbound per-second limits keyed on the SENDER's org/domain. External
+      # senders (Google, Microsoft, DMARC aggregators) legitimately burst;
+      # the code defaults (10 / 2) are tight for them. Passed through so the
+      # .env value actually reaches the container -- an unpassed env var is
+      # a dead switch (the SEND_CREDIT_ENFORCEMENT lesson).
+      - ORG_INBOUND_SECOND_DEFAULT=${ORG_INBOUND_SECOND_DEFAULT:-10}
+      - DOMAIN_INBOUND_SECOND_DEFAULT=${DOMAIN_INBOUND_SECOND_DEFAULT:-2}
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c 'import socket; s=socket.socket(); s.settimeout(2); s.connect((\"localhost\", 8082)); s.close()'"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    volumes:
+      - ./logs/worker/rate_limiter:/app/logs
+      - ./shared:/app/shared
+      - ./database:/app/database
+    depends_on:
+      mysql:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    networks:
+      - mailserver_network
+    restart: unless-stopped
+
+  # # TRACKING SERVICE - Email Analytics and Monitoring
+  # # Tracks email opens, clicks, and user engagement
+  # # Generates tracking pixels and redirect URLs
+  # # Provides detailed analytics and reporting
+  tracking:
+     build:
+       context: .
+       dockerfile: ./worker/tracking/Dockerfile
+     container_name: tracking
+     ports:
+       - "8086:8086"
+     # Task 7.0: see the identical extra_hosts note on the `webhooks` service.
+     extra_hosts:
+       - "host.docker.internal:host-gateway"
+     environment:
+       - DB_HOST=mysql
+       - DB_PORT=3306
+       - DB_USER=${DB_USER:-mailuser}
+       - DB_PASSWORD=${DB_PASSWORD}
+       - DB_NAME=${DB_NAME:-mailserver}
+       - REDIS_HOST=redis
+       - REDIS_PORT=6379
+       - TRACKING_DOMAIN=${HOSTNAME:-mail.example.com}
+       # Where a recipient's mail client reaches us for opens and clicks.
+       # Must be a host that RESOLVES and is routed to the API -- the composed
+       # {subdomain}.{domain} default produced track.courier.mailyte.com,
+       # which has never existed in DNS, so every pixel and every rewritten
+       # link was dead. api.courier.mailyte.com already resolves, is behind
+       # Traefik with a valid certificate, and serves
+       # /api/v1/tracking/pixel/{id} with image/png -- verified live.
+       - TRACKING_BASE_URL=${TRACKING_BASE_URL:-https://api.${DOMAIN:-example.com}}
+       - WEBHOOK_SECRET=${WEBHOOK_SECRET}
+       - WEBHOOK_URLS=${WEBHOOK_URLS:-http://0.0.0.0:5000/webhook/test}
+       # Task 7.0: see the identical comment on the `webhooks` service above --
+       # shared/webhook_dispatcher.py reads WEBHOOK_URL (singular), not
+       # WEBHOOK_URLS. tracking.open/tracking.click/delivery.complaint/
+       # email.bounced are all dispatched from this container.
+       - WEBHOOK_URL=${WEBHOOK_URLS:-}
+       - FLASK_ENV=${FLASK_ENV:-development}
+       - FLASK_DEBUG=${FLASK_DEBUG:-1}
+     volumes:
+       - ./logs/tracking:/app/logs
+       - ./worker/tracking:/app
+       - ./shared:/app/shared
+       - ./database:/app/database
+     healthcheck:
+       test: ["CMD-SHELL", "python3 -c 'import socket; s=socket.socket(); s.settimeout(2); s.connect((\"localhost\", 8086)); s.close()'"]
+       interval: 30s
+       timeout: 10s
+       retries: 3
+       start_period: 15s
+     depends_on:
+       mysql:
+         condition: service_healthy
+       migrate:
+         condition: service_completed_successfully
+       redis:
+         condition: service_healthy
+     networks:
+       - mailserver_network
+     restart: unless-stopped
+
+  analytics:
+     build:
+       context: .
+       dockerfile: ./worker/analytics/Dockerfile
+     container_name: analytics
+     ports:
+       - "8087:8085"
+     environment:
+       # Scheduled report delivery. postfix is on this network and accepts mail
+       # on 25; without these a schedule runs and reports that it could not be
+       # sent, rather than silently doing nothing.
+       - SMTP_HOST=${REPORT_SMTP_HOST:-postfix}
+       - SMTP_PORT=${REPORT_SMTP_PORT:-25}
+       - REPORT_FROM_ADDRESS=${REPORT_FROM_ADDRESS:-${ADMIN_EMAIL:-}}
+       - REPORT_SCHEDULER_INTERVAL_SECONDS=${REPORT_SCHEDULER_INTERVAL_SECONDS:-900}
+       - DB_HOST=mysql
+       - DB_PORT=3306
+       - DB_NAME=${DB_NAME:-mailserver}
+       - DB_USER=${DB_USER:-mailuser}
+       - DB_PASSWORD=${DB_PASSWORD}
+       - REDIS_HOST=redis
+       - REDIS_PORT=6379
+       - FLASK_ENV=${FLASK_ENV:-development}
+       - FLASK_DEBUG=${FLASK_DEBUG:-1}
+     healthcheck:
+       test: ["CMD-SHELL", "python3 -c 'import socket; s=socket.socket(); s.settimeout(2); s.connect((\"localhost\", 8085)); s.close()'"]
+       interval: 30s
+       timeout: 10s
+       retries: 3
+       start_period: 15s
+     volumes:
+       - ./worker/analytics:/app
+       - ./shared:/app/shared
+       - ./database:/app/database
+     depends_on:
+       mysql:
+         condition: service_healthy
+       migrate:
+         condition: service_completed_successfully
+       redis:
+         condition: service_healthy
+     networks:
+       - mailserver_network
+     restart: unless-stopped
+
+  # Turns Postfix's log into per-message rows in mail_logs, and fires the
+  # matching email.delivered/bounced/deferred/rejected webhooks at mailyte-api.
+  #
+  # Before this existed nothing wrote mail_logs at all -- the table, the
+  # platform API endpoints that read it, and the tenant Email Logs UI were all
+  # in place around a producer that had never been built, so every log view was
+  # correctly showing an empty set. See mailer/log_ingestor/app.py for why
+  # Postfix's log is the right source and why the components that looked like
+  # the producer (log_analyzer, webhook-filter, tracking_injector) are not.
   log_ingestor:
      build:
        context: .
@@ -526,14 +888,14 @@ services:
        - DB_PORT=3306
        - DB_NAME=${DB_NAME:-mailserver}
        - DB_USER=${DB_USER:-mailuser}
-       - DB_PASSWORD=${DB_PASSWORD:-mailpassword}
+       - DB_PASSWORD=${DB_PASSWORD}
        # The dispatcher reads WEBHOOK_URL (singular). The .env key is
        # WEBHOOK_URLS (plural), so it has to be mapped across explicitly or the
        # dispatcher silently no-ops on an unset variable.
        - WEBHOOK_URL=${WEBHOOK_URLS:-}
-       - WEBHOOK_SECRET=${WEBHOOK_SECRET:-}
+       - WEBHOOK_SECRET=${WEBHOOK_SECRET}
        - SERVICE_NAME=log_ingestor
-       # SMTP API keys: auto-suspension of abusive keys. OFF by default
+       # SMTP API keys K2: auto-suspension of abusive keys. OFF by default
        # until the thresholds have been observed against real traffic
        # (00-PRD-smtp-api-keys section 8); the doveadm pair makes a
        # suspension effective immediately instead of after the auth-cache
@@ -560,104 +922,24 @@ services:
        - mailserver_network
      restart: unless-stopped
 
-  # Webhooks - Real-time Event Notifications
-  webhooks:
-     build: ./worker/webhooks
-     container_name: webhooks
-     # Task 7.0: host.docker.internal needs an explicit mapping on this
-     # custom bridge network -- verified live in the sibling EE repo, same
-     # network setup here. host-gateway is Docker's portable special value.
-     extra_hosts:
-       - "host.docker.internal:host-gateway"
+  templates:
+     build: ./worker/templates
+     container_name: templates
      ports:
-       - "8081:8081"
+       - "8095:8089"
      environment:
-       - WEBHOOK_URLS=${WEBHOOK_URLS:-http://0.0.0.0:5000/webhook/test}
-       # Task 7.0 (03-mailyte-api/phase-07-tenant-surface.md, applied to CE
-       # too): shared/webhook_dispatcher.py (imported here for dispatch_event())
-       # reads WEBHOOK_URL, singular -- WEBHOOK_URLS above is a separate var
-       # read directly by this service's own notification_sender.py. Without
-       # this line dispatch_event() silently no-ops regardless of what a
-       # self-hoster sets WEBHOOK_URLS to.
-       - WEBHOOK_URL=${WEBHOOK_URLS:-}
-       - WEBHOOK_SECRET=${WEBHOOK_SECRET:-webhooksecret}
+       - PORT=8089
        - DB_HOST=mysql
        - DB_PORT=3306
        - DB_NAME=${DB_NAME:-mailserver}
        - DB_USER=${DB_USER:-mailuser}
-       - DB_PASSWORD=${DB_PASSWORD:-mailpassword}
-       - REDIS_HOST=redis
-       - REDIS_PORT=6379
-       - FLASK_ENV=${FLASK_ENV:-development}
-       - FLASK_DEBUG=${FLASK_DEBUG:-1}
-     healthcheck:
-       test: ["CMD-SHELL", "python3 -c 'import socket; s=socket.socket(); s.settimeout(2); s.connect((\"localhost\", 8081)); s.close()'"]
-       interval: 30s
-       timeout: 10s
-       retries: 3
-       start_period: 15s
+       - DB_PASSWORD=${DB_PASSWORD}
+     # phase-05 task 5.7: see caldav's comment above -- runtime mount for
+     # shared/, not a Dockerfile change.
      volumes:
-       # Must be writable by UID 10001 -- see the HOST OWNERSHIP REQUIREMENT
-       # block on the `api` service above. This container is one of the three
-       # that crash-loops rather than degrades if it is not.
-       - ./logs/worker/webhooks:/app/logs
-       - ./worker/webhooks:/app
        - ./shared:/app/shared
-       - ./database:/app/database
-     depends_on:
-       mysql:
-         condition: service_healthy
-       migrate:
-         condition: service_completed_successfully
-       redis:
-         condition: service_healthy
-     networks:
-       - mailserver_network
-     restart: unless-stopped
-
-  # Tracking - Email Open/Click Tracking
-  tracking:
-     build:
-       context: .
-       dockerfile: ./worker/tracking/Dockerfile
-     container_name: tracking
-     # Task 7.0: see the identical extra_hosts note on the `webhooks` service.
-     extra_hosts:
-       - "host.docker.internal:host-gateway"
-     ports:
-       - "8086:8086"
-     environment:
-       - DB_HOST=mysql
-       - DB_PORT=3306
-       - DB_USER=${DB_USER:-mailuser}
-       - DB_PASSWORD=${DB_PASSWORD:-mailpassword}
-       - DB_NAME=${DB_NAME:-mailserver}
-       - REDIS_HOST=redis
-       - REDIS_PORT=6379
-       - TRACKING_DOMAIN=${HOSTNAME:-mail.example.com}
-       - WEBHOOK_SECRET=${WEBHOOK_SECRET:-webhooksecret}
-       - WEBHOOK_URLS=${WEBHOOK_URLS:-http://0.0.0.0:5000/webhook/test}
-       # Task 7.0: see the identical comment on the `webhooks` service above.
-       - WEBHOOK_URL=${WEBHOOK_URLS:-}
-       - FLASK_ENV=${FLASK_ENV:-development}
-       - FLASK_DEBUG=${FLASK_DEBUG:-1}
-     volumes:
-       # Must be writable by UID 10001 -- see the HOST OWNERSHIP REQUIREMENT
-       # block on the `api` service above. Note the path: ./logs/tracking, not
-       # ./logs/worker/tracking, which is what start.sh pre-creates -- so this
-       # one is auto-created root-owned by Docker on first `up` unless it is
-       # chowned explicitly.
-       # logs/worker/tracking, not logs/tracking: this mount was the only one
-       # in the repo missing the worker/ segment, so the directory start.sh,
-       # quick-start.sh, mailyte-ctl.sh and docs/reference/log-formats.md all
-       # create and document was never the one actually mounted. Docker then
-       # created an empty root-owned logs/tracking/ instead.
-       - ./logs/worker/tracking:/app/logs
-       - ./worker/tracking:/app
-       - ./shared:/app/shared
-       - ./database:/app/database
      healthcheck:
-       test: ["CMD-SHELL", "python3 -c 'import socket; s=socket.socket(); s.settimeout(2); s.connect((\"localhost\", 8086)); s.close()'"]
+       test: ["CMD-SHELL", "python3 -c 'import socket; s=socket.socket(); s.settimeout(2); s.connect((\"localhost\", 8089)); s.close()'"]
        interval: 30s
        timeout: 10s
        retries: 3
@@ -667,56 +949,10 @@ services:
          condition: service_healthy
        migrate:
          condition: service_completed_successfully
-       redis:
-         condition: service_healthy
      networks:
        - mailserver_network
      restart: unless-stopped
 
-  # Rate Limiter - Email Sending Rate Control
-  rate_limiter:
-    build:
-      context: .
-      dockerfile: ./worker/rate_limiter/Dockerfile
-    container_name: rate_limiter
-    ports:
-      - "8082:8082"
-    environment:
-      - DB_HOST=mysql
-      - DB_PORT=3306
-      - DB_NAME=${DB_NAME:-mailserver}
-      - DB_USER=${DB_USER:-mailuser}
-      - DB_PASSWORD=${DB_PASSWORD:-mailpassword}
-      - REDIS_HOST=redis
-      - REDIS_PORT=6379
-      - REDIS_URL=redis://redis:6379/0
-      - FLASK_ENV=${FLASK_ENV:-development}
-      - FLASK_DEBUG=${FLASK_DEBUG:-1}
-    healthcheck:
-      test: ["CMD-SHELL", "python3 -c 'import socket; s=socket.socket(); s.settimeout(2); s.connect((\"localhost\", 8082)); s.close()'"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 15s
-    volumes:
-      # Must be writable by UID 10001 -- see the HOST OWNERSHIP REQUIREMENT
-      # block on the `api` service above. start.sh does not pre-create this
-      # path at all, so Docker auto-creates it root-owned on first `up`.
-      - ./logs/worker/rate_limiter:/app/logs
-      - ./shared:/app/shared
-      - ./database:/app/database
-    depends_on:
-      mysql:
-        condition: service_healthy
-      migrate:
-        condition: service_completed_successfully
-      redis:
-        condition: service_healthy
-    networks:
-      - mailserver_network
-    restart: unless-stopped
-
-  # Autoconfig - Email client auto-configuration
   autoconfig:
      build:
        context: .
@@ -730,7 +966,7 @@ services:
        - DB_PORT=3306
        - DB_NAME=${DB_NAME:-mailserver}
        - DB_USER=${DB_USER:-mailuser}
-       - DB_PASSWORD=${DB_PASSWORD:-mailpassword}
+       - DB_PASSWORD=${DB_PASSWORD}
        - HOSTNAME=${HOSTNAME:-mail.example.com}
        - DOMAIN=${DOMAIN:-example.com}
        - MTA_STS_MODE=${MTA_STS_MODE:-testing}
@@ -749,33 +985,198 @@ services:
        - mailserver_network
      restart: unless-stopped
 
-  # Email Templates
-  templates:
-     build: ./worker/templates
-     container_name: templates
-     ports:
-       - "8095:8089"
-     environment:
-       - PORT=8089
-       - DB_HOST=mysql
-       - DB_PORT=3306
-       - DB_NAME=${DB_NAME:-mailserver}
-       - DB_USER=${DB_USER:-mailuser}
-       - DB_PASSWORD=${DB_PASSWORD:-mailpassword}
-     healthcheck:
-       test: ["CMD-SHELL", "python3 -c 'import socket; s=socket.socket(); s.settimeout(2); s.connect((\"localhost\", 8089)); s.close()'"]
-       interval: 30s
-       timeout: 10s
-       retries: 3
-       start_period: 15s
-     depends_on:
-       mysql:
-         condition: service_healthy
-       migrate:
-         condition: service_completed_successfully
-     networks:
-       - mailserver_network
-     restart: unless-stopped
+  docs:
+    build: ./docs
+    container_name: docs
+    ports:
+      - "${DOCS_PORT:-8000}:80"
+    environment:
+      - DOCS_DOMAIN=${DOCS_DOMAIN:-docs.mailyte.com}
+      - SITE_NAME=${SITE_NAME:-Mailyte Email Server Handbook}
+      - SITE_DESCRIPTION=The complete developer handbook for the Mailyte Email Server
+      - SITE_URL=${SITE_URL:-https://docs.mailyte.com}
+      - ACME_EMAIL=${ACME_EMAIL:-admin@mailyte.com}
+      - ACME_STAGING=${ACME_STAGING:-true}
+      - WEBHOOK_URLS=${WEBHOOK_URLS:-}
+      - WEBHOOK_SECRET=${WEBHOOK_SECRET}
+      - CERT_RENEWAL_DAYS=${CERT_RENEWAL_DAYS:-30}
+      - CERT_CHECK_INTERVAL=${CERT_CHECK_INTERVAL:-21600}
+    volumes:
+      - ./docs:/app/docs-source:ro
+      - docs_site:/app/site
+    depends_on:
+      secrets-check:
+        condition: service_completed_successfully
+    networks:
+      - mailserver_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:80/ > /dev/null || curl -sf http://localhost:8000/ > /dev/null"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    # H1: nginx's master process needs root to bind port 80 (<1024);
+    # certbot needs it too for the same reason during renewal. Both drop
+    # to their own unprivileged worker model internally (nginx's
+    # worker_processes run as its configured non-root user by default).
+    # DAC_OVERRIDE+FOWNER: found live -- mkdocs build (entrypoint.sh)
+    # deletes and recreates /app/site (a named volume, so its ownership
+    # predates this container's own user-management) on every start;
+    # os.unlink() there failed with EPERM under cap_drop: ALL alone.
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    cap_add: ["NET_BIND_SERVICE", "SETUID", "SETGID", "CHOWN", "FOWNER", "DAC_OVERRIDE"]
+
+  # ========================================================================
+  # Mailyte Console — the admin panel (PRD §9 shipping model, ADR-004)
+  #
+  # Separate repository, never a separate startup. The console reaches
+  # operators the way Roundcube and SOGo already do: as a container in the
+  # mail server's own compose. `git clone` → `./start.sh` → the console is up,
+  # and first boot lands on the operator-bootstrap screen.
+  #
+  # Prebuilt image, not a build context — the console is released on its own
+  # cadence from its own repo. docker-compose.dev.yml overrides this with
+  # `build: ../mailyte-console` so local development runs from source.
+  # Pin CONSOLE_VERSION in .env for a reproducible deployment; `latest` is a
+  # convenience, not a recommendation.
+  #
+  # First run, to create the owner account:
+  #   docker compose exec api cat /app/data/operator-bootstrap-token
+  # then open the console and paste it. The API writes that 0600 file only
+  # while no operator exists, and consumes it on use.
+  #
+  # Port contract (conventions §2) — the four values agree:
+  #   1. app bind port         3100  (package.json: next start -p 3100)
+  #   2. EXPOSE                3100  (console Dockerfile)
+  #   3. container side below  3100
+  #   4. healthcheck probe     3100
+  #
+  # Host side is 3100 too, NOT the 8085 the PRD originally named: 8085 is
+  # already published by `monitoring` in this file (conventions §7 forbids the
+  # collision), and 3100 is what the console repo and the CE compose already
+  # use. One number in both editions.
+  # ========================================================================
+  # ==========================================================================
+  # Webmail -- the mailbox holder's own surface.
+  #
+  # Distinct from `console` above in the one way that matters: the console is
+  # a staff tool behind an IP allowlist, this is for END USERS and is meant to
+  # be publicly reachable. Do not copy the console's allowlist middleware onto
+  # it; a webmail nobody outside the office can open is not a webmail.
+  #
+  # Source: https://github.com/Techies-Africa/mailyte-webmail (AGPL-3.0).
+  # There is no checkout of it on a production host, so the image comes from a
+  # registry and `build:` is impossible here.
+  # ==========================================================================
+  webmail:
+    image: ghcr.io/techies-africa/mailyte-webmail:${WEBMAIL_VERSION:-latest}
+    container_name: webmail
+    restart: unless-stopped
+    # REMOVE THIS LINE once ghcr.io/techies-africa/mailyte-webmail is published
+    # (the release workflow in that repo publishes it on a v* tag). Until then
+    # an un-gated service makes `docker compose up` fail for the ENTIRE stack
+    # on a pull error -- a mail server that stops booting is far worse than a
+    # webmail that has to be asked for. Start it meanwhile with:
+    #     docker compose --profile webmail up -d webmail
+    profiles: ["webmail"]
+    ports:
+      # 3100 is the console, 3000 is grafana. Bound to loopback: in production
+      # traefik is the only way in (see docker-compose.prod.yml, which drops
+      # this mapping entirely).
+      - "${WEBMAIL_PORT:-127.0.0.1:3200}:3000"
+    environment:
+      # Where the mail server is from THIS container. Read at REQUEST time by
+      # the webmail's route handlers, never inlined into the browser bundle --
+      # which is what lets one published image serve every deployment.
+      #
+      # The browser never talks to the API directly: the webmail proxies every
+      # call server-side, which is what keeps the mailbox session token out of
+      # page scripts.
+      - MAILBOX_API_BASE_URL=http://api:8080/api/v1
+      - NODE_ENV=production
+      # Belt and braces alongside the image's own ENV. Next.js standalone binds
+      # to $HOSTNAME, which Docker sets to the container ID, so without this it
+      # listens only on the container's own IP. The healthcheck below probes
+      # 127.0.0.1 and fails forever -- and Traefik EXCLUDES unhealthy
+      # containers, so no router is created and every request 404s with no
+      # error logged anywhere. Set here too so an older image tag still works.
+      - HOSTNAME=0.0.0.0
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      # Socket probe, never pgrep -- pgrep is absent from these images and
+      # yields exit 127 forever.
+      test:
+        - CMD
+        - node
+        - -e
+        - "require('net').connect(3000,'127.0.0.1').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - mailserver_network
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      # Next.js writes its build and image caches at runtime.
+      - /tmp
+      - /app/.next/cache
+
+  console:
+    image: ghcr.io/techies-africa/mailyte-console:${CONSOLE_VERSION:-latest}
+    container_name: console
+    # REMOVE THIS LINE once ghcr.io/techies-africa/mailyte-console is published (the release workflow
+    # in the console repo publishes it on a v* tag). Until then an un-gated
+    # service makes `docker compose up` fail for the entire stack on a pull
+    # error — a mail server that stops booting is far worse than a console
+    # that has to be asked for. Start it meanwhile with:
+    #     docker compose --profile console up -d console
+    # Dev mode is unaffected: docker-compose.dev.yml builds from source.
+    profiles: ["console"]
+    ports:
+      # Hosted deployments must put this behind VPN or an IP allowlist and
+      # never on public DNS (ADR-002 §7). Bound to all interfaces here rather
+      # than loopback because this file is the hosted/staff edition and the
+      # console usually sits behind a proxy on another host; CE binds
+      # 127.0.0.1 instead, which is the ADR-004 exposure rule for that
+      # edition. Forward X-Forwarded-For in any proxy — operator sessions are
+      # IP-bound, and a proxy that omits it binds every operator to the
+      # proxy's own address and the control stops meaning anything.
+      - "${CONSOLE_PORT:-3100}:3100"
+    environment:
+      # Where the API is from THIS container. Never reaches the browser: the
+      # console proxies every call server-side, which is what keeps the API
+      # off any browser-reachable network and lets the operator session cookie
+      # stay same-origin and SameSite=Strict (ADR-002 §1).
+      - PLATFORM_API_URL=http://api:8080
+      # Resolved by the OPERATOR's browser, so these are host-side addresses.
+      - NEXT_PUBLIC_DOCS_URL=${DOCS_URL:-http://localhost:8000}
+      - NEXT_PUBLIC_RSPAMD_URL=${RSPAMD_URL:-http://localhost:11334}
+      - NODE_ENV=production
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - mailserver_network
+    restart: unless-stopped
+    healthcheck:
+      # Socket probe, never pgrep (conventions §3). node, not python3 — this
+      # is a Node image.
+      test: ["CMD", "node", "-e", "require('net').connect(3100,'127.0.0.1').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    # The image already runs as UID 1001 and needs no capabilities: it binds
+    # 3100, which is above 1024, so not even NET_BIND_SERVICE.
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
 
   # ========================================================================
   # Webmail Clients (pick one or none — controlled via COMPOSE_PROFILES)
@@ -804,7 +1205,7 @@ services:
        - ROUNDCUBEMAIL_DB_HOST=mysql
        - ROUNDCUBEMAIL_DB_NAME=${ROUNDCUBE_DB_NAME:-roundcubemail}
        - ROUNDCUBEMAIL_DB_USER=${DB_USER:-mailuser}
-       - ROUNDCUBEMAIL_DB_PASSWORD=${DB_PASSWORD:-mailpassword}
+       - ROUNDCUBEMAIL_DB_PASSWORD=${DB_PASSWORD}
        - ROUNDCUBEMAIL_UPLOAD_MAX_FILESIZE=25M
        - ROUNDCUBEMAIL_SKIN=elastic
        - ROUNDCUBEMAIL_PLUGINS=archive,zipdownload,managesieve
@@ -841,7 +1242,7 @@ services:
        - MYSQL_PORT=3306
        - MYSQL_DATABASE=${SOGO_DB_NAME:-sogo}
        - MYSQL_USER=${DB_USER:-mailuser}
-       - MYSQL_PASSWORD=${DB_PASSWORD:-mailpassword}
+       - MYSQL_PASSWORD=${DB_PASSWORD}
        - SOGO_IMAP_SERVER=dovecot
        - SOGO_SMTP_SERVER=postfix
        - SOGO_MAIL_DOMAIN=${DOMAIN:-example.com}
@@ -866,123 +1267,16 @@ services:
        - mailserver_network
      restart: unless-stopped
 
-  # Documentation — Developer Handbook
-  docs:
-    build: ./docs
-    container_name: docs
-    ports:
-      - "${DOCS_PORT:-8000}:80"
-    environment:
-      - SITE_NAME=Mailyte Email Server Handbook
-      - SITE_DESCRIPTION=The complete developer handbook for the Mailyte Email Server
-      - SITE_URL=${SITE_URL:-http://localhost:8000}
-    volumes:
-      - ./docs:/app/docs-source:ro
-    networks:
-      - mailserver_network
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:80/ > /dev/null || curl -sf http://localhost:8000/ > /dev/null"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 30s
-    # H1: nginx's master process needs root to bind port 80 (<1024), and
-    # certbot needs it for the same reason during renewal. Both drop to their
-    # own unprivileged worker model internally, so no `USER` in docs/Dockerfile
-    # -- capabilities instead. DAC_OVERRIDE and FOWNER were found live in
-    # mailyte-email-server: entrypoint.sh's mkdocs build deletes and recreates
-    # /app/site on every start, and os.unlink() there failed with EPERM under
-    # cap_drop: ALL alone.
-    security_opt: ["no-new-privileges:true"]
-    cap_drop: ["ALL"]
-    cap_add: ["NET_BIND_SERVICE", "SETUID", "SETGID", "CHOWN", "FOWNER", "DAC_OVERRIDE"]
-
-  # ========================================================================
-  # Mailyte Console — the admin panel (ADR-004)
-  #
-  # One application, two deployments. The same console Mailyte staff use to
-  # run the hosted platform is the panel a self-hoster uses to run their own
-  # box: a CE self-hoster *is* the platform operator of their own instance.
-  # Enterprise-only modules are hidden by GET /api/v1/capabilities, which
-  # this edition reports without them.
-  #
-  # Prebuilt image, not a build context — the console lives in its own
-  # repository and is released on its own cadence. Pin CONSOLE_VERSION in
-  # .env for a reproducible deployment; `latest` is a convenience, not a
-  # recommendation.
-  #
-  # First run, to create the owner account:
-  #   docker compose exec api cat /app/data/operator-bootstrap-token
-  # then open http://127.0.0.1:3100/bootstrap and paste it. The API writes
-  # that 0600 file only while no operator exists, and consumes it on use.
-  #
-  # Port contract (conventions §2) — the four values agree:
-  #   1. app bind port         3100  (the image's `next start -p 3100`)
-  #   2. EXPOSE                3100  (the image's Dockerfile)
-  #   3. container side below  3100
-  #   4. healthcheck probe     3100
-  # ========================================================================
-  console:
-    image: ghcr.io/techies-africa/mailyte-console:${CONSOLE_VERSION:-latest}
-    container_name: console
-    # Opt-in until the image is published. Without this, a plain
-    # `docker compose up` fails the WHOLE stack for every existing CE user the
-    # moment this file merges, because ghcr.io/techies-africa/mailyte-console cannot be pulled yet --
-    # a mail server that stops booting is a far worse outcome than a console
-    # that has to be asked for. Start it with:
-    #     docker compose --profile console up -d console
-    # Remove this key once the image is published to the public registry.
-    profiles: ["console"]
-    ports:
-      # Bound to loopback on purpose (ADR-004). The console controls the
-      # whole mail server; publishing it on 0.0.0.0 by default would make
-      # exposing it the path of least resistance. Terminate TLS and restrict
-      # by source address in a reverse proxy in front of it, and forward
-      # X-Forwarded-For — operator sessions are IP-bound (ADR-002 §7), so a
-      # proxy that does not set it binds every operator to the proxy's own
-      # address and the control stops meaning anything.
-      - "127.0.0.1:${CONSOLE_PORT:-3100}:3100"
-    environment:
-      # Where the API is from THIS container. Never reaches the browser: the
-      # console proxies every call server-side, which is what keeps the API
-      # off any browser-reachable network and lets the operator session
-      # cookie stay same-origin.
-      - PLATFORM_API_URL=http://api:8080
-      # Optional deep-links, resolved by the OPERATOR's browser rather than
-      # by this container, so they are host-side addresses.
-      - NEXT_PUBLIC_DOCS_URL=${DOCS_URL:-http://localhost:8000}
-      - NEXT_PUBLIC_RSPAMD_URL=${RSPAMD_URL:-http://localhost:11334}
-      - NODE_ENV=production
-    healthcheck:
-      # Socket probe, never pgrep — pgrep is absent from these images and
-      # yields exit 127 forever (conventions §3). node, not python3: this is
-      # a Node image.
-      test: ["CMD", "node", "-e", "require('net').connect(3100,'127.0.0.1').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 40s
-    depends_on:
-      api:
-        condition: service_healthy
-    networks:
-      - mailserver_network
-    # The image already runs as a non-root user; these are the
-    # container-level counterparts.
-    security_opt:
-      - no-new-privileges:true
-    read_only: true
-    tmpfs:
-      # Next.js writes its build and image caches at runtime.
-      - /tmp
-      - /app/.next/cache
-    restart: unless-stopped
-
 volumes:
-  mysql_data:
-    driver: local
+  # Shared between postfix (owner) and queue_manager (reader). See the postfix
+  # service for why.
+  postfix_spool:
+  # Read offset for the Postfix log tailer. Keeps a recreate from re-reading
+  # the whole log; rows are keyed deterministically so a replay is harmless,
+  # just wasteful.
   log_ingestor_state:
+    driver: local
+  mysql_data:
     driver: local
   redis_data:
     driver: local
@@ -990,38 +1284,21 @@ volumes:
     driver: local
   letsencrypt_data:
     driver: local
-  # Writable state for the api container, which now runs as UID 10001 (H1).
-  # See the note on the api service's volume list for why this is a named
-  # volume rather than a host bind.
-  api_data:
+  docs_site:
     driver: local
-  sni_config:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ${SNI_CONFIG_PATH:-./storage/sni_config}
-  mail_storage:
-    driver: local
-    driver_opts:
-      type: none
-      o: bind
-      device: ${MAIL_STORAGE_PATH:-./storage/mail_data}
 
 networks:
   mailserver_network:
     driver: bridge
     ipam:
       config:
-        - subnet: 172.20.0.0/16
-  # docker-proxy and the one service that talks to it (C1). Deliberately not
-  # attached to mailserver_network, and `internal: true` so it has no route
-  # off the host at all -- a compromised service on the main network cannot
-  # reach the Docker API even indirectly. Subnet chosen not to overlap
-  # mailserver_network's 172.20.0.0/16 above.
+        - subnet: 172.25.0.0/16
+  # docker-proxy only (phase-07 C1) -- deliberately not attached to
+  # mailserver_network, so nothing else in the stack can reach it even if
+  # a service on that network were compromised.
   internal_only:
     driver: bridge
     internal: true
     ipam:
       config:
-        - subnet: 172.21.0.0/16
+        - subnet: 172.26.0.0/16

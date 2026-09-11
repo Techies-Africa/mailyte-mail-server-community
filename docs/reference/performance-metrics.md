@@ -5,9 +5,6 @@ description: Key metrics to monitor and their healthy ranges for each Mailyte se
 
 # Performance Metrics
 
-> **Enterprise Edition** — This feature is available in [Mailyte Enterprise](https://mailyte.com). The Community Edition does not include this functionality.
-
-
 These are the metrics that matter. Each one has a healthy range and guidance on what to do when it's not healthy.
 
 ## Email Flow
@@ -110,16 +107,26 @@ uptime
 
 ### Via Prometheus (if monitoring is set up):
 
+Metric names are prefixed with the emitting service (`api_`, `monitoring_`, `archiver_`, …) — see [Prometheus Metrics](prometheus-metrics.md) for the full list. There is no Postfix exporter deployed, so queue depth and bounce rate come from `postqueue` and the `mail_logs` table rather than Prometheus.
+
 ```promql
-# Queue depth
-mailyte_mail_queue_size
+# API latency p95 (summary quantile — durations are summaries, not histograms)
+api_http_request_duration_seconds{quantile="0.95"}
 
-# Bounce rate
-rate(mailyte_emails_bounced_total[1h]) / rate(mailyte_emails_sent_total[1h])
+# API error ratio
+rate(api_http_errors_total[5m]) / rate(api_http_requests_total[5m])
 
-# API latency p95
-histogram_quantile(0.95, rate(mailyte_api_request_duration_seconds_bucket[5m]))
+# Backup freshness (hours since last full backup)
+monitoring_backup_age_seconds{backup_type="full"} / 3600
 
 # MySQL connections used %
 mysql_global_status_threads_connected / mysql_global_variables_max_connections
+```
+
+Bounce rate from the database instead:
+
+```sql
+SELECT SUM(status='bounced') / COUNT(*) AS bounce_rate
+FROM mail_logs
+WHERE timestamp > NOW() - INTERVAL 1 DAY;
 ```

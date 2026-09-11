@@ -1,156 +1,113 @@
 # Webhooks Worker
 
-The webhooks worker is the event notification system for Mailyte. Whenever something interesting happens (email sent, delivered, bounced, opened, clicked, rate limit hit, cert renewed, etc.), this service dispatches the event to all registered webhook endpoints. Think of it as a pub/sub fanout that bridges the internal mail system to the outside world.
+The webhooks worker is the event-ingest and notification service for mail-flow events. It is a FastAPI service that receives raw email events over HTTP (inbound/outbound SMTP, IMAP, POP3), extracts metadata, and dispatches signed webhook notifications to external URLs. It also runs the webhook delivery-log cleanup service.
+
+Event delivery across the platform is built on `shared/webhook_dispatcher.py`, which every service imports directly -- there is no Redis pub/sub fanout. This worker is one producer among several (tracking, storage_usage, log_ingestor, monitoring, and others all call `dispatch_event()` themselves); what is unique to this worker is the email-event HTTP ingest and the cleanup APIs.
 
 ## What It Does
 
-- Receives events from all services via **Redis pub/sub** and a direct HTTP API
-- Dispatches events to registered webhook URLs with **HMAC signing**
-- **Retry with exponential backoff** for failed deliveries
-- Queues events in-memory (up to 10,000) to absorb traffic spikes
-- Processes events with a pool of worker threads (configurable)
-- Tracks delivery metrics and exposes Prometheus endpoints
+- Receives raw email events on `/webhook/email/{inbound,outbound,imap,pop3}` (multipart or JSON with the raw `.eml`), parses metadata and attachments
+- Dispatches `email.inbound` / `email.outbound` / IMAP / POP3 events through `shared.webhook_dispatcher` with HMAC signing
+- Maintains a legacy in-process queue (10,000 max) drained by worker threads, whose `notification_sender` fans out to per-event-type URLs configured in the `webhook_urls` MySQL table plus `WEBHOOK_URLS` / `EMAIL_WEBHOOK_URLS` / `RATE_LIMIT_WEBHOOK_URLS` env vars
+- Cleans up old delivery logs on a schedule (`WEBHOOK_CLEANUP_*` settings)
+- Prometheus metrics at `/metrics`
 
 ## How It Works
 
 ```mermaid
 flowchart LR
-    subgraph Sources["Event Sources"]
-        PF["Postfix\n(webhook_sender.py)"]
+    subgraph Sources["Event Producers (all call shared.webhook_dispatcher directly)"]
         TK["Tracking Worker"]
-        RL["Rate Limiter"]
-        CM["Cert Manager"]
+        SU["Storage Usage"]
+        LI["Log Ingestor"]
         MON["Monitoring"]
     end
 
     subgraph Webhooks["Webhooks Worker :8081"]
-        RedisSub["Redis\nSubscriber"]
-        API["HTTP API"]
-        Queue["Event Queue\n(10K max)"]
-        Workers["Worker Threads\n(5 default)"]
-        Sender["Notification\nSender"]
+        API["HTTP ingest\n/webhook/email/*"]
+        Queue["Legacy queue (10K)\n+ worker threads"]
+        Sender["notification_sender\n(per-event URLs from MySQL)"]
+        Cleanup["Cleanup service"]
     end
 
-    PF -->|"Redis pub/sub"| RedisSub
-    TK -->|"Redis pub/sub"| RedisSub
-    RL -->|"Redis pub/sub"| RedisSub
-    CM -->|"HTTP"| API
-    MON -->|"HTTP"| API
-
-    RedisSub --> Queue
-    API --> Queue
-    Queue --> Workers
-    Workers --> Sender
-
-    Sender -->|"HMAC-signed HTTP POST"| EP1["Endpoint A"]
-    Sender -->|"HMAC-signed HTTP POST"| EP2["Endpoint B"]
-    Sender -->|"HMAC-signed HTTP POST"| EP3["Endpoint N"]
-
-    MySQL[(MySQL)] -.->|"endpoint config"| Sender
+    API --> Queue --> Sender
+    API -->|"dispatch_event()"| Dispatcher["shared.webhook_dispatcher"]
+    TK --> Dispatcher
+    SU --> Dispatcher
+    LI --> Dispatcher
+    MON --> Dispatcher
+    Dispatcher -->|"HMAC-signed POST"| Target["WEBHOOK_URL target"]
+    Sender -->|"HMAC-signed POST"| EP["Configured endpoints"]
 ```
 
 ## Event Types
 
-| Event | Trigger |
-|-------|---------|
-| `email.sent` | Email accepted by Postfix for delivery |
-| `email.delivered` | Email delivered to remote server |
-| `email.bounced` | Email bounced (hard or soft) |
-| `email.deferred` | Email temporarily deferred |
-| `email.opened` | Tracking pixel loaded |
-| `email.clicked` | Tracking link clicked |
-| `email.inbound` | Inbound email received |
-| `email.outbound` | Outbound email processed |
-| `rate_limit.exceeded` | Rate limit hit for org/domain/mailbox |
-| `quota.warning` | Mailbox approaching storage quota |
-| `cert.issued` | New SSL certificate issued |
-| `cert.renewed` | SSL certificate renewed |
-| `cert.failed` | SSL certificate renewal failed |
-| `security.ban` | Fail2ban banned an IP |
-| `security.unban` | Fail2ban unbanned an IP |
-| `service.down` | Monitored service went down |
-| `service.recovered` | Monitored service recovered |
+The canonical catalog is the `Events` class in `shared/webhook_dispatcher.py` -- roughly 80 event names across these families:
 
-## Webhook Payload Format
+| Family | Examples |
+|--------|----------|
+| `email.*` | `email.accepted`, `email.inbound`, `email.outbound`, `email.delivered`, `email.bounced`, `email.deferred`, `email.rejected`, `email.read`, `email.moved`, `email.flagged`, ... |
+| `tracking.*` | `tracking.open`, `tracking.click`, `tracking.unsubscribe` |
+| `delivery.*` | `delivery.success`, `delivery.bounce.hard`, `delivery.bounce.soft`, `delivery.complaint`, `delivery.delayed` |
+| `auth.*` | `auth.login.success`, `auth.login.failure`, `auth.password.changed`, `auth.api_key.created`, ... |
+| `rate_limit.*` | `rate_limit.threshold_breach`, `rate_limit.exceeded`, `rate_limit.reset` |
+| `storage.*` | `storage.quota.warning`, `storage.quota.exceeded`, `storage.usage.report` |
+| `queue.*` | `queue.flushed`, `queue.held`, `queue.released`, ... |
+| `health.*` | `health.service.down`, `health.service.up`, `health.system.alert` |
+| `security.*` | `security.brute_force`, `security.dlp.violation`, `security.spam.detected`, ... |
+| `migration.*` | `migration.started`, `migration.progress`, `migration.completed`, `migration.failed` |
 
-Every webhook delivery includes:
+## Payload Signing
 
-```json
-{
-  "event": "email.delivered",
-  "timestamp": "2025-01-15T10:30:00Z",
-  "data": {
-    "message_id": "abc123@mail.example.com",
-    "from": "sender@example.com",
-    "to": "recipient@example.com",
-    "subject": "Hello World",
-    "domain": "example.com",
-    "organization_id": "org-uuid"
-  }
-}
-```
+`shared.webhook_dispatcher` signs every delivery twice:
 
-### HMAC Signing
+1. **Header**: `X-Webhook-Signature: sha256=<hex>` -- HMAC-SHA256 of the full JSON body, keyed with `WEBHOOK_SECRET`. Accompanied by `X-Webhook-Id`, `X-Webhook-Event`, `X-Webhook-Source`, and `X-Webhook-Timestamp`.
+2. **Inline block** for replay protection: `payload["signature"] = {"timestamp": <unix>, "token": "<hex nonce>", "signature": "<hmac>"}` where `signature = hmac(secret, str(timestamp) + token)`.
 
-Every payload is signed with HMAC-SHA256. The signature is in the `X-Webhook-Signature` header:
-
-```
-X-Webhook-Signature: sha256=a1b2c3d4e5f6...
-X-Webhook-Timestamp: 1700000000
-X-Webhook-Source: mailyte-enterprise
-```
-
-To verify on the receiving end:
-
-```python
-import hmac, hashlib
-
-expected = hmac.new(webhook_secret.encode(), payload_json.encode(), hashlib.sha256).hexdigest()
-
-assert request.headers["X-Webhook-Signature"] == f"sha256={expected}"
-```
-
-## Retry Logic
-
-Failed deliveries are retried with exponential backoff:
-
-| Attempt | Delay |
-|---------|-------|
-| 1st retry | 30 seconds |
-| 2nd retry | 2 minutes |
-| 3rd retry | 10 minutes |
-| 4th retry | 1 hour |
-| 5th retry | 6 hours |
-
-After 5 failed attempts, the event is dropped and a warning is logged. The endpoint's failure count is tracked; after enough consecutive failures, the endpoint can be auto-disabled.
+Failed deliveries are recorded -- the dispatcher writes `webhook_delivery_logs` and, on exhausted retries, `webhook_dead_letters`.
 
 ## API Endpoints
 
+Copied from the route decorators in `worker/webhooks/app.py`:
+
 ```
-POST /webhook/event     -- Submit an event for dispatch
-GET  /webhook/status    -- Queue size, worker stats, delivery metrics
-GET  /health            -- Health check
-GET  /metrics           -- Prometheus metrics
+POST /webhook/email/inbound    -- Ingest a raw inbound email event
+POST /webhook/email/outbound   -- Ingest a raw outbound email event
+POST /webhook/email/imap       -- Ingest an IMAP activity event
+POST /webhook/email/pop3       -- Ingest a POP3 activity event
+GET  /webhook/status           -- Queue size, worker stats
+POST /webhook/test             -- Fire a test event through the dispatcher
+GET  /cleanup/stats            -- Delivery-log cleanup statistics
+POST /cleanup/now              -- Run cleanup immediately
+GET  /cleanup/config           -- Current cleanup configuration
+PUT  /cleanup/config           -- Update cleanup configuration
+GET  /health                   -- Health check
+GET  /metrics                  -- Prometheus metrics
 ```
+
+`worker/webhooks/health_monitor.py` contains an additional Flask-style app (`/webhook-health/*`) that is not started by `app.py` -- legacy code, not part of the running service.
 
 ## Configuration
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `WEBHOOK_WORKERS` | `5` | Number of worker threads |
-| `WEBHOOK_SECRET` | (required) | HMAC secret for signing payloads |
-| `WEBHOOK_MAX_BODY_SIZE` | `1048576` | Max payload size in bytes (1 MB) |
-| `WEBHOOK_TIMEOUT` | `30` | HTTP timeout for delivery attempts (seconds) |
-| `REDIS_HOST` | `redis` | Redis host for pub/sub |
-| `DB_HOST` | `mysql` | MySQL host for endpoint config |
+| `WEBHOOK_URL` | (empty) | The single global target `shared.webhook_dispatcher` posts to. Compose maps `WEBHOOK_URLS` into it -- **the dispatcher reads the singular name**; without the mapping every `dispatch_event()` silently no-ops |
+| `WEBHOOK_URLS` | -- | Read by this service's own `notification_sender` (comma-separated) |
+| `EMAIL_WEBHOOK_URLS` / `RATE_LIMIT_WEBHOOK_URLS` | (empty) | Per-family URL lists for the legacy sender |
+| `WEBHOOK_SECRET` | (required) | HMAC signing key |
+| `WEBHOOK_WORKERS` | `5` | Legacy queue worker threads |
+| `WEBHOOK_MAX_RETRIES` / `WEBHOOK_RETRY_DELAY` / `WEBHOOK_TIMEOUT` | `3` / `5` / `30` | Legacy sender retry behavior |
+| `WEBHOOK_CLEANUP_ENABLED` / `WEBHOOK_CLEANUP_SCHEDULE_HOURS` / `WEBHOOK_SUCCESSFUL_RETENTION_HOURS` / `WEBHOOK_FAILED_RETENTION_HOURS` | -- | Delivery-log cleanup |
+| `DB_HOST` / `DB_PORT` / `DB_NAME` / `DB_USER` / `DB_PASSWORD` | `mysql` / `3306` / `mailserver` / -- / -- | MySQL connection |
+| `REDIS_HOST` / `REDIS_PORT` | `redis` / `6379` | Redis connection |
 
 ## Database Tables
 
 | Table | Purpose |
 |-------|---------|
-| `webhook_endpoints` | Registered URLs, secrets, event filters |
-| `webhook_deliveries` | Delivery log with status and retry count |
-| `webhook_events` | Event history |
+| `webhook_urls` | Per-event-type endpoint config (URL, secret, headers, retries, auth) used by the legacy sender |
+| `webhook_delivery_logs` | Delivery attempts (written by `shared.webhook_dispatcher`) |
+| `webhook_dead_letters` | Deliveries that exhausted retries |
 
 ## Docker Configuration
 
@@ -160,18 +117,23 @@ webhooks:
   container_name: webhooks
   ports:
     - "8081:8081"
+  extra_hosts:
+    - "host.docker.internal:host-gateway"
   depends_on:
     - mysql
+    - migrate
     - redis
 ```
 
+In production (`docker-compose.prod.yml`) the service runs with **`replicas: 2`** -- `container_name` and the host port mapping are reset there, since fixed names and host ports cannot be shared between replicas.
+
 ## Gotchas
 
-!!! warning "Queue Overflow"
-    The in-memory queue maxes out at 10,000 events. If the queue fills up (e.g., all webhook endpoints are down), new events are dropped. Monitor the queue size via the `/webhook/status` endpoint.
+!!! warning "WEBHOOK_URL vs WEBHOOK_URLS"
+    `shared/webhook_dispatcher.py` reads `WEBHOOK_URL` (singular). The `.env` key is `WEBHOOK_URLS` (plural), read by this service's own sender. Compose maps one to the other on every producing service -- if you add a new producer, wire both or `dispatch_event()` will silently do nothing.
 
-!!! warning "Endpoint Timeouts"
-    If your webhook receiver is slow (> 30s), the delivery will time out and trigger a retry. Make sure your endpoint responds quickly -- ideally just acknowledge receipt and process async.
+!!! warning "Queue overflow"
+    The legacy in-memory queue maxes out at 10,000 events; when full, new events to it are dropped. Monitor `/webhook/status`.
 
 !!! tip "Debugging"
-    Check the `webhook_deliveries` table to see delivery attempts, HTTP status codes, and error messages for each event.
+    Check `webhook_delivery_logs` for delivery attempts and status codes, and `webhook_dead_letters` for events that exhausted retries.

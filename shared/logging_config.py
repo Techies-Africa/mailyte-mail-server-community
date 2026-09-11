@@ -25,7 +25,8 @@ class RedactingFilter(logging.Filter):
     """Defence-in-depth against secrets reaching logs (phase-07 H2).
 
     The real fix is never putting a secret in a log call in the first place
-    -- this filter exists for whatever call site nobody's caught yet, current
+    (see the admin-token and bootstrap-token fixes this same phase made) --
+    this filter exists for whatever call site nobody's caught yet, current
     or future. Matches `key=value` / `key: value` / `key" : "value` shapes
     where the key looks like a credential, case-insensitively, and redacts
     only the value so the rest of the line stays useful for debugging.

@@ -1,0 +1,28 @@
+# Local development overrides.
+#
+# Docker Compose loads this file automatically for a plain `docker compose up`
+# (which is what ./dev.sh --email runs). It is NOT loaded when the compose files
+# are named explicitly, e.g.
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up
+# so production keeps the base file's settings untouched.
+#
+# This file is machine-specific and is gitignored (docker-compose.override.yml).
+# Copy this example to docker-compose.override.yml and adjust the port(s) for
+# whatever else is already bound on your host — the example below reflects one
+# real dev machine's conflict, not a value you can assume applies to yours.
+
+services:
+  # The base file binds cert_manager to host port 80 for Let's Encrypt HTTP-01
+  # challenges. On this machine XAMPP's Apache already owns 80 (and 443), so the
+  # bind fails with "address already in use" and takes the whole stack down.
+  #
+  # ACME cannot complete on a local machine anyway (no public DNS pointing here,
+  # and ACME_STAGING defaults to true), so the port is only needed in production.
+  # `!override` is required here: Compose merges `ports` lists by APPENDING, so a
+  # plain `ports:` would keep the base file's "80:80" and add 8081 alongside it,
+  # leaving the conflict in place.
+  # Port choice: 8081-8104 are taken by the worker services (webhooks owns 8081),
+  # 8080/4000/3999 by ./dev.sh, and 80/443/3306 by XAMPP. 9080 is clear of all of them.
+  cert_manager:
+    ports: !override
+      - "9080:80"

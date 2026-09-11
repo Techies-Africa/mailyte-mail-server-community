@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Integration Tests for Mailyte Mail Server
+Integration Tests for Enterprise Mail Server
 Tests inter-service communication and API endpoints
 """
 
@@ -146,7 +146,7 @@ class IntegrationTester:
 
     def run_all_tests(self):
         """Run all integration tests"""
-        print("🧪 Starting Integration Tests for Mailyte Mail Server")
+        print("🧪 Starting Integration Tests for Enterprise Mail Server")
         print("=" * 60)
 
         # Test 1: Service Health Checks
@@ -236,7 +236,7 @@ class IntegrationTester:
 
 
 if __name__ == "__main__":
-    print("🚀 Mailyte Mail Server Integration Tester")
+    print("🚀 Enterprise Mail Server Integration Tester")
     print("Make sure all services are running before starting tests")
 
     if len(sys.argv) > 1 and sys.argv[1] == "--wait":

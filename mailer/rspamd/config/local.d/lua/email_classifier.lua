@@ -88,6 +88,23 @@ local promo_keywords = {
   "order now", "act now", "don't miss",
 }
 
+-- Subjects that mean "act on this now": one-time codes, sign-in
+-- verification, password resets, security alerts.
+--
+-- Checked before every bulk heuristic below. A Zoho sign-in OTP was being
+-- filed into Promotions -- it carries a Feedback-ID, which the promotions
+-- branch treated as proof of marketing, and promotions is evaluated before
+-- notifications, so "otp" in the sender never got a chance to win. A code
+-- that expires in ten minutes sitting in a folder nobody watches is the worst
+-- possible misfile, so this outranks everything except spam.
+local transactional_keywords = {
+  "otp", "one-time", "one time pass", "verification code", "security code",
+  "login code", "sign-in", "sign in code", "signin", "2fa", "two-factor",
+  "authentication code", "verify your", "verification", "confirm your",
+  "password reset", "reset your password", "security alert", "suspicious",
+  "access code", "passcode", "confirmation code",
+}
+
 -- Helper: extract domain from email address
 local function get_domain(email)
   if not email then return nil end
@@ -140,9 +157,20 @@ local function classify_email(task)
   local list_id = task:get_header('List-Id')
 
   -- ---------------------------------------------------------------
-  -- 1. Social network detection (highest priority after spam)
+  -- 0. Transactional / security mail — outranks every bulk heuristic
   -- ---------------------------------------------------------------
-  if from_domain and social_domains[from_domain] then
+  -- Deliberately first. These arrive through the same platforms as marketing
+  -- and carry the same bulk headers, so any domain- or header-based rule
+  -- below will happily file a login code under Promotions. The subject is the
+  -- only signal that separates them, and getting this wrong costs someone
+  -- their sign-in rather than an unread advert.
+  if contains_any(subject, transactional_keywords) then
+    category = "notifications"
+
+  -- ---------------------------------------------------------------
+  -- 1. Social network detection
+  -- ---------------------------------------------------------------
+  elseif from_domain and social_domains[from_domain] then
     category = "social"
 
   -- ---------------------------------------------------------------
@@ -150,8 +178,12 @@ local function classify_email(task)
   -- ---------------------------------------------------------------
   elseif from_domain and promo_domains[from_domain] then
     category = "promotions"
-  elseif feedback_id then
-    -- Feedback-ID header is used by bulk senders (Gmail requirement)
+  elseif feedback_id and (list_unsub or contains_any(subject, promo_keywords)) then
+    -- Feedback-ID marks a bulk-capable SENDING PLATFORM, not a marketing
+    -- message: Zoho, SES and the rest attach it to one-time passcodes and
+    -- receipts too. On its own it filed every transactional mail from those
+    -- providers under Promotions, so it now needs corroboration -- an
+    -- unsubscribe link or actual promotional language.
     category = "promotions"
   elseif list_unsub and contains_any(subject, promo_keywords) then
     -- Has unsubscribe link AND promotional language in subject

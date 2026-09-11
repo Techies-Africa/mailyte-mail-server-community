@@ -1,5 +1,15 @@
 fastapi==0.128.8
 uvicorn==0.24.0
+# Required by FastAPI to parse multipart/form-data. The webmail's send
+# endpoint (/api/v1/mailbox/messages/send) carries file attachments, and
+# without this request.form() raises at runtime while the router still
+# loads cleanly -- so the failure only shows up on the first send.
+python-multipart==0.0.20
+# Renders the 2FA enrolment QR as SVG. The webmail's ApiTwoFactorEnrolment
+# expects `qr_code_svg`, matching what Laravel's BaconQrCode produced; the
+# totp service only returns the otpauth:// URI. SVG needs no image
+# backend, so this stays a pure-Python dependency.
+qrcode==8.0
 mysql-connector-python==9.4.0
 bcrypt==4.1.2
 cryptography==49.0.0
@@ -13,3 +23,7 @@ pydantic==2.13.4
 aiohttp==3.13.5
 boto3==1.34.0
 python-ulid==2.7.0
+psutil==6.1.0
+dnspython==2.7.0
+# Publishing transport rules to the enforcement cache rspamd reads.
+redis==5.0.8

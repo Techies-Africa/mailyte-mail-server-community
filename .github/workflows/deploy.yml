@@ -1,0 +1,456 @@
+name: Deploy
+
+# DEPLOYMENT MODEL -- build from source on the host, not from a registry.
+#
+# What is actually running in production is the SOURCE TREE on the prod host:
+# DevPilot checks each release into a timestamped release directory, flips the
+# `current` symlink, and deployment/deploy.sh (or this workflow's per-service
+# path) runs `docker compose up -d --build`, which builds images from that
+# source tree. No compose file references a registry image for these services
+# -- every one of them has a `build:` stanza and no `image:` tag.
+#
+# This workflow therefore does NOT ship images. Its jobs are:
+#   * build       -- a verification gate: prove every selected service's
+#                    Dockerfile still builds before touching the host.
+#   * deploy      -- SSH to the host and `docker compose up -d --no-deps
+#                    --build <svc>` per service, rebuilding from the source
+#                    already synced there by DevPilot.
+#
+# A previous revision pulled ECR images and retagged them mailyte/<svc>:latest
+# before running `up -d --build`. That was dead code twice over: `--build`
+# rebuilds from source and ignores pulled tags, and no compose file references
+# mailyte/<svc> images at all (the host also never received ECR credentials,
+# so the pull itself could not have succeeded). Removed 2026-08-30 -- do not
+# reintroduce registry pulls here without first moving the live deploy path
+# (deployment/deploy.sh) to image-based deployment.
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+      services:
+        description: 'Services to deploy (comma-separated, or "all")'
+        required: false
+        default: 'all'
+        type: string
+      skip_backup:
+        description: 'Skip pre-deployment backup'
+        required: false
+        default: false
+        type: boolean
+      dry_run:
+        description: 'Dry run (build only, do not deploy)'
+        required: false
+        default: false
+        type: boolean
+
+  # Auto-deploy to staging on merge to develop -- DISABLED 2026-07-31.
+  #
+  # This job needs AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_REGION,
+  # DEPLOY_SSH_KEY / DEPLOY_USER / DEPLOY_HOST / DEPLOY_PATH, and a GitHub
+  # Environment named "staging". None of them exist yet -- the staging
+  # environment is defined in plans/06-operations/phase-02-deployment-release.md
+  # section 2.1 and has not been built. So every merge to develop fired this
+  # workflow and it failed in 0s before any job started, on every single merge.
+  #
+  # A pipeline that always fails is worse than no pipeline: it costs Actions
+  # minutes and it trains everyone to ignore red.
+  #
+  # RE-ENABLE as part of ops phase-02, once the secrets and the Environment
+  # exist. workflow_dispatch above still works for manual runs in the meantime.
+  #
+  # push:
+  #   branches:
+  #     - develop
+  #   paths-ignore:
+  #     - '*.md'
+  #     - 'docs/**'
+
+concurrency:
+  group: deploy-${{ github.event.inputs.environment || 'staging' }}
+  cancel-in-progress: false
+
+env:
+  # All deployable compose services in the platform (docker-compose.yml).
+  # log_ingestor, dlp, totp, geo_blocking and docs were missing for months --
+  # a per-service deploy could not target them at all.
+  ALL_SERVICES: >-
+    postfix dovecot rspamd cert_manager api queue_manager rate_limiter
+    webhooks tracking rag storage_usage delivery_optimizer encryption
+    archiver jmap migration autoconfig caldav activesync analytics
+    dashboard templates url_protection oauth monitoring log_ingestor
+    dlp totp geo_blocking docs
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Pre-deployment checks
+  # ---------------------------------------------------------------------------
+  preflight:
+    name: Pre-flight Checks
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.env.outputs.environment }}
+      services: ${{ steps.services.outputs.list }}
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine environment
+        id: env
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "environment=staging" >> $GITHUB_OUTPUT
+          else
+            echo "environment=${{ github.event.inputs.environment }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Determine services to deploy
+        id: services
+        run: |
+          INPUT="${{ github.event.inputs.services || 'all' }}"
+          if [ "$INPUT" = "all" ]; then
+            echo "list=${ALL_SERVICES}" >> $GITHUB_OUTPUT
+          else
+            echo "list=${INPUT}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Generate deployment tag
+        id: tag
+        run: |
+          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
+          TAG="${{ steps.env.outputs.environment }}-${SHORT_SHA}-$(date +%Y%m%d%H%M%S)"
+          echo "tag=${TAG}" >> $GITHUB_OUTPUT
+          echo "Deployment tag: ${TAG}"
+
+      - name: Production deployment guard
+        if: steps.env.outputs.environment == 'production'
+        run: |
+          echo "::warning::Production deployment requested"
+          # Ensure we are deploying from main branch for production
+          if [ "${{ github.ref }}" != "refs/heads/main" ]; then
+            echo "::error::Production deployments must be from the main branch"
+            exit 1
+          fi
+
+      - name: Validate docker-compose config
+        run: docker compose -f docker-compose.yml config --quiet
+
+  # ---------------------------------------------------------------------------
+  # Run CI checks (if not already passing)
+  # ---------------------------------------------------------------------------
+  ci-check:
+    name: CI Verification
+    needs: preflight
+    uses: ./.github/workflows/ci.yml
+    secrets: inherit
+
+  # ---------------------------------------------------------------------------
+  # Pre-deployment backup (production only)
+  # ---------------------------------------------------------------------------
+  backup:
+    name: Pre-deployment Backup
+    runs-on: ubuntu-latest
+    needs: [preflight, ci-check]
+    if: |
+      needs.preflight.outputs.environment == 'production' &&
+      github.event.inputs.skip_backup != 'true'
+    environment: ${{ needs.preflight.outputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # No AWS credential setup here: scripts/backup.sh runs ON THE HOST with
+      # the host's own credentials. Runner-side AWS creds never reached it --
+      # they only made this job fail (and block deploy) when the AWS_* secrets
+      # were absent.
+      - name: Trigger remote backup
+        run: |
+          echo "Triggering pre-deployment backup on ${{ needs.preflight.outputs.environment }}..."
+          ssh -o StrictHostKeyChecking=no \
+            -i <(echo "${{ secrets.DEPLOY_SSH_KEY }}") \
+            ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} \
+            "cd ${{ secrets.DEPLOY_PATH }} && bash scripts/backup.sh --full" \
+            || echo "::warning::Pre-deployment backup failed or SSH not configured"
+
+  # ---------------------------------------------------------------------------
+  # Build verification gate. Images built here are DISCARDED -- the host
+  # rebuilds from its own source tree (see the deployment-model note at the
+  # top of this file). This job exists to prove every selected service's
+  # Dockerfile builds BEFORE the deploy step starts restarting containers
+  # on the production host.
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build Images (verification gate)
+    runs-on: ubuntu-latest
+    needs: [preflight, ci-check]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build images
+        env:
+          TAG: ${{ needs.preflight.outputs.tag }}
+          SERVICES: ${{ needs.preflight.outputs.services }}
+        run: |
+          FAILED=0
+          BUILT=0
+
+          for svc in $SERVICES; do
+            echo ""
+            echo "========================================"
+            echo "Building: ${svc}"
+            echo "========================================"
+
+            # Determine build context and Dockerfile. These mappings mirror
+            # the build: stanzas in docker-compose.yml -- keep them in sync.
+            DOCKERFILE=""
+            BUILD_CTX=""
+
+            case "$svc" in
+              log_ingestor)
+                DOCKERFILE="mailer/log_ingestor/Dockerfile"
+                BUILD_CTX="."
+                ;;
+              postfix|dovecot|rspamd|cert_manager)
+                DOCKERFILE="mailer/$svc/Dockerfile"
+                BUILD_CTX="mailer/$svc"
+                ;;
+              dlp)
+                DOCKERFILE="security/Dockerfile.dlp"
+                BUILD_CTX="."
+                ;;
+              totp)
+                DOCKERFILE="security/Dockerfile.totp"
+                BUILD_CTX="."
+                ;;
+              geo_blocking)
+                DOCKERFILE="security/Dockerfile.geo"
+                BUILD_CTX="."
+                ;;
+              docs)
+                DOCKERFILE="docs/Dockerfile"
+                BUILD_CTX="docs"
+                ;;
+              tracking|rag|storage_usage|archiver|migration|autoconfig|queue_manager|rate_limiter|analytics|monitoring)
+                DOCKERFILE="worker/$svc/Dockerfile"
+                BUILD_CTX="."
+                ;;
+              *)
+                DOCKERFILE="worker/$svc/Dockerfile"
+                BUILD_CTX="worker/$svc"
+                ;;
+            esac
+
+            # Check if Dockerfile exists
+            if [ ! -f "$DOCKERFILE" ]; then
+              echo "::warning::No Dockerfile for ${svc} at ${DOCKERFILE}, skipping"
+              continue
+            fi
+
+            docker build \
+              -t "mailyte-buildcheck/${svc}:${TAG}" \
+              -f "$DOCKERFILE" \
+              "$BUILD_CTX" || { FAILED=$((FAILED + 1)); continue; }
+
+            BUILT=$((BUILT + 1))
+            echo "Built: mailyte-buildcheck/${svc}:${TAG}"
+          done
+
+          echo ""
+          echo "========================================"
+          echo "Build Summary: ${BUILT} succeeded, ${FAILED} failed"
+          echo "========================================"
+
+          if [ $FAILED -gt 0 ]; then
+            echo "::error::${FAILED} service(s) failed to build"
+            exit 1
+          fi
+
+  # ---------------------------------------------------------------------------
+  # Deploy to target environment
+  # ---------------------------------------------------------------------------
+  deploy:
+    name: Deploy to ${{ needs.preflight.outputs.environment }}
+    runs-on: ubuntu-latest
+    needs: [preflight, build, backup]
+    if: |
+      always() &&
+      needs.build.result == 'success' &&
+      (needs.backup.result == 'success' || needs.backup.result == 'skipped') &&
+      github.event.inputs.dry_run != 'true'
+    environment: ${{ needs.preflight.outputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Build-from-source deploy (see the note at the top of this file):
+      # rebuild each selected service from the source tree DevPilot has
+      # already synced to the host, then restart it. This workflow does NOT
+      # ship code -- it redeploys whatever release the host's DEPLOY_PATH
+      # (the `current` symlink) points at. TAG is a label for the logs only.
+      - name: Deploy via SSH
+        env:
+          TAG: ${{ needs.preflight.outputs.tag }}
+          ENVIRONMENT: ${{ needs.preflight.outputs.environment }}
+          SERVICES: ${{ needs.preflight.outputs.services }}
+        run: |
+          echo "Deploying tag ${TAG} to ${ENVIRONMENT}..."
+
+          # Write deploy script to execute on remote
+          cat > /tmp/deploy-remote.sh << 'DEPLOY_EOF'
+          #!/bin/bash
+          set -euo pipefail
+
+          DEPLOY_PATH="$1"
+          TAG="$2"
+          ENVIRONMENT="$3"
+          SERVICES="$4"
+
+          cd "$DEPLOY_PATH"
+
+          echo "[$(date)] Starting deployment: ${TAG} to ${ENVIRONMENT} (rebuild from source in ${DEPLOY_PATH})"
+
+          # Select compose files based on environment. The project name is
+          # PINNED to match deployment/deploy.sh -- Compose defaults the
+          # project to the current directory's basename, and DEPLOY_PATH is
+          # a DevPilot release directory, so an unpinned invocation would
+          # treat the live stack as a brand-new project (orphaning named
+          # volumes and colliding with running containers). The profiles are
+          # named for the same reason deploy.sh names them: profiled services
+          # (console, webmail) are invisible to compose without them.
+          COMPOSE_CMD="docker compose -p mailyte-prod -f docker-compose.yml"
+          if [ "$ENVIRONMENT" = "production" ]; then
+            COMPOSE_CMD="$COMPOSE_CMD -f docker-compose.prod.yml"
+          fi
+          COMPOSE_CMD="$COMPOSE_CMD --profile console --profile webmail"
+
+          # Rolling restart: rebuild + update services one by one
+          for svc in $SERVICES; do
+            echo "Updating ${svc}..."
+            $COMPOSE_CMD up -d --no-deps --build "$svc" 2>/dev/null || \
+              echo "WARNING: Could not update ${svc}"
+            sleep 2
+          done
+
+          # Wait for health checks
+          echo "Waiting for services to stabilize..."
+          sleep 30
+
+          # Check service health
+          UNHEALTHY=$($COMPOSE_CMD ps 2>/dev/null | grep -c "unhealthy" || echo "0")
+          if [ "$UNHEALTHY" -gt 0 ]; then
+            echo "WARNING: ${UNHEALTHY} service(s) are unhealthy"
+            $COMPOSE_CMD ps
+          else
+            echo "All services healthy"
+          fi
+
+          echo "[$(date)] Deployment complete: ${TAG}"
+          DEPLOY_EOF
+
+          chmod +x /tmp/deploy-remote.sh
+
+          # Execute on remote server
+          ssh -o StrictHostKeyChecking=no \
+            -o ConnectTimeout=30 \
+            -i <(echo "${{ secrets.DEPLOY_SSH_KEY }}") \
+            ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} \
+            "bash -s" < /tmp/deploy-remote.sh \
+              "${{ secrets.DEPLOY_PATH }}" \
+              "${TAG}" \
+              "${ENVIRONMENT}" \
+              "${SERVICES}"
+
+      - name: Verify deployment
+        env:
+          ENVIRONMENT: ${{ needs.preflight.outputs.environment }}
+        run: |
+          echo "Verifying deployment on ${ENVIRONMENT}..."
+
+          # Health check via API endpoint
+          API_URL="${{ secrets.API_URL }}"
+          if [ -n "$API_URL" ]; then
+            for i in $(seq 1 5); do
+              STATUS=$(curl -sf -o /dev/null -w "%{http_code}" "${API_URL}/health" || echo "000")
+              if [ "$STATUS" = "200" ]; then
+                echo "API health check passed (HTTP ${STATUS})"
+                break
+              fi
+              echo "Waiting for API... (attempt $i/5, HTTP ${STATUS})"
+              sleep 10
+            done
+
+            if [ "$STATUS" != "200" ]; then
+              echo "::warning::API health check did not return 200 after deployment"
+            fi
+          else
+            echo "::notice::No API_URL configured, skipping health check"
+          fi
+
+  # ---------------------------------------------------------------------------
+  # Post-deployment notification
+  # ---------------------------------------------------------------------------
+  notify:
+    name: Notify
+    runs-on: ubuntu-latest
+    needs: [preflight, deploy]
+    if: always()
+    steps:
+      - name: Deployment notification
+        env:
+          ENVIRONMENT: ${{ needs.preflight.outputs.environment }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+          DEPLOY_RESULT: ${{ needs.deploy.result }}
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          STATUS_EMOJI="unknown"
+          STATUS_TEXT="Unknown"
+          case "$DEPLOY_RESULT" in
+            success)  STATUS_EMOJI="white_check_mark"; STATUS_TEXT="Succeeded" ;;
+            failure)  STATUS_EMOJI="x"; STATUS_TEXT="Failed" ;;
+            skipped)  STATUS_EMOJI="fast_forward"; STATUS_TEXT="Skipped" ;;
+            *)        STATUS_EMOJI="question"; STATUS_TEXT="${DEPLOY_RESULT}" ;;
+          esac
+
+          echo "Deployment to ${ENVIRONMENT}: ${STATUS_TEXT}"
+          echo "  Tag: ${TAG}"
+          echo "  Actor: ${{ github.actor }}"
+          echo "  Commit: ${{ github.sha }}"
+
+          # Send Slack notification if webhook is configured
+          if [ -n "$SLACK_WEBHOOK" ]; then
+            curl -s -X POST "$SLACK_WEBHOOK" \
+              -H 'Content-type: application/json' \
+              -d "{
+                \"text\": \":${STATUS_EMOJI}: Mailyte deployment to *${ENVIRONMENT}*: ${STATUS_TEXT}\",
+                \"blocks\": [
+                  {
+                    \"type\": \"section\",
+                    \"text\": {
+                      \"type\": \"mrkdwn\",
+                      \"text\": \":${STATUS_EMOJI}: *Mailyte Deployment*\n*Environment:* ${ENVIRONMENT}\n*Status:* ${STATUS_TEXT}\n*Tag:* \`${TAG}\`\n*Actor:* ${{ github.actor }}\n*Commit:* \`$(echo ${{ github.sha }} | cut -c1-7)\`\"
+                    }
+                  }
+                ]
+              }" || echo "::warning::Slack notification failed"
+          fi
+
+      - name: Create GitHub deployment status
+        if: needs.deploy.result == 'success'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.repos.createDeploymentStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              deployment_id: context.payload.deployment?.id || 0,
+              state: 'success',
+              description: 'Deployed to ${{ needs.preflight.outputs.environment }}',
+              environment_url: '${{ secrets.API_URL }}',
+            }).catch(() => console.log('Could not create deployment status'));

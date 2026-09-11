@@ -6,20 +6,23 @@ Routine tasks that keep Mailyte healthy — schedule them and forget about them 
 
 | Task | Frequency | Automated? | Downtime? |
 |------|-----------|-----------|-----------|
-| Log rotation | Daily | Yes | No |
-| Database cleanup | Weekly | Yes (cron) | No |
+| Container log rotation | Continuous | Yes (prod compose logging limits) | No |
+| `logs/` file rotation | Weekly | Yes (host logrotate, once configured) | No |
+| Database cleanup | As needed | No | No |
 | Queue flushing | As needed | No | No |
-| Certificate renewal | Every 60-90 days | Yes (certbot) | No |
-| Docker image updates | Monthly | No | Brief |
+| Certificate renewal | Automatic | Yes (cert_manager, checks every 6h) | No |
+| Base image refresh (`PULL_BASE=1`) | Weekly-monthly | No | Brief |
 | OS security patches | Weekly | Yes (unattended-upgrades) | Maybe (reboot) |
 | Disk usage check | Daily | Yes (alert) | No |
 | Backup verification | Monthly | No | No |
 
 ## Log Rotation
 
-Docker logs can grow fast, especially for Postfix. Configure Docker's log driver to handle this automatically.
+There are two kinds of logs, handled differently:
 
-### Docker Daemon Config
+### Container stdout/stderr
+
+`docker-compose.prod.yml` already caps every service at 3 json-files of 10 MB each (30 MB per container) — no daemon.json change is needed for the production stack. If you also want a host-wide default for other containers:
 
 ```json
 // /etc/docker/daemon.json
@@ -33,81 +36,57 @@ Docker logs can grow fast, especially for Postfix. Configure Docker's log driver
 ```
 
 ```bash
-# Apply the config
-sudo systemctl restart docker
+sudo systemctl restart docker   # brief downtime for every container
 ```
 
-This limits each container to 5 log files of 50MB each (250MB max per container).
+### File logs under `logs/`
 
-### Per-Service Log Limits
-
-Override in Docker Compose for chatty services:
-
-```yaml
-services:
-  postfix:
-    logging:
-      driver: json-file
-      options:
-        max-size: "100m"
-        max-file: "10"
-  api:
-    logging:
-      driver: json-file
-      options:
-        max-size: "50m"
-        max-file: "5"
-```
-
-### Manual Log Cleanup
+Postfix, Dovecot, Rspamd, and the workers write real log files to bind-mounted directories in the project tree — most importantly `logs/mailer/postfix/mail.log`, which is the only record of deliveries, deferrals, and bounces (and the input to the `log_ingestor` service). These are **not** rotated by Docker.
 
 ```bash
-# See how much space logs are using
-sudo du -sh /var/lib/docker/containers/*/
+# See how much space they use
+du -sh logs/*/*
 
-# Truncate a specific container's log (doesn't stop logging)
-sudo truncate -s 0 /var/lib/docker/containers/<container-id>/<container-id>-json.log
+# Rotate with host logrotate — copytruncate, so postfix keeps its open
+# file handle and log_ingestor's read offset stays valid
+cat <<'EOF' | sudo tee /etc/logrotate.d/mailyte
+/opt/mailyte/mailyte-email-server/logs/mailer/*/*.log {
+  weekly
+  rotate 8
+  compress
+  delaycompress
+  missingok
+  notifempty
+  copytruncate
+}
+EOF
 ```
+
+(Adjust the path to your checkout; on deploy-pipeline hosts `logs/` is a symlink to the shared root — point logrotate at the resolved path.)
 
 ## Database Cleanup
 
-Over time, MySQL accumulates data that's no longer needed — old logs, expired sessions, soft-deleted records.
+Over time, MySQL accumulates data that's no longer needed — old mail logs, expired sessions, stale tracking rows. There is no bundled cleanup script yet; the growth tables and a safe manual pattern:
 
-### Automated Cleanup Script
-
-```bash
-#!/bin/bash
-# scripts/db-cleanup.sh
-
-MYSQL_CMD="docker compose exec -T mysql mysql -u root -p${MYSQL_ROOT_PASSWORD} ${MYSQL_DATABASE}"
-
-echo "$(date): Starting database cleanup"
-
-# Remove expired sessions (older than 30 days)
-$MYSQL_CMD -e "DELETE FROM sessions WHERE expires_at < NOW() - INTERVAL 30 DAY;"
-
-# Clean up old API logs (older than 90 days)
-$MYSQL_CMD -e "DELETE FROM api_logs WHERE created_at < NOW() - INTERVAL 90 DAY;"
-
-# Remove old email tracking data (older than 180 days)
-$MYSQL_CMD -e "DELETE FROM email_events WHERE created_at < NOW() - INTERVAL 180 DAY;"
-
-# Clean up soft-deleted records (older than 30 days)
-$MYSQL_CMD -e "DELETE FROM emails WHERE deleted_at IS NOT NULL AND deleted_at < NOW() - INTERVAL 30 DAY;"
-
-# Optimize tables after large deletes
-$MYSQL_CMD -e "OPTIMIZE TABLE sessions, api_logs, email_events, emails;"
-
-echo "$(date): Database cleanup complete"
-```
-
-Schedule it:
+| Table | Grows with | Safe to prune |
+|-------|-----------|---------------|
+| `mail_logs` | Every message | Rows older than your log-retention policy |
+| `email_tracking` | Every tracked open/click | Rows older than your analytics window |
+| `user_sessions`, `web_sessions`, `mailbox_sessions` | Logins | Expired rows |
+| `health_checks`, `service_metrics` | Monitoring | Anything old |
 
 ```bash
-# Run weekly on Sundays at 3 AM
-echo "0 3 * * 0 root /opt/mailyte/scripts/db-cleanup.sh >> /var/log/mailyte-cleanup.log 2>&1" \
-  | sudo tee /etc/cron.d/mailyte-cleanup
+# Take a backup first -- always
+./scripts/backup.sh --mysql-only
+
+# Then prune, e.g. tracking rows older than 180 days
+docker compose exec -T mysql sh -c \
+  'mysql -u root -p"$(cat /run/secrets/db_root_password)" "${MYSQL_DATABASE:-mailserver}"' <<'SQL'
+DELETE FROM email_tracking WHERE created_at < NOW() - INTERVAL 180 DAY LIMIT 100000;
+SQL
 ```
+
+Delete in bounded batches (`LIMIT`) and repeat — a single unbounded `DELETE` on a large table locks it for the duration.
 
 ## Queue Management
 
@@ -120,8 +99,8 @@ docker compose exec postfix postqueue -p
 # Count queued messages
 docker compose exec postfix postqueue -p | grep -c "^[A-F0-9]"
 
-# See the deferred queue
-docker compose exec postfix postqueue -p | grep -c "MAILER-DAEMON"
+# Count deferred messages (queue IDs without the active-queue '*' marker)
+docker compose exec postfix postqueue -p | grep -c "^[A-F0-9]\{5,\}[^*]"
 ```
 
 ### Flushing the Queue
@@ -137,72 +116,54 @@ docker compose exec postfix postsuper -d ALL
 docker compose exec postfix postsuper -d ALL deferred
 
 # Delete messages to a specific domain
-docker compose exec postfix mailq | grep "example.com" | awk '{print $1}' | \
+docker compose exec postfix postqueue -p | grep -B2 "@example.com" | \
+  awk '/^[A-F0-9]/ {print $1}' | tr -d '*!' | \
   xargs -I {} docker compose exec postfix postsuper -d {}
 ```
 
 > **Warning:** Only flush the full queue if you know what you're doing. If delivery is failing for a reason (DNS issue, blocked IP), flushing just generates more bounces.
 
-### Worker Queue Management
+### Queue Manager Service
 
-```bash
-# Check worker queue depth
-docker compose exec redis redis-cli -a $REDIS_PASSWORD llen email_queue
-docker compose exec redis redis-cli -a $REDIS_PASSWORD llen retry_queue
-docker compose exec redis redis-cli -a $REDIS_PASSWORD llen dead_letter_queue
-
-# Clear the dead letter queue
-docker compose exec redis redis-cli -a $REDIS_PASSWORD del dead_letter_queue
-
-# Requeue dead letters for retry
-docker compose exec redis redis-cli -a $REDIS_PASSWORD --pipe <<'EOF'
-RPOPLPUSH dead_letter_queue retry_queue
-EOF
-```
+The `queue_manager` service shares the Postfix spool volume and exposes queue operations through the API (`/api/v1/queue/...`) and the console. Permanently failed webhook deliveries land in the `webhook_dead_letters` MySQL table (not a Redis list), where they can be inspected and replayed through the webhooks API.
 
 ## Certificate Renewal
 
-### Automated (Recommended)
+Renewal is fully automated by the `cert_manager` service — it checks every 6 hours (`CERT_CHECK_INTERVAL=21600`), renews certificates with fewer than `CERT_RENEWAL_DAYS=30` days left, and SIGHUPs Postfix and Dovecot through the docker-proxy when a certificate changes. **Do not install certbot on the host** — it will collide with cert_manager's ACME challenge path and locks.
+
+Your job is only to verify it's working:
 
 ```bash
-# Certbot auto-renewal with post-hook to reload services
-sudo certbot renew --deploy-hook "
-  docker compose -f /opt/mailyte/docker-compose.yml exec postfix postfix reload
-  docker compose -f /opt/mailyte/docker-compose.yml exec dovecot doveadm reload
-"
-```
+# What cert_manager has been doing
+docker compose logs --since 24h cert_manager | tail -30
 
-### Manual Renewal
-
-```bash
-# Renew the certificate
-sudo certbot renew
-
-# Restart services to pick up the new cert
-docker compose restart postfix dovecot
-
-# Verify the new certificate
+# Verify the served certificate's dates
 echo | openssl s_client -connect mail.yourdomain.com:993 2>/dev/null \
   | openssl x509 -noout -dates
+
+# Force a re-check by restarting the service (it evaluates on startup)
+docker compose restart cert_manager
 ```
 
-## Docker Updates
+## Updating Mailyte
 
-### Updating Mailyte Images
+Most services build from source, so an update is a `git pull` plus a rebuild — not a `docker compose pull`:
 
 ```bash
-# Pull the latest images
-docker compose pull
+git pull
 
-# Restart with new images (one at a time for zero downtime)
-docker compose up -d --no-deps postfix
-docker compose up -d --no-deps dovecot
-docker compose up -d --no-deps api
-docker compose up -d --no-deps worker
+# Rebuild the migrate image FIRST -- a stale one silently no-ops on new
+# migrations (it still contains the previous release's migration files)
+docker compose build migrate
 
-# Or all at once (brief downtime)
+# Rebuild and restart everything that changed
+docker compose build
 docker compose up -d
 ```
+
+On deploy-pipeline hosts, run `./deployment/deploy.sh` instead — it does all of the above plus a pre-deploy backup and rolling updates of the replicated services. Set `PULL_BASE=1` occasionally (weekly is reasonable) to refresh base images for security fixes; `FORCE_REBUILD=1` rebuilds everything without cache.
+
+Registry-pulled services (`console`, `webmail`, `roundcube`, `sogo`, infrastructure images) update via a bumped version pin in `.env` (`CONSOLE_VERSION`, `WEBMAIL_VERSION`) followed by `docker compose up -d <service>`.
 
 ### Cleaning Up Old Images
 
@@ -210,12 +171,14 @@ docker compose up -d
 # Remove unused images
 docker image prune -a --filter "until=168h"  # Older than 7 days
 
-# Full cleanup (images, containers, volumes, networks)
-docker system prune -a --volumes  # CAREFUL: removes unused volumes too
+# Trim the build cache (keeps the last week hot -- what makes rebuilds fast)
+docker builder prune -f --filter until=168h
 
-# Safer: just dangling images and stopped containers
+# Safer general cleanup: dangling images and stopped containers only
 docker system prune
 ```
+
+> **Warning:** Never run `docker system prune --volumes` or `docker volume prune` on this host. Neither is scoped to the project, and pruning volumes can destroy the database of anything else running on the machine.
 
 ## OS Updates
 
@@ -240,17 +203,17 @@ docker system df
 # Find the biggest offenders
 sudo du -sh /var/lib/docker/volumes/* | sort -rh | head -10
 
-# Mail storage per user (if using Maildir)
-du -sh /var/mail/*/Maildir/ | sort -rh | head -20
+# Mail storage per domain / per mailbox (bind-mounted Maildirs)
+sudo du -sh storage/mail_data/* | sort -rh | head -20
 ```
 
 ### When Disk Gets Low
 
-1. Clean Docker: `docker system prune`
-2. Rotate logs: truncate or delete old log files
-3. Clean mail queue: `docker compose exec postfix postsuper -d ALL deferred`
-4. Run database cleanup: `./scripts/db-cleanup.sh`
-5. Check mail storage: enforce user quotas if not already set
+1. Clean Docker: `docker system prune` and `docker builder prune -f --filter until=72h`
+2. Rotate logs: check `logs/` and old local backup sets in `storage/backups/`
+3. Clean mail queue: `docker compose exec postfix postsuper -d ALL deferred` (only if you know why they deferred)
+4. Prune large database tables (see Database Cleanup above)
+5. Check mail storage: enforce mailbox quotas if not already set
 6. Add more disk: expand the volume or add a new one
 
 ## Health Check Script
@@ -282,11 +245,11 @@ docker compose exec -T postfix postqueue -p | tail -1
 
 echo ""
 echo "--- Database Size ---"
-docker compose exec -T mysql mysql -u root -p"${MYSQL_ROOT_PASSWORD}" -e "
-SELECT table_schema AS 'Database',
-  ROUND(SUM(data_length + index_length) / 1024 / 1024, 2) AS 'Size (MB)'
+docker compose exec -T mysql sh -c 'mysql -u root -p"$(cat /run/secrets/db_root_password)" -e "
+SELECT table_schema AS \"Database\",
+  ROUND(SUM(data_length + index_length) / 1024 / 1024, 2) AS \"Size (MB)\"
 FROM information_schema.tables
-GROUP BY table_schema;" 2>/dev/null
+GROUP BY table_schema;"' 2>/dev/null
 
 echo ""
 echo "--- Certificate Expiry ---"
@@ -295,5 +258,6 @@ echo | openssl s_client -connect localhost:993 2>/dev/null \
 
 echo ""
 echo "--- Backup Status ---"
-ls -lh /opt/mailyte/backups/ | tail -5
+ls -lht storage/backups/ | head -6
+systemctl list-timers 'mailyte-backup-*' --no-pager 2>/dev/null
 ```

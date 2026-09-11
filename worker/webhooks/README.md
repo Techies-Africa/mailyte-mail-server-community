@@ -37,23 +37,27 @@ The Webhooks module provides:
 
 ## API Endpoints
 
-All endpoints are accessed through the API Gateway at `/api/v1/webhooks/`:
+### This service's own endpoints (FastAPI, port 8081)
 
-### Webhook Management
 ```
-POST /api/v1/webhooks                 # Create webhook
-GET  /api/v1/webhooks                 # List webhooks
-GET  /api/v1/webhooks/{id}           # Get webhook details
-PUT  /api/v1/webhooks/{id}           # Update webhook
-DELETE /api/v1/webhooks/{id}         # Delete webhook
+POST /webhook/email/inbound    # Ingest a raw inbound email event
+POST /webhook/email/outbound   # Ingest a raw outbound email event
+POST /webhook/email/imap       # Ingest an IMAP activity event
+POST /webhook/email/pop3       # Ingest a POP3 activity event
+GET  /webhook/status           # Queue/worker stats
+POST /webhook/test             # Fire a test event
+GET  /cleanup/stats            # Delivery-log cleanup stats
+POST /cleanup/now              # Run cleanup immediately
+GET/PUT /cleanup/config        # Cleanup configuration
+GET  /health                   # Health check
+GET  /metrics                  # Prometheus metrics
 ```
 
-### Health & Monitoring
-```
-GET  /api/v1/webhooks/{id}/health    # Webhook health status
-GET  /api/v1/webhooks/{id}/stats     # Delivery statistics
-POST /api/v1/webhooks/{id}/test      # Test webhook delivery
-```
+`health_monitor.py` in this directory is a legacy Flask-style app that `app.py` does not start.
+
+### Endpoint management (API Gateway)
+
+Tenant webhook endpoint CRUD lives in the gateway (`worker/api/routes/webhooks.py`) under `/api/v1/webhooks/endpoints*` (create/list/get/update/delete/test), backed by the gateway's own database.
 
 ## Configuration
 
@@ -140,13 +144,15 @@ python app.py
 ### Testing
 ```bash
 # Health check
-curl http://0.0.0.0:8083/health
+curl http://localhost:8081/health
 
-# Test webhook delivery
-curl -X POST http://0.0.0.0:5000/api/v1/webhooks/test \
+# Fire a test event through the dispatcher
+curl -X POST http://localhost:8081/webhook/test \
   -H "Content-Type: application/json" \
-  -d '{"webhook_id": "webhook_123", "event_type": "email.sent"}'
+  -d '{"event_type": "email.outbound"}'
 ```
+
+Note: `shared/webhook_dispatcher.py` reads `WEBHOOK_URL` (singular). Compose maps `WEBHOOK_URLS` into it; without that mapping every `dispatch_event()` call silently no-ops. The canonical event catalog is the `Events` class in that module.
 
 ## Dependencies
 

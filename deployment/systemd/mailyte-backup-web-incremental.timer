@@ -1,0 +1,13 @@
+[Unit]
+Description=Hourly Mailyte web server database backup
+
+[Timer]
+# :45 past, keeping all four backup jobs across the two hosts on distinct
+# quarter-hours.
+OnCalendar=*-*-* *:45:00
+Persistent=true
+AccuracySec=1min
+Unit=mailyte-backup-web-incremental.service
+
+[Install]
+WantedBy=timers.target

@@ -75,17 +75,19 @@ A bird's-eye view of how Mailyte's email server is put together and why each pie
 
 ## The Big Picture
 
-Mailyte is a multi-tenant email server that sends, receives, filters, and stores email for multiple organizations — all from a single deployment. Think of it as running a small email hosting company inside a Docker Compose stack.
-
-The system breaks down into three layers, each with a clear job:
+Mailyte is a multi-tenant email server that sends, receives, filters, and stores email for multiple organizations — all from a single deployment. Think of it as running a small email hosting company inside a Docker Compose stack: roughly 45 containers in the full production stack, but organized into a handful of clear layers.
 
 | Layer | What it does | Key services |
 |-------|-------------|--------------|
-| **Mail Infrastructure** | Handles the actual email traffic — SMTP in/out, spam filtering, mailbox storage | Postfix, Dovecot, Rspamd + ClamAV |
-| **API + Workers** | Manages everything programmatically and runs background jobs | FastAPI, tracking, webhooks, analytics, queue manager, and more |
-| **Data Stores** | Persists state — accounts, queues, caches, vector embeddings | MySQL, Redis, Qdrant |
+| **Edge** | TLS termination and per-hostname routing for all HTTP traffic (production) | Traefik, acme_webroot |
+| **Mail Infrastructure** | The actual email traffic — SMTP in/out, spam filtering + DKIM signing, mailbox storage, certificates, log ingestion | Postfix, Dovecot, Rspamd, cert_manager, log_ingestor |
+| **API Gateway + Workers** | The management plane (one FastAPI gateway, 34 route modules) and ~20 single-purpose worker services | api, webhooks, tracking, rate_limiter, analytics, queue_manager, archiver, autoconfig, jmap, caldav, oauth, migration, and more |
+| **Security Services** | DLP scanning, TOTP for operator MFA, geo-blocking | dlp, totp, geo_blocking |
+| **Data Stores** | Persistent state | MySQL, Redis, Qdrant, S3 object storage (+ Kafka provisioned, unused — see below) |
+| **Observability** | Metrics, dashboards, alerting | Prometheus, Grafana, Alertmanager, exporters |
+| **Frontends** | Human surfaces | webmail, console (staff), Roundcube/SOGo (optional profiles), docs |
 
-Each layer only talks to the layers it needs to. Workers never handle raw SMTP. Postfix never queries Qdrant. This keeps the system modular — you can swap out Redis for another cache, or scale the workers independently of the mail servers.
+Each layer only talks to the layers it needs to. Workers never handle raw SMTP. Postfix never queries Qdrant. This keeps the system modular — services can be scaled or restarted independently of mail delivery.
 
 ---
 
@@ -96,106 +98,96 @@ graph TB
     subgraph External
         Internet["Internet / Remote MTAs"]
         Clients["Email Clients<br>(Thunderbird, Outlook, etc.)"]
-        Upstream["Upstream Systems<br>(your app)"]
+        Upstream["Upstream Systems<br>(mailyte-api / your app)"]
+        Browser["Browsers<br>(webmail, console)"]
     end
 
-    subgraph Mail["Mail Infrastructure Layer"]
+    subgraph Edge["Edge (production)"]
+        Traefik["Traefik<br>:80 :443"]
+    end
+
+    subgraph Mail["Mail Infrastructure"]
         Postfix["Postfix<br>SMTP :25 :587 :465"]
-        Dovecot["Dovecot<br>IMAP :143 :993<br>POP3 :110 :995"]
-        Rspamd["Rspamd + ClamAV<br>:11332"]
+        Dovecot["Dovecot<br>IMAP :143 :993<br>POP3 :110 :995 · Sieve :4190"]
+        Rspamd["Rspamd<br>milter :11332<br>(spam + DKIM signing)"]
+        CertMgr["cert_manager"]
+        LogIngestor["log_ingestor<br>(mail.log → mail_logs)"]
     end
 
-    subgraph API["API + Workers Layer"]
-        FastAPI["FastAPI REST API<br>:5000"]
-        Health["Health Monitor<br>:8080"]
-        Tracking["Tracking Worker"]
-        Webhooks["Webhook Worker"]
-        RateLimiter["Rate Limiter"]
-        Analytics["Analytics Worker"]
-        RAG["RAG Worker"]
-        QueueMgr["Queue Manager"]
-        StorageUsage["Storage Usage"]
-        Backup["Backup Worker"]
-        CloudSync["Cloud Sync"]
-        LogAnalyzer["Log Analyzer"]
-        CertMgr["Cert Manager"]
-        IDS["Intrusion Detection<br>(fail2ban)"]
+    subgraph API["API Gateway + Workers"]
+        Gateway["FastAPI Gateway (api)<br>:8080 · 34 route modules"]
+        Webhooks["webhooks"]
+        Tracking["tracking"]
+        RateLimiter["rate_limiter"]
+        Analytics["analytics"]
+        QueueMgr["queue_manager"]
+        StorageUsage["storage_usage"]
+        Archiver["archiver"]
+        RAG["rag"]
+        More["autoconfig · jmap · caldav<br>oauth · migration · templates<br>url_protection · delivery_optimizer<br>encryption · activesync · dashboard<br>monitoring · dlp · totp · geo_blocking"]
     end
 
-    subgraph Data["Data Stores Layer"]
-        MySQL["MySQL"]
-        Redis["Redis"]
-        Qdrant["Qdrant<br>Vector DB"]
+    subgraph Data["Data Stores"]
+        MySQL[("MySQL")]
+        Redis[("Redis")]
+        Qdrant[("Qdrant")]
+        S3[("S3 object storage")]
     end
 
-    Internet -->|"SMTP"| Postfix
+    Internet -->|"SMTP :25"| Postfix
     Clients -->|"IMAP/POP3"| Dovecot
-    Clients -->|"SMTP submit"| Postfix
-    Upstream -->|"REST"| FastAPI
+    Clients -->|"SMTP submit :587/:465"| Postfix
+    Upstream -->|"HTTPS"| Traefik
+    Browser -->|"HTTPS"| Traefik
+    Traefik -->|"api.domain"| Gateway
 
-    Postfix -->|"spam check"| Rspamd
-    Postfix -->|"deliver"| Dovecot
-    Dovecot -->|"auth lookup"| MySQL
-
-    FastAPI --> MySQL
-    FastAPI --> Redis
-    FastAPI --> Qdrant
-
-    Tracking --> MySQL
-    Tracking --> Redis
-    Webhooks --> MySQL
-    Webhooks --> Redis
-    Analytics --> MySQL
-    Analytics --> Redis
-    RAG --> Qdrant
-    RAG --> MySQL
-    QueueMgr --> Redis
-    QueueMgr --> MySQL
-    QueueMgr --> Postfix
-    RateLimiter --> Redis
-    StorageUsage --> MySQL
-    Backup --> MySQL
-    LogAnalyzer --> MySQL
+    Postfix -->|"milter"| Rspamd
+    Postfix -->|"LMTP :24"| Dovecot
+    Postfix -->|"policy check"| RateLimiter
+    Postfix -->|"content filter"| Tracking
+    Dovecot -->|"auth + accounts"| MySQL
+    Dovecot -->|"sieve archive copy"| Archiver
+    LogIngestor --> MySQL
     CertMgr --> Postfix
     CertMgr --> Dovecot
-    IDS --> Redis
-    Health --> MySQL
-    Health --> Redis
-    Health --> Postfix
-    Health --> Dovecot
+
+    Gateway -->|"SMTP :10587"| Postfix
+    Gateway --> MySQL
+    Gateway --> Redis
+    Gateway -->|"proxies"| Tracking
+    Gateway -->|"proxies"| Analytics
+    Gateway -->|"proxies"| RateLimiter
+    Gateway -->|"proxies"| QueueMgr
+
+    Tracking --> MySQL
+    Webhooks --> MySQL
+    Analytics --> MySQL
+    RAG --> Qdrant
+    Archiver --> S3
+    StorageUsage -->|"IMAP QUOTA"| Dovecot
+    QueueMgr -->|"shared spool"| Postfix
 ```
 
 ---
 
 ## Service inventory
 
-Every service in the stack at a glance:
+The full roster lives in [Service Architecture](service-architecture.md), with per-service detail. The short version, straight from `docker-compose.yml`:
 
-| Service | Port(s) | Layer | Role |
-|---------|---------|-------|------|
-| **Postfix** | 25, 587, 465 | Mail | SMTP relay and submission |
-| **Dovecot** | 143, 993, 110, 995 | Mail | IMAP/POP3 mailbox access |
-| **Rspamd** | 11332 | Mail | Spam filtering, DKIM signing |
-| **ClamAV** | -- | Mail | Antivirus scanning |
-| **FastAPI** | 5000 | API | REST API control plane |
-| **Health Monitor** | 8080 | API | Health checks, auto-healing |
-| **Tracking Worker** | 8083 | API | Open/click tracking, analytics |
-| **Webhook Worker** | 8081 | API | Event delivery to your app |
-| **Rate Limiter** | 8082 | API | Sliding window rate limits |
-| **Queue Manager** | -- | API | Mail queue management |
-| **RAG Worker** | 8090 | API | AI-powered email search |
-| **Storage Usage** | 8084 | API | Quota tracking |
-| **Backup Worker** | -- | API | Automated backups |
-| **Cloud Sync** | -- | API | S3/Azure backup sync |
-| **Log Analyzer** | -- | API | Log parsing and alerting |
-| **Cert Manager** | -- | API | TLS certificate rotation |
-| **Intrusion Detection** | -- | API | fail2ban integration |
-| **MySQL** | 3306 | Data | Primary database |
-| **Redis** | 6379 | Data | Cache, queues, pub/sub |
-| **Qdrant** | 6333 | Data | Vector embeddings |
+| Group | Services |
+|-------|----------|
+| **Lifecycle** | secrets-check, migrate (Alembic), docker-proxy |
+| **Mail** | postfix, dovecot, rspamd, cert_manager, acme_webroot, log_ingestor |
+| **Gateway** | api (FastAPI, :8080, ×2 replicas in production) |
+| **Workers** | webhooks (×2), tracking (×2), rate_limiter, monitoring, analytics, archiver, dashboard, encryption, queue_manager, rag, storage_usage, delivery_optimizer, templates, url_protection, oauth, caldav, radicale, jmap, migration, autoconfig, activesync |
+| **Security** | dlp, totp, geo_blocking |
+| **Data** | mysql (8.0.35), redis, qdrant, kafka + zookeeper |
+| **Observability** | prometheus, grafana, alertmanager, mysql-exporter, redis-exporter |
+| **Frontends** | docs, console (profile), webmail (profile), roundcube (profile), sogo (profile) |
+| **Edge (prod)** | traefik |
 
 !!! info "Internal vs. external ports"
-    Only mail ports (25, 587, 465, 143, 993, 110, 995), the API (5000), and the health endpoint (8080) need to be reachable from outside. Everything else stays on the Docker network.
+    In production only the mail protocol ports (25, 587, 465, 143, 993, 110, 995, 4190) and Traefik's 80/443 listen on `0.0.0.0`. Every other service was re-bound to `127.0.0.1` on 2026-08-22 — before that, ~30 internal services (including unauthenticated Prometheus and Qdrant) were reachable from the public internet. HTTP services are reached externally only through Traefik: `api.${DOMAIN}`, `jmap.${DOMAIN}`, `caldav.${DOMAIN}`, `docs.${DOMAIN}`, `grafana.${DOMAIN}`, the wildcard `autoconfig.*`/`autodiscover.*`/`mta-sts.*` rule, the webmail hostname, and the (IP-allowlisted) console hostname.
 
 ---
 
@@ -203,15 +195,15 @@ Every service in the stack at a glance:
 
 === "Mail Infrastructure"
 
-    The front door. Postfix accepts email from the internet (or from clients submitting outbound mail), runs it through Rspamd for spam checks, and hands it to Dovecot for storage. This layer speaks native email protocols — SMTP, IMAP, POP3 — and doesn't know anything about your API keys or webhook URLs.
+    The front door. Postfix accepts email from the internet (or from clients submitting outbound mail), runs it through Rspamd for spam checks (inbound) and DKIM signing (outbound), and hands it to Dovecot over LMTP for storage. This layer speaks native email protocols — SMTP, IMAP, POP3, ManageSieve. Its integration points with the platform are precise and few: SQL lookups against MySQL, a rate-limit policy call at the SMTP DATA phase, and the tracking content filter on the submission ports.
 
-=== "API + Workers"
+=== "API Gateway + Workers"
 
-    The control plane. The FastAPI server exposes a REST API that lets your application create organizations, add domains, provision mailboxes, and query analytics. The workers run in the background: tracking pixel hits, firing webhooks on delivery events, computing analytics, managing the mail queue, rotating TLS certificates, and watching for intrusions.
+    The control plane. One FastAPI gateway (`api`) exposes the whole REST surface — organizations, domains, mailboxes, SMTP credentials, filters, analytics, and the webmail backend — and proxies to the single-purpose worker containers behind it (analytics, tracking, rate_limiter, queue_manager, storage_usage, monitoring). Workers run in the background: firing webhooks, recording opens and clicks, archiving mail to S3, measuring quotas over IMAP, rotating TLS certificates, running migration jobs.
 
 === "Data Stores"
 
-    Holds everything. MySQL is the source of truth for accounts, domains, logs, and configuration. Redis handles the fast stuff — caching, rate limit counters, job queues. Qdrant stores vector embeddings for AI-powered email search (RAG), so you can ask questions like "find emails about the Q3 budget" and get semantically relevant results.
+    MySQL is the source of truth for accounts, domains, credentials, logs, and configuration. Redis handles the fast stuff — caching, rate-limit counters, Rspamd's Bayes data. Qdrant stores vector embeddings for AI-powered search. S3 holds the encrypted mail archive and backups.
 
 ---
 
@@ -233,7 +225,7 @@ graph TD
 ```
 
 !!! tip "Isolation is the default"
-    You don't have to do anything special to get tenant isolation. Every API call is scoped to the organization that owns the API key. There is no way to accidentally access another organization's data.
+    Every API call is scoped to the organization that owns the credential. Cross-tenant operations require a platform-scoped credential (an operator session or an API key issued with `scope='platform'`) — a tenant credential can never reach them, regardless of its own permission flags.
 
 For the full breakdown, see [Organization Model](organization-model.md) and [Multi-Tenant Isolation](multi-tenant.md).
 
@@ -243,11 +235,14 @@ For the full breakdown, see [Organization Model](organization-model.md) and [Mul
 
 | Decision | Rationale |
 |----------|-----------|
-| **Docker Compose, not Kubernetes** | Keeps the barrier to entry low. A single `docker compose up` gets everything running. Kubernetes deployment configs are available for production scale. |
-| **Workers are separate containers** | Each worker can be scaled, restarted, or disabled independently without affecting mail delivery. |
-| **Redis for queues, not a dedicated broker** | Avoids adding another dependency (RabbitMQ/Kafka). Redis is already needed for caching, so it pulls double duty. |
-| **Qdrant for vector search** | Purpose-built vector DB gives better performance and relevance than bolting vector search onto MySQL. |
-| **Rspamd over SpamAssassin** | Modern, high-performance, built-in web UI, native milter support, and active development. |
+| **Docker Compose, not Kubernetes** | Keeps the barrier to entry low. A single `./start.sh` gets everything running; `docker-compose.prod.yml` layers on Traefik, replicas, resource limits, and loopback port binding. |
+| **One gateway, many workers** | The `api` container owns the entire public REST surface and proxies to single-purpose workers. Workers can be scaled, restarted, or disabled independently without affecting mail delivery. |
+| **HTTP + Redis for inter-service communication** | Kafka and Zookeeper are provisioned in the stack and a client library exists (`shared/kafka_client.py`), but as of 2026-08-30 no service produces or consumes — the working paths are HTTP calls over the Docker network and Redis. |
+| **Postfix's spool is the outbound queue** | No parallel application-level mail queue to drift out of sync; `queue_manager` manages Postfix's own queue via `postqueue` over a shared volume. |
+| **Rspamd over SpamAssassin** | Modern, high-performance, native milter support — and it's also the DKIM signer. |
+| **Qdrant for vector search** | Purpose-built vector DB rather than bolting vector search onto MySQL. |
+| **Fail-closed startup** | `secrets-check` gates the entire stack on strong secrets; `migrate` gates schema-touching services on successful Alembic migration. |
+| **ULID primary keys** | All core tables use 26-char ULIDs (`CHAR(26)`), not auto-increment INTs — globally unique, time-sortable, safe to expose. |
 
 ---
 

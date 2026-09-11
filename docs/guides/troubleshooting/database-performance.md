@@ -7,36 +7,42 @@ description: Diagnose and fix slow queries, connection limits, table locks, and 
 
 If the API is slow, emails are queuing up, or dashboards are timing out, the database is usually the first suspect. Here's how to find and fix the problem.
 
+!!! note "Root credentials"
+    The MySQL root password is supplied to the container as a **file**, `/run/secrets/db_root_password` (from `secrets/db_root_password` on the host) — there is no `DB_ROOT_PASSWORD` variable inside the container. The commands below read it from the mounted file. MySQL is not published on any host port; everything goes through `docker exec`.
+
 ## Quick Health Check
 
 ```bash
 # Check MySQL status
-docker exec -it mysql mysqladmin -u root -p"${DB_ROOT_PASSWORD}" status
+docker exec mysql sh -c 'mysqladmin -u root -p"$(cat /run/secrets/db_root_password)" status'
 
 # Active connections
-docker exec -it mysql mysql -u root -p"${DB_ROOT_PASSWORD}" -e "SHOW PROCESSLIST;"
+docker exec mysql sh -c 'mysql -u root -p"$(cat /run/secrets/db_root_password)" -e "SHOW PROCESSLIST;"'
 
 # InnoDB status (long output, lots of useful info)
-docker exec -it mysql mysql -u root -p"${DB_ROOT_PASSWORD}" -e "SHOW ENGINE INNODB STATUS\G" | head -100
+docker exec mysql sh -c 'mysql -u root -p"$(cat /run/secrets/db_root_password)" -e "SHOW ENGINE INNODB STATUS\G"' | head -100
+```
+
+For the SQL snippets below, open an interactive session once:
+
+```bash
+docker exec -it mysql sh -c 'mysql -u root -p"$(cat /run/secrets/db_root_password)" mailserver'
 ```
 
 ## Problem: Slow Queries
 
 ### Enable the Slow Query Log
 
-```bash
-docker exec -it mysql mysql -u root -p"${DB_ROOT_PASSWORD}" -e "
+```sql
 SET GLOBAL slow_query_log = 'ON';
 SET GLOBAL long_query_time = 1;
 SET GLOBAL slow_query_log_file = '/var/lib/mysql/slow.log';
-"
 ```
 
 ### Find the Slowest Queries
 
 ```bash
-# View recent slow queries
-docker exec -it mysql tail -50 /var/lib/mysql/slow.log
+docker exec mysql tail -50 /var/lib/mysql/slow.log
 ```
 
 ### Common Slow Queries and Fixes
@@ -45,13 +51,13 @@ docker exec -it mysql tail -50 /var/lib/mysql/slow.log
 
 ```sql
 -- If this is slow:
-SELECT * FROM email_tracking WHERE organization_id = 'x' AND timestamp > '2025-01-01';
+SELECT * FROM email_tracking WHERE organization_id = 'x' AND `timestamp` > '2026-01-01';
 
--- Check if the index exists:
-SHOW INDEX FROM email_tracking WHERE Column_name = 'organization_id';
+-- Check what indexes exist:
+SHOW INDEX FROM email_tracking;
 
--- The schema already includes idx_org_time, but verify it's being used:
-EXPLAIN SELECT * FROM email_tracking WHERE organization_id = 'x' AND timestamp > '2025-01-01';
+-- Verify the index is being used:
+EXPLAIN SELECT * FROM email_tracking WHERE organization_id = 'x' AND `timestamp` > '2026-01-01';
 ```
 
 If the EXPLAIN shows `type: ALL` (full table scan), the index isn't being used. Common reasons:
@@ -59,10 +65,10 @@ If the EXPLAIN shows `type: ALL` (full table scan), the index isn't being used. 
 - The table statistics are stale: `ANALYZE TABLE email_tracking;`
 - The query is selecting too many columns: use specific columns instead of `SELECT *`
 
-**Mail queue table getting too large:**
+**Log tables getting too large:**
 
 ```sql
--- Check table size
+-- Check table sizes
 SELECT
   TABLE_NAME,
   ROUND(DATA_LENGTH / 1024 / 1024, 2) AS data_mb,
@@ -73,16 +79,14 @@ WHERE TABLE_SCHEMA = 'mailserver'
 ORDER BY DATA_LENGTH DESC;
 ```
 
-If `mail_queue` or `webhook_delivery_logs` are huge, old records need cleaning:
+If `mail_queue`, `mail_logs`, or `webhook_delivery_logs` are huge, old records need cleaning:
 
 ```sql
--- Delete processed queue entries older than 7 days
+-- Delete processed queue entries older than 7 days, in batches
 DELETE FROM mail_queue
 WHERE status IN ('sent', 'delivered', 'bounced', 'rejected')
 AND processed_at < NOW() - INTERVAL 7 DAY
 LIMIT 10000;
-
--- Run in batches to avoid locking
 ```
 
 ## Problem: Too Many Connections
@@ -90,15 +94,15 @@ LIMIT 10000;
 ### Check Current Usage
 
 ```sql
--- Current connections vs limit
 SHOW VARIABLES LIKE 'max_connections';
 SHOW STATUS LIKE 'Threads_connected';
 ```
 
+The mysql-exporter also feeds these into Prometheus as `mysql_global_status_threads_connected` / `mysql_global_variables_max_connections` — the `DatabaseConnectionPoolExhausted` alert fires on sustained pressure.
+
 ### Who's Using Them?
 
 ```sql
--- Group by source
 SELECT
   USER,
   HOST,
@@ -110,33 +114,29 @@ GROUP BY USER, HOST;
 
 ### Fix: Increase Connection Limit
 
+The base compose file sets no MySQL tuning flags — add them via an override so they survive updates:
+
 ```yaml
-# docker-compose.yml
-mysql:
-  command: --max-connections=500
+# docker-compose.override.yml
+services:
+  mysql:
+    command: --max-connections=500
 ```
 
 ### Fix: Connection Pooling
 
-If workers are creating too many connections, ensure they use connection pooling. The API and workers should share pools:
-
-```python
-# In worker config
-DB_POOL_SIZE = 10
-DB_MAX_OVERFLOW = 20
-DB_POOL_RECYCLE = 3600
-```
+Most route modules use SQLAlchemy engines; a few older ones still build a connection per request. If one service dominates the PROCESSLIST by host, that's the one to look at.
 
 ## Problem: Table Locks
 
-### Detect Locks
+MySQL 8 moved lock introspection to performance_schema:
 
 ```sql
 -- Current locks
-SELECT * FROM information_schema.INNODB_LOCKS;
+SELECT * FROM performance_schema.data_locks;
 
--- Lock waits
-SELECT * FROM information_schema.INNODB_LOCK_WAITS;
+-- Lock waits (who blocks whom)
+SELECT * FROM performance_schema.data_lock_waits;
 
 -- Long-running transactions
 SELECT
@@ -170,13 +170,6 @@ KILL <thread_id>;
 ### Check Index Usage
 
 ```sql
--- Tables without indexes (unlikely with Mailyte, but check)
-SELECT TABLE_NAME
-FROM information_schema.TABLES t
-LEFT JOIN information_schema.STATISTICS s ON t.TABLE_NAME = s.TABLE_NAME
-WHERE t.TABLE_SCHEMA = 'mailserver'
-AND s.TABLE_NAME IS NULL;
-
 -- Index cardinality (low = less useful)
 SELECT
   TABLE_NAME,
@@ -191,7 +184,6 @@ ORDER BY TABLE_NAME, INDEX_NAME;
 ### Refresh Statistics
 
 ```sql
--- Update stats for all tables
 ANALYZE TABLE organizations;
 ANALYZE TABLE domains;
 ANALYZE TABLE email_accounts;
@@ -230,12 +222,12 @@ LIMIT 10;
 
 ### Cleanup Candidates
 
-| Table | Safe to Truncate? | Retention |
-|-------|-------------------|-----------|
+| Table | Safe to trim? | Retention |
+|-------|---------------|-----------|
 | `mail_logs` | Old records, yes | Keep 30-90 days |
 | `email_tracking` | Old records, yes | Keep 90 days |
 | `webhook_delivery_logs` | Delivered records, yes | Keep 7-30 days |
-| `usage_history` | Old records, yes | Keep 90 days |
+| `mail_queue` | Terminal-status rows, yes | Keep 7 days |
 | `health_checks` | Old records, yes | Keep 7 days |
 | `service_metrics` | Old records, yes | Keep 30 days |
 
@@ -248,15 +240,14 @@ LIMIT 50000;
 ```
 
 !!! tip "Batch deletes"
-    Always delete in batches (LIMIT 10000-50000) to avoid long locks. Run the DELETE in a loop with a 1-second sleep between batches.
+    Always delete in batches (LIMIT 10000-50000) to avoid long locks. Run the DELETE in a loop with a 1-second sleep between batches. Take a backup first — `./scripts/backup.sh --mysql-only` (see [Backup Automation](../backup-automation.md)).
 
 ## Performance Tuning Checklist
 
-- [x] `innodb_buffer_pool_size` = 50-70% of available RAM
-- [x] `innodb_log_file_size` = 256M-1G
-- [x] `innodb_flush_log_at_trx_commit` = 2 (safe for email workloads)
-- [x] `max_connections` = enough for all services (typically 200-500)
+- [x] `innodb_buffer_pool_size` = 50-70% of the RAM given to MySQL (raise the container's compose memory limit together with it — production caps it at 2G by default)
+- [x] `innodb_flush_log_at_trx_commit` = 2 (safe trade-off for email workloads)
+- [x] `max_connections` = enough for ~20 worker services plus Postfix/Dovecot lookups (typically 200-500)
 - [x] Slow query log enabled
 - [x] Table statistics up to date (`ANALYZE TABLE`)
 - [x] Old data cleaned regularly
-- [x] Connection pooling in use by all workers
+- [x] Recent backup verified before any large cleanup

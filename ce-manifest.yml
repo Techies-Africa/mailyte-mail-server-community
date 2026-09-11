@@ -1,0 +1,430 @@
+# CE generation manifest
+#
+# The single description of how the Community Edition tree is produced from the
+# Enterprise tree. Consumed by scripts/build-ce.py.
+#
+# Plan: plans/02-mailyte-community/phase-06-ce-generation.md
+#
+# Rule: CE is generated. Nothing in the CE repo is hand-edited except the paths
+# listed under `ce_local`.
+#
+# How to read this file: generation works by SUBTRACTION. Anything not named in
+# `drop` ships in CE. That is deliberate — it means a route's supporting
+# libraries come along automatically and cannot be forgotten, which is the
+# single most common way hand-porting shipped a broken CE.
+
+version: 1
+edition: community
+
+# ---------------------------------------------------------------------------
+# capabilities — the ONE list. Both routes/capabilities.py and the console's
+# nav config are generated from this, so they can no longer disagree (the root
+# cause of all four Phase 0 contradictions).
+# ---------------------------------------------------------------------------
+capabilities:
+  community:
+    - domains
+    - mailboxes
+    - aliases
+    - dkim
+    - queue
+    - logs
+    - health
+    - overview
+    - directory
+    - mail_flow
+    - infrastructure
+    - governance
+    - docs
+    - settings
+    # DECISION 1 (resolved): CE gets the mailbox API, so the published
+    # mailyte-webmail repo works against a self-hosted CE server. This claim is
+    # now backed by real endpoints.
+    - webmail
+    # DECISION 2/3 (resolved): both ported. security.py needs no new
+    # dependencies; analytics ships its worker container too (see below).
+    - security
+    - analytics
+    # DECISION 4 (resolved): CE already registers the organizations router, and
+    # capabilities.py's own comment calls organizations "substrate, not a gated
+    # feature". Moved out of enterprise_only so the list matches the code.
+    - organizations
+
+  enterprise_only:
+    - billing
+    - teams
+    - reports
+    - audit
+    - deliverability
+    - dkim_rotation
+    - migration
+    - rag
+    - whitelabel
+    - reseller
+    - priority_support
+    - dlp                      # the ENFORCEMENT service; see note under security
+    - reputation
+    - compliance
+    - analytics_engagement
+    - analytics_reports
+
+# ---------------------------------------------------------------------------
+# capability_owners — what actually backs each community capability.
+#
+# This is the check whose absence caused all four phase-0 contradictions: CE
+# advertised webmail, security and analytics with no code behind them. The
+# verifier asserts every entry in capabilities.community appears here AND that
+# its owner survives generation.
+#
+# Owner forms:
+#   route:<module>     a route module that must exist in the generated tree
+#   app:<path>         an endpoint defined directly in app.py
+#   script:<path>      a CLI script, not an endpoint
+#   console-section    a console nav grouping, no single endpoint of its own
+#   stub:<module>      route exists but deliberately returns 503 in CE
+#   unverified         owner not yet traced — verifier WARNS, never passes silently
+# ---------------------------------------------------------------------------
+capability_owners:
+  domains: route:domains
+  mailboxes: route:mailboxes
+  aliases: route:aliases
+  organizations: route:organizations
+  security: route:security
+  analytics: route:analytics
+  webmail: route:mailbox_auth      # plus mailbox, mailbox_ai, mailbox_password, …
+  health: app:/health
+
+  dkim: script:scripts/generate_dkim.py
+  # EE's three DKIM-management routes (/{id}/dkim, /dkim/rotate,
+  # /dkim/{selector}/activate) are deliberately not in CE — CE rotates via
+  # `generate_dkim.py --rotate-all`. Consequence, from PARITY-AUDIT.md: the
+  # console's DKIM manager screen renders EndpointMissing against CE. The
+  # capability is honest about the feature existing; the console screen is not.
+
+  queue: stub:queue
+  # Deliberate and documented in CE's queue.py header: CE ships no
+  # queue-manager container, so every route returns 503 with an explicit
+  # message unless QUEUE_SERVICE_URL names something real. Advertised anyway
+  # because a self-hoster can point it at their own. Verifier warns.
+
+  logs: unverified
+  # No route module serves `logs`; it sits in CE's _SHARED_CAPABILITIES, which
+  # gates mailyte-web rather than the console. Not traced to an owner as of
+  # 2026-09-11 — resolve before the phase-3 CI gate goes enforcing, or drop the
+  # capability. Left honest rather than guessed.
+
+  overview: console-section
+  directory: console-section
+  mail_flow: console-section
+  infrastructure: console-section
+  governance: console-section
+  docs: console-section
+  settings: console-section
+
+# ---------------------------------------------------------------------------
+# drop — removed from the EE tree to produce CE.
+# ---------------------------------------------------------------------------
+drop:
+  # app.py's router loop already catches ImportError and continues, so removing
+  # the file is sufficient — but build-ce.py also strips the matching line from
+  # route_modules so CE's log is not noisy with warnings for code that is gone
+  # by design.
+  route_modules:
+    - auth                      # tenant browser sessions (users/web_sessions)
+    - bootstrap
+    - compliance
+    - message_trace
+    - migration
+    - rag
+    - reputation
+    - reseller
+    - shared_mailboxes
+    - storage
+    - transport_rules
+    - whitelabel
+
+  worker_dirs:
+    - activesync
+    - archiver
+    - caldav
+    - dashboard
+    - delivery_optimizer
+    - encryption
+    - jmap
+    - migration
+    - monitoring
+    - oauth
+    - queue_manager
+    - rag
+    - storage_usage
+    - url_protection
+
+  compose_services:
+    - acme_webroot            # a service (compose.yml:497), not a volume
+    - activesync
+    - alertmanager
+    - archiver
+    - caldav
+    - dashboard
+    - delivery_optimizer
+    - dlp
+    - encryption
+    - geo_blocking
+    - grafana
+    - jmap
+    - kafka
+    - migration
+    - monitoring
+    - mysql-exporter
+    - oauth
+    - prometheus
+    - qdrant
+    - queue_manager
+    - radicale
+    - rag
+    - redis-exporter
+    - storage_usage
+    - totp                      # CE uses in-process totp.py instead
+    - url_protection
+    - zookeeper
+
+  compose_volumes:
+    # NOT dropped: docs_site. It is a volume, not a service (my first manifest
+    # had it and acme_webroot the wrong way round), and the `docs` service
+    # mounts it — CE ships that service too. CE's hand-written compose omitted
+    # the named mount, which was a port artifact rather than a deliberate
+    # divergence; under generation CE inherits EE's docs service as written.
+    - alertmanager_data
+    - grafana_data
+    - kafka_data
+    # NOT dropped: postfix_spool. It appeared in the "EE but not CE" list, but
+    # that list was one crude grep over services AND volumes together — the
+    # volume belongs to postfix, which CE very much keeps. Dropping it produced
+    # `service "postfix" refers to undefined volume postfix_spool: invalid
+    # compose project`. verify_compose now checks volume references so a kept
+    # service can never lose its storage again.
+    - prometheus_data
+    - qdrant_storage
+    - radicale_data
+    - zookeeper_data
+    - zookeeper_log
+
+  # Docs and schemas for dropped features are DERIVED by build-ce.py from the
+  # lists above rather than listed here — drop a feature and its documentation
+  # goes with it, with no second list to forget. The directory decides which
+  # list is matched, which keeps the stubs honest: `monitoring` survives as a
+  # 503 route but its worker is gone, so docs/api/monitoring.md stays and
+  # docs/worker/monitoring.md goes. mkdocs nav entries are pruned to match.
+  docs_keep: []
+
+  paths:
+    - storage/qdrant_data      # RAG-only store; qdrant is not in CE
+    # NOT dropped: worker/api/utils/pdf_minimal.py. It looked unused, but
+    # utils/ai_consent.py imports it RELATIVELY (`from .pdf_minimal import`) and
+    # the grep that declared it orphaned only matched absolute imports. Caught
+    # by verify_imports once that check learned relative imports — the same
+    # blind spot that let the first generated tree ship an unimportable
+    # routes/__init__.py. Every util that arrived with the mailbox API
+    # (idempotency, session_cleanup, correlation, client_versions, dkim_sync,
+    # pdf_minimal) is genuinely reachable, so PARITY-AUDIT.md's "explicitly NOT
+    # ported" list was wrong about all of them: the hand-ported CE had stripped
+    # the call sites, not the need.
+    - IMPLEMENTATION_PLAN.md
+    - SECURITY_AUDIT.md
+    - TEST_PLAN.md
+    - docker-compose.cloud.yml
+    - openapi.json
+    - openapi-untyped-baseline.txt
+    - security/                 # EE-only SERVICES: dlp, geo_blocking, totp
+    - monitoring/               # prometheus/grafana/alertmanager config
+    - plans/
+
+# ---------------------------------------------------------------------------
+# ships_in_ce — NOT a build instruction. Recorded because these arrived as a
+# consequence of the phase-0 decisions and a reviewer should see the blast
+# radius. Subtraction pulls them in automatically.
+# ---------------------------------------------------------------------------
+ships_in_ce:
+  mailbox_api:
+    routes:
+      - mailbox
+      - mailbox_auth
+      - mailbox_ai
+      - mailbox_password
+      - mailbox_blocked_senders
+      - mailbox_insights
+    # Support code CE does not have today. Every one is a hard import of the
+    # routes above — hand-porting would very likely have missed shared/imap_mail.py
+    # and shipped a CE whose webmail 500s on first login.
+    new_support_files:
+      - shared/imap_mail.py
+      - worker/api/utils/managesieve.py
+      - worker/api/utils/ai_consent.py
+      - worker/api/utils/mailbox_auth.py
+      - worker/api/utils/insights.py
+      - worker/api/utils/sieve_compilers.py
+      - worker/api/utils/signature_html.py
+    new_python_deps:
+      - qrcode                  # 2FA enrolment QR codes
+    note: >
+      mailbox_ai.py routes through utils/ai_consent.py. CE ships the code but no
+      AI provider is configured by default, so ai_configured() is false and the
+      endpoints return their existing "unavailable" response. That is the
+      correct CE behaviour — a self-hoster may supply their own key.
+
+  security_module:
+    routes: [security]
+    new_support_files: []       # imports only utils/auth, utils/database, shared/ulid_utils
+    schema: >
+      CE ALREADY has dlp_policies, dlp_violations and geo_policies. Verified
+      2026-09-11 — no migration needed.
+    note: >
+      CE gets the policy MANAGEMENT surface, not the enforcement services. The
+      dlp and geo_blocking workers stay EE-only, so a CE operator can author
+      policies and read violations but nothing enforces them. This is why `dlp`
+      remains in enterprise_only while `security` is a community capability.
+      Call this out in CE's README — it is exactly the kind of half-wired
+      feature the capability manifest exists to prevent.
+
+  analytics_module:
+    routes: [analytics]
+    worker_dir: worker/analytics     # 5 files, 92K
+    compose_service: analytics
+    deps: >
+      fastapi, pandas, numpy, scipy, mysql-connector, redis. No Kafka, no
+      Qdrant, no ClickHouse — it runs against the MySQL and Redis CE already
+      has, which is what makes shipping it cheap.
+    phase_1_detail: >
+      analytics.py does `from schemas.analytics import AnalyticsProxyError,
+      AnalyticsProxyResponse`, and CE deliberately has no schemas/ package. If
+      both names are used only as response_model/responses types the
+      strip-response_model transform below removes the import with them;
+      confirm before generating, else port schemas/analytics.py alone.
+
+  webmail:
+    compose_service: webmail
+    note: >
+      Kept so CE works out of the box. The image is built from the public
+      mailyte-webmail repo and needs MAILBOX_API_BASE_URL pointed at the CE
+      api service.
+
+# ---------------------------------------------------------------------------
+# patch — deliberate CE divergences. Carried from PARITY-AUDIT.md's
+# "Deliberate CE divergences — do not 'correct' these" table. Applied after the
+# drop step. Each is a small diff held in scripts/ce-patches/.
+# ---------------------------------------------------------------------------
+patch:
+  - path: shared/metrics.py
+    why: CE ships no Prometheus. Real PrometheusMetrics -> _NoOpMetrics stub.
+
+  # NOTE: worker/api/routes/capabilities.py is NOT patched — it is GENERATED
+  # wholesale by build-ce.py from the `capabilities` block above, which is what
+  # makes the capability list and the route table one source instead of two that
+  # drift. A patch here would be applied on top of the generated file and fail.
+
+  - path: worker/api/routes/monitoring.py
+    why: CE ships no monitoring container. Proxy -> 503 naming the missing service.
+
+  - path: worker/api/routes/queue.py
+    why: CE ships no queue_manager container. Proxy -> 503 naming the missing service.
+
+  - path: worker/api/startup_checks.py
+    why: >
+      ALL_SECRETS is 5 entries in CE, 8 in EE — OAUTH_TOKEN_SECRET,
+      URL_HMAC_SECRET and GRAFANA_ADMIN_PASSWORD have zero consumers in CE, and
+      aborting startup over a value nothing reads is a false failure. Also
+      WEAK_PREFIXES: EE's ("your-", "changeme") matches none of CE's
+      CHANGE_ME_* placeholders — ported verbatim the check accepts every
+      placeholder CE ships.
+    review: >
+      This list must be re-derived, not copied — CE now ships the mailbox API
+      and analytics, so secrets that previously had "zero consumers in CE" may
+      now have one.
+
+  - path: database/migrations/sql/007_migration_enhancements.sql
+    why: CE keeps the ALTER and drops AFTER; CE has no worker/migration/app.py.
+
+  - path: database/migrations/sql/
+    target: migration_errors.job_id
+    why: VARCHAR(100) in CE to match CE's own 005, not EE's VARCHAR(36).
+
+  - path: database/migrations/sql/
+    target: failed_auth_attempts.service
+    why: CE's enum omits api_key — CE never took EE's 0004.
+
+  # REVERSED 2026-09-11 — CE now SHIPS worker/api/schemas/ and keeps
+  # response_model.
+  #
+  # PARITY-AUDIT.md stripped response_model because "any CE field that differs
+  # turns a working endpoint into a 500". That risk came from hand-porting:
+  # CE's routes were re-typed by a human and could return shapes EE's schemas
+  # did not describe. Under generation CE's routes ARE EE's routes, byte for
+  # byte, so the schemas describe them exactly and the failure mode is gone.
+  #
+  # Keeping them is also strictly better: CE gets real OpenAPI docs, and the
+  # fragile source-rewriting transform disappears. build-ce.py drops only
+  # schemas/<name>.py for dropped routes, derived automatically.
+
+# ---------------------------------------------------------------------------
+# ce_local — NEVER generated, NEVER overwritten. build-ce.py preserves whatever
+# the CE repo already has at these paths.
+# ---------------------------------------------------------------------------
+ce_local:
+  - path: alembic/versions/
+    why: >
+      CE has its own append-only chain (0003-0011) that does not correspond to
+      EE's numbering, and published CE instances sit at specific revisions.
+      Renumbering EE's migrations into CE's chain is NOT automatable and must
+      not be attempted. When an EE migration changes schema CE also has, a
+      matching CE migration is written by hand and appended here. This is the
+      one place the old manual discipline survives — and the one place it is
+      correct, because the numbering carries deployment state.
+
+  - path: worker/api/utils/totp.py
+    why: CE ships no totp container; in-process RFC 6238 instead.
+
+  - path: tests/unit_webhook_dispatcher.py
+    why: CE-only test.
+
+  - path: docs/api/examples/
+    why: CE-only docs (curl, javascript, php, python).
+
+  - path: docs/operations/backups.md
+    why: >
+      CE-only doc. Caught by the ce_local coverage check on the first generator
+      run — PARITY-AUDIT.md counted "6 CE-only docs" without listing them, and
+      only 4 are the api/examples set. Without this entry generation deletes it.
+
+  - path: docs/worker/cloud-sync.md
+    why: CE-only doc. Same catch as backups.md above.
+
+# ---------------------------------------------------------------------------
+# verify — run by build-ce.py after generating, and by the phase-3 CI job.
+# ---------------------------------------------------------------------------
+verify:
+  - kind: diff_against_repo
+    repo: mailyte-mail-server-community
+    why: >
+      Every difference is either a manifest bug or a fix CE was missing. Both
+      are wanted output. Phase 1 exits when the only diffs remaining are ones
+      explained by an entry in this file.
+  - kind: imports_resolve
+    why: >
+      Import every generated route module in isolation. app.py swallows
+      ImportError by design, so a missing support file degrades to a silently
+      absent endpoint rather than a failed build — the one way this manifest
+      can ship a quietly broken CE. Fail the build loudly instead.
+  - kind: capability_backed
+    why: >
+      Assert every capability in `capabilities.community` has at least one
+      registered route or a documented non-route owner. This is the check whose
+      absence caused all four Phase 0 contradictions.
+  - kind: boots
+    cmd: docker compose up
+  - kind: tests
+    cmd: pytest            # CE's 37 tests
+  - kind: endpoint
+    path: /api/v1/capabilities
+    expect: {edition: community}
+  - kind: smoke
+    what: mailbox login + send + receive one message end to end

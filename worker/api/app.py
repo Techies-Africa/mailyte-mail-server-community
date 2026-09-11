@@ -1,21 +1,26 @@
 import os
 import sys
 
-# Fail closed on missing/weak secrets (phase-07 C3) -- deliberately the very
-# first thing this process does, before any other import that might touch the
-# database or a secret-derived value. Only the subset this container actually
-# receives is checked; see startup_checks.API_SECRETS for which and why.
+# Fail closed on missing/weak secrets (phase-07 C3) -- deliberately the
+# very first thing this process does, before any other import that might
+# touch the database or a secret-derived value. `secrets-check` (compose)
+# already gates every service on this same check running first, but `api`
+# checks again for itself in case it's ever started standalone
+# (`docker compose run api ...`), bypassing that gate.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from startup_checks import API_SECRETS, verify_secrets
 
 verify_secrets(required=API_SECRETS)
 
+import json
+import logging
+import time
 from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 # Add project root to path
@@ -23,16 +28,32 @@ project_root = Path(__file__).parent.parent.parent
 sys.path.insert(0, str(project_root))
 
 from shared.logging_config import setup_logging
+from shared.metrics import get_metrics
 
 # Setup logging
 logger = setup_logging()
 
+from utils.client_versions import client_version_middleware
+from utils.correlation import CorrelationIdLogFilter, generate_correlation_id, set_correlation_id
+
+# Every log line for a given request carries its correlation id (phase-04
+# task 4.7) -- attached to the root logger's handlers so every module's
+# `logging.getLogger(__name__)` call picks it up without being touched.
+_correlation_filter = CorrelationIdLogFilter()
+for _handler in logging.getLogger().handlers:
+    _handler.addFilter(_correlation_filter)
+    _handler.setFormatter(
+        logging.Formatter(
+            fmt="%(asctime)s - %(name)s - %(levelname)s - [%(correlation_id)s] - %(message)s"
+        )
+    )
+
 app = FastAPI(
     title="Mailyte Email Server API",
     description="""
-# Mailyte Email Server API — Community Edition
+# Mailyte Email Server API — Enterprise Edition
 
-The Mailyte Community Edition API provides programmatic control over a self-hosted email server built on Postfix, Dovecot, and Rspamd.
+The Mailyte Enterprise Edition API provides programmatic control over a self-hosted email server built on Postfix, Dovecot, and Rspamd.
 
 ## What you can do
 
@@ -49,7 +70,11 @@ All endpoints require an API key passed in the `X-API-Key` header.
 X-API-Key: your-api-key-here
 ```
 
-Admin endpoints additionally accept `X-Admin-Token` for system-level operations.
+Platform-only endpoints (service restarts, cross-tenant compliance actions,
+organization lifecycle, and similar) additionally require a platform-scoped
+credential -- either an operator session (`POST /api/v1/platform/auth/login`
++ MFA) or an API key issued with `scope='platform'`. A tenant credential can
+never reach these, regardless of its own permission flags.
 
 ## Base URL
 
@@ -80,8 +105,7 @@ Mailyte Enterprise Edition adds email tracking, webhooks, analytics, AI-powered 
         "url": "https://github.com/Techies-Africa/mailyte-mail-server-community",
     },
     license_info={
-        "name": "AGPL-3.0",
-        "url": "https://www.gnu.org/licenses/agpl-3.0.en.html",
+        "name": "Enterprise License",
     },
     openapi_tags=[
         {
@@ -120,61 +144,144 @@ Mailyte Enterprise Edition adds email tracking, webhooks, analytics, AI-powered 
             "name": "SSL",
             "description": "SSL certificate management handles TLS certificates for mail services. Certificates can be auto-provisioned via Let's Encrypt or manually uploaded. The system monitors certificate expiry and auto-renews before certificates expire.",
         },
-        {
-            "name": "Capabilities",
-            "description": "The capability manifest this deployment ships. The Mailyte Console "
-            "and mailyte-web read it before login to decide which navigation entries and routes "
-            "to render. Unauthenticated by design, and it never exposes tenant data.",
-        },
-        {
-            "name": "Platform Auth",
-            "description": "Operator login for the Mailyte Console. Real, individually-revocable "
-            "identities with mandatory MFA, replacing the static admin token. Two steps: "
-            "password, then TOTP.",
-        },
-        {
-            "name": "Platform",
-            "description": "The console's platform-scope surface: the overview aggregate that "
-            "paints the landing screen and every nav badge, operator lifecycle management "
-            "(owner-only), and read-only views over the append-only operator audit trail.",
-        },
-        {
-            "name": "Monitoring",
-            "description": "Service health, per-service status, system metrics, restart, and "
-            "auto-heal. A thin authenticated proxy over a monitoring service; returns 503 with "
-            "an explanation when this deployment has none configured.",
-        },
-        {
-            "name": "Queue",
-            "description": "Postfix mail queue status, deferred listing, and flush. A thin "
-            "authenticated proxy over a queue service; returns 503 with an explanation when "
-            "this deployment has none configured.",
-        },
     ],
 )
 
-# Configure CORS
+# Initialize metrics
+metrics = get_metrics("api")
+
+
+@app.middleware("http")
+async def metrics_middleware(request: Request, call_next):
+    start_time = time.time()
+    response = await call_next(request)
+    duration = time.time() - start_time
+    metrics.record_request(
+        method=request.method,
+        path=request.url.path,
+        status_code=response.status_code,
+        duration=duration,
+    )
+    return response
+
+
+# Client version negotiation for native/web clients (mobile requirements
+# SS5): stamps X-Min-Client-Version / X-Latest-Client-Version /
+# X-Update-Required / X-Update-Url from MIN_CLIENT_VERSION_<PLATFORM> and
+# friends. Advisory only -- never blocks a request. See utils/client_versions.
+app.middleware("http")(client_version_middleware)
+
+
+@app.get("/metrics")
+async def prometheus_metrics():
+    """Prometheus metrics endpoint"""
+    metrics_data = metrics.get_prometheus_metrics()
+    return PlainTextResponse(metrics_data)
+
+
+# Configure CORS (phase-07 H8, security-model.md H8).
+#
+# allow_credentials=True below is load-bearing for the session cookie
+# (routes/auth.py) -- and Starlette's CORSMiddleware special-cases that
+# combination: with allow_credentials=True, a wildcard origin isn't sent
+# to the browser as the literal string "*" (browsers reject that pairing
+# outright), it's silently replaced with the caller's own Origin header,
+# reflected back on every request. That makes `CORS_ALLOWED_ORIGINS=*`
+# functionally "any origin, with credentials" -- not a no-op fallback, an
+# open door -- so it's rejected at startup rather than allowed to degrade
+# into that quietly.
+_cors_allowed_origins = os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:3000").split(",")
+if "*" in _cors_allowed_origins:
+    sys.exit(
+        "FATAL: CORS_ALLOWED_ORIGINS may not include '*' -- combined with "
+        "allow_credentials=True (required for session-cookie auth), Starlette "
+        "reflects any request's Origin back as allowed, which defeats the "
+        "restriction entirely. Set it to the real, specific origin(s) that "
+        "serve the dashboard instead."
+    )
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:3000").split(","),
+    allow_origins=_cors_allowed_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
+    allow_headers=[
+        "Content-Type",
+        "X-API-Key",
+        "X-CSRF-Token",
+        "X-Bootstrap-Token",
+        # Pass-through to worker/monitoring/app.py's own separate,
+        # pre-existing token gate (restart/auto-heal/test-webhooks) -- not
+        # read via os.getenv() in this service; phase-06 replaced
+        # utils/auth.py's own require_admin() (which DID read
+        # ADMIN_TOKEN_SECRET/ADMIN_PASSWORD here) with real operator
+        # identities instead, so X-Admin-Password has no remaining consumer
+        # and is deliberately not listed below.
+        "X-Admin-Token",
+        "Idempotency-Key",
+        # Native/web clients declare themselves (utils/client_versions.py).
+        "X-Client-Platform",
+        "X-Client-Version",
+        "X-Client-Build",
+    ],
+    # Browsers only let scripts read non-simple response headers that are
+    # listed here -- without this the web client cannot see the update
+    # headers or the correlation id it logs alongside errors.
+    expose_headers=[
+        "X-Correlation-Id",
+        "X-Min-Client-Version",
+        "X-Latest-Client-Version",
+        "X-Update-Required",
+        "X-Update-Url",
+    ],
 )
 
 
 @app.middleware("http")
+async def correlation_id_middleware(request: Request, call_next):
+    """Generate a correlation id per request (phase-04 task 4.7).
+
+    Set on request.state and the logging contextvar for every request;
+    stamped onto every response as X-Correlation-Id; also folded into the
+    JSON body of error responses (>=400) so Laravel can log it alongside its
+    own job id without re-deriving it from headers.
+    """
+    correlation_id = generate_correlation_id()
+    request.state.correlation_id = correlation_id
+    set_correlation_id(correlation_id)
+
+    response = await call_next(request)
+
+    content_type = response.headers.get("content-type", "")
+    if response.status_code >= 400 and content_type.startswith("application/json"):
+        body = b"".join([chunk async for chunk in response.body_iterator])
+        try:
+            payload = json.loads(body)
+            if isinstance(payload, dict):
+                payload.setdefault("correlation_id", correlation_id)
+                body = json.dumps(payload).encode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            pass
+        headers = dict(response.headers)
+        headers.pop("content-length", None)
+        response = Response(
+            content=body, status_code=response.status_code, headers=headers, media_type=content_type
+        )
+
+    response.headers["X-Correlation-Id"] = correlation_id
+    return response
+
+
+@app.middleware("http")
 async def operator_audit_middleware(request: Request, call_next):
-    """Every privileged action is audited -- no exceptions (ADR-002 §6).
+    """Every privileged action is audited -- no exceptions (task 6.8,
+    ADR-002 SS6). Registered after correlation_id_middleware so it wraps it
+    (Starlette: last-registered middleware runs outermost), meaning the
+    response this sees already carries X-Correlation-Id.
 
-    Middleware, not per-handler calls: a handler that forgets to log is a
-    security hole, and middleware cannot forget. It also catches denials,
-    which are the signal of compromise and which a handler never reaches at
-    all because the auth guard raised before it ran.
-
-    Reads the raw request body before call_next -- Starlette caches it on the
-    Request object after first read, so route handlers downstream still see
-    it normally.
+    Reads the raw request body before call_next -- Starlette caches it on
+    the Request object after first read, so route handlers downstream (and
+    utils/idempotency.py's own body read) still see it normally.
     """
     raw_body = await request.body()
     response = await call_next(request)
@@ -190,27 +297,29 @@ async def operator_audit_middleware(request: Request, call_next):
     return response
 
 
+# Serve static files and templates
+TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), "templates")
+app.mount(
+    "/static",
+    StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")),
+    name="static",
+)
+
+BOOTSTRAP_TOKEN_PATH = "/app/data/bootstrap-token"
 OPERATOR_BOOTSTRAP_TOKEN_PATH = "/app/data/operator-bootstrap-token"
 
 
 @app.on_event("startup")
 async def generate_operator_bootstrap_token_if_none_exist():
-    """Write a single-use bootstrap token when no platform operator exists.
-
-    Resolves the console's bootstrap paradox (ADR-004): the console needs an
-    operator to log in as, and only an existing `owner` can mint one --
-    except on a fresh install, where there is no owner yet. This token is the
-    only way in. `POST /api/v1/platform/auth/bootstrap` consumes it, creates
-    the first `owner`, and deletes it.
-
-    Deliberately gated on its own condition (no platform_operators row) and
-    kept separate from any organization bootstrap: an install can already
-    have organizations with zero operators, or the reverse, so sharing one
-    single-use token between them would let whichever bootstrap ran first
-    consume it and permanently lock out the other.
-
-    Non-fatal by design -- a failure here must never stop the API serving.
-    The token is never logged; the 0600 file is the only place it lives.
+    """Same paradox as generate_bootstrap_token_if_fresh_install below, for
+    operators instead of organizations (task 6.9) -- and deliberately a
+    SEPARATE token gated on its own condition (no platform_operators row
+    exists), not reused from the org bootstrap token. The two are
+    independent resources: a stack can already have organizations (e.g.
+    this phase built on top of an existing install) with zero operators, or
+    vice versa, so sharing one single-use token between them would let
+    whichever bootstrap ran first consume the only token and permanently
+    lock out the other.
     """
     try:
         import secrets as _secrets
@@ -238,24 +347,83 @@ async def generate_operator_bootstrap_token_if_none_exist():
                 f.write(token)
             os.chmod(OPERATOR_BOOTSTRAP_TOKEN_PATH, 0o600)
             logger.info(
-                "Operator bootstrap token generated (no operators exist yet), written to "
-                f"{OPERATOR_BOOTSTRAP_TOKEN_PATH}"
+                f"Operator bootstrap token generated (no operators exist yet), written to {OPERATOR_BOOTSTRAP_TOKEN_PATH}"
             )
         elif os.path.isfile(OPERATOR_BOOTSTRAP_TOKEN_PATH):
-            # Already provisioned -- remove any stale token so there is
-            # nothing left to leak or reuse.
             os.remove(OPERATOR_BOOTSTRAP_TOKEN_PATH)
     except Exception as exc:
         logger.warning(f"Operator bootstrap token check failed (non-fatal): {exc}")
 
 
-# Serve static files and templates
-TEMPLATES_DIR = os.path.join(os.path.dirname(__file__), "templates")
-app.mount(
-    "/static",
-    StaticFiles(directory=os.path.join(os.path.dirname(__file__), "static")),
-    name="static",
-)
+@app.on_event("startup")
+async def generate_bootstrap_token_if_fresh_install():
+    """Write a single-use bootstrap token when no API keys exist yet.
+
+    Resolves the bootstrap paradox (phase-02 task 2.4): scripts/setup-first-user.sh
+    needs an API key to call the API, but a fresh install has none. This token
+    is the only way in; POST /api/v1/bootstrap consumes it and creates the
+    first organization, domain, mailbox, and API key.
+
+    Non-fatal by design -- a failure here must never crash the API service.
+    Bootstrap is not on the critical path for the rest of the API.
+    """
+    try:
+        import secrets as _secrets
+
+        import mysql.connector
+
+        conn = mysql.connector.connect(
+            host=os.getenv("DB_HOST", "mysql"),
+            port=int(os.getenv("DB_PORT", "3306")),
+            database=os.getenv("DB_NAME", "mailserver"),
+            user=os.getenv("DB_USER", "mailuser"),
+            password=os.getenv("DB_PASSWORD", ""),
+            connect_timeout=5,
+        )
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM api_keys")
+        (count,) = cursor.fetchone()
+        cursor.close()
+        conn.close()
+
+        if count == 0:
+            os.makedirs(os.path.dirname(BOOTSTRAP_TOKEN_PATH), exist_ok=True)
+            token = _secrets.token_urlsafe(32)
+            with open(BOOTSTRAP_TOKEN_PATH, "w") as f:
+                f.write(token)
+            os.chmod(BOOTSTRAP_TOKEN_PATH, 0o600)
+            # Never log the token itself (H2, security-model.md) -- the file at
+            # BOOTSTRAP_TOKEN_PATH (0600) is the only place it's meant to live;
+            # scripts/setup-first-user.sh reads it from there, not from logs.
+            logger.info(
+                f"Bootstrap token generated (no organizations exist yet), written to {BOOTSTRAP_TOKEN_PATH}"
+            )
+        elif os.path.isfile(BOOTSTRAP_TOKEN_PATH):
+            # Already provisioned -- remove any stale token so there is
+            # nothing left to leak or reuse.
+            os.remove(BOOTSTRAP_TOKEN_PATH)
+    except Exception as exc:
+        logger.warning(f"Bootstrap token check failed (non-fatal): {exc}")
+
+
+@app.on_event("startup")
+async def start_session_cleanup_worker():
+    """Start the web_sessions purge thread (phase-03 task 3.6). Non-fatal --
+    an expired-session backlog is a nuisance, not an outage."""
+    try:
+        from utils.session_cleanup import start_session_cleanup
+
+        start_session_cleanup()
+    except Exception as exc:
+        logger.warning(f"Session cleanup worker failed to start (non-fatal): {exc}")
+
+
+@app.on_event("startup")
+async def start_idempotency_cleanup_worker():
+    """Purge expired idempotency_keys rows on a background thread (phase-04 task 4.2)."""
+    from utils.idempotency_cleanup import start_idempotency_cleanup
+
+    start_idempotency_cleanup()
 
 
 @app.get("/api-reference", include_in_schema=False)
@@ -282,25 +450,53 @@ route_modules = [
     ("domains", "/api/v1/domains", "Domains"),
     ("mailboxes", "/api/v1/mailboxes", "Mailboxes"),
     ("aliases", "/api/v1/aliases", "Aliases"),
-    ("rate_limiter", "/api/v1/rate-limiter", "Rate Limiting"),
-    ("filters", "/api/v1/filters", "Filters"),
-    ("tracking", "/api/v1/tracking", "Tracking"),
-    ("webhooks", "/api/v1/webhooks", "Webhooks"),
-    ("ssl", "/api/v1/ssl", "SSL"),
-    ("smtp_credentials", "/api/v1/smtp-credentials", "SMTP Credentials"),
-    # Read-side split of the same resource (K6 parity of EE K1/K2,
-    # 00-PRD-smtp-api-keys): events/usage live in their own module purely
-    # for file-size reasons. Same prefix is fine -- the paths ({id}/events,
-    # {id}/usage) don't collide with the lifecycle router's.
-    ("smtp_credential_reports", "/api/v1/smtp-credentials", "SMTP Credential Reports"),
+    ("analytics", "/api/v1/analytics", "Analytics"),
     ("monitoring", "/api/v1/monitoring", "Monitoring"),
     ("queue", "/api/v1/queue", "Queue"),
+    ("webhooks", "/api/v1/webhooks", "Webhooks"),
+    ("rate_limiter", "/api/v1/rate-limiter", "Rate Limiting"),
+    ("tracking", "/api/v1/tracking", "Tracking"),
+    ("filters", "/api/v1/filters", "Filters"),
+    ("ssl", "/api/v1/ssl", "SSL"),
+    ("smtp_credentials", "/api/v1/smtp-credentials", "SMTP Credentials"),
+    # Read-side split of the same resource (K1, 00-PRD-smtp-api-keys):
+    # events/usage live in their own module purely for file-size reasons.
+    # Same prefix is fine -- the paths ({id}/events, {id}/usage) don't
+    # collide with the lifecycle router's.
+    ("smtp_credential_reports", "/api/v1/smtp-credentials", "SMTP Credential Reports"),
     ("capabilities", "/api/v1/capabilities", "Capabilities"),
     ("platform_auth", "/api/v1/platform/auth", "Platform Auth"),
     # Registered AFTER platform_auth deliberately: routers are matched in
     # include order, so the more specific /api/v1/platform/auth/* prefix must
     # claim its paths before the broader /api/v1/platform mount sees them.
     ("platform", "/api/v1/platform", "Platform"),
+    # Console phase-04 (PRD SS12 gaps #4 and #5). Appended at the end rather
+    # than filed alphabetically: include order only matters where one prefix
+    # is a prefix of another (see the platform_auth note above), and neither
+    # of these overlaps an existing mount -- so the cheapest position is the
+    # one that does not touch a single existing line.
+    ("security", "/api/v1/security", "Security"),
+    # Webmail phase-01 (04-mailyte-web/02-PRD-webmail-standalone). The
+    # mailbox-holder surface, replacing mailyte-api's /api/v1/mailbox/*.
+    #
+    # mailbox_auth is registered BEFORE mailbox for the same reason
+    # platform_auth precedes platform above: "/api/v1/mailbox-auth" has
+    # "/api/v1/mailbox" as a string prefix, so the more specific mount claims
+    # its paths first. These two are also deliberately distinct from
+    # "mailboxes" (/api/v1/mailboxes) near the top of this list -- that is the
+    # org-admin resource for managing accounts, a different audience with a
+    # different credential. One letter apart, nothing else in common.
+    ("mailbox_auth", "/api/v1/mailbox-auth", "Mailbox Auth"),
+    ("mailbox", "/api/v1/mailbox", "Mailbox"),
+    # Mobile-backend pass (2026-08-31): the mailbox-holder surface grew four
+    # sibling modules sharing mailbox's prefix (same pattern as the
+    # smtp_credentials/smtp_credential_reports split above -- their paths
+    # don't collide with mailbox.py's). Registered AFTER mailbox so its
+    # existing routes keep first claim on any overlapping shape.
+    ("mailbox_password", "/api/v1/mailbox", "Mailbox Password"),
+    ("mailbox_blocked_senders", "/api/v1/mailbox", "Mailbox Blocked Senders"),
+    ("mailbox_insights", "/api/v1/mailbox", "Mailbox Insights"),
+    ("mailbox_ai", "/api/v1/mailbox", "Mailbox AI"),
 ]
 
 for module_name, prefix, tag in route_modules:
@@ -719,7 +915,7 @@ _UNUSED_INLINE_HTML = """<!DOCTYPE html>
     </div>
 
     <footer>
-        <p>Mailyte Email Server v1.0.0 &mdash; Community Edition</p>
+        <p>Mailyte Email Server v1.0.0 &mdash; Enterprise Edition</p>
         <div class="footer-links">
             <a href="https://github.com/Techies-Africa/mailyte-mail-server-community">GitHub</a>
             <a href="https://mailyte.com">mailyte.com</a>
@@ -769,3 +965,30 @@ if __name__ == "__main__":
     host = os.getenv("HOST", "0.0.0.0")
     port = int(os.getenv("PORT", 5000))
     uvicorn.run("app:app", host=host, port=port, reload=True)
+
+
+@app.on_event("startup")
+async def start_alert_evaluator():
+    """Start the alert evaluation loop.
+
+    Until this ran, alert rules were stored and never evaluated: nothing read
+    `alert_rules` except the API that wrote it, so no rule fired on its own and
+    no channel was ever notified. A monitoring feature is trusted precisely
+    when nobody is watching, which is the one situation it did not work.
+
+    Non-fatal, like the session cleanup worker above. A mail server that cannot
+    evaluate alerts should still carry mail -- and failing to boot the API over
+    it would take out the console used to diagnose the problem.
+
+    Safe under replicas: the loop takes a MySQL advisory lock each tick, so
+    only one of the `api` replicas evaluates and notifications are not doubled.
+    """
+    try:
+        import asyncio
+
+        from routes.platform import _alert_evaluation_loop
+
+        asyncio.create_task(_alert_evaluation_loop())
+        logger.info("Alert evaluator started")
+    except Exception as exc:
+        logger.warning(f"Alert evaluator failed to start (non-fatal): {exc}")

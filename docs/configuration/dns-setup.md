@@ -1,247 +1,152 @@
 # DNS Setup
 
-MX, SPF, DKIM, DMARC, MTA-STS, and SRV records — what each one does and the exact records to create.
+MX, SPF, DKIM, DMARC, PTR, MTA-STS, autoconfig — what each record does, the exact values Mailyte expects, and how verification works.
 
 ---
 
-DNS records tell the world how to reach your mail server and how to verify that mail from your domain is legitimate. Getting these right is critical. Missing or broken DNS records are the number one cause of delivery problems.
+DNS records tell the world how to reach your mail server and how to verify that mail from your domain is legitimate. Missing or broken DNS records are the number one cause of delivery problems.
 
-## The Records You Need
+Mailyte generates the records for you: `POST /api/v1/domains` (and `GET /api/v1/domains/{id}`) returns the exact MX/SPF/DKIM/DMARC records for a domain, and `GET /dns-records/{domain}` on the autoconfig service returns an extended set including MTA-STS, TLSRPT, SRV, and the autoconfig/autodiscover CNAMEs.
 
-Here's a quick summary. Detailed explanations follow.
+## The Records Mailyte Generates
 
-| Record | Type | Purpose |
-|--------|------|---------|
-| MX | MX | Points to your mail server |
-| SPF | TXT | Lists servers allowed to send for your domain |
-| DKIM | TXT | Public key for email signature verification |
-| DMARC | TXT | Policy for handling failed SPF/DKIM checks |
-| PTR | PTR | Reverse DNS for your server IP |
-| MTA-STS | TXT + HTTPS | Enforces TLS for incoming mail |
-| SRV | SRV | Helps email clients auto-discover server settings |
+With the server hostname `mail.yourdomain-provider.com` (from `MAIL_HOSTNAME`, falling back to `HOSTNAME`) and SPF host `spf.mail.yourdomain-provider.com` (from `MAIL_SPF_HOST`, default `spf.<server hostname>`):
+
+| Record | Name | Value |
+|--------|------|-------|
+| MX | `customer.com` | `10 mail.yourdomain-provider.com.` |
+| SPF | `customer.com` TXT | `v=spf1 include:spf.mail.yourdomain-provider.com ~all` |
+| DKIM | `default._domainkey.customer.com` TXT | `v=DKIM1; k=rsa; p=<base64 public key>` |
+| DMARC | `_dmarc.customer.com` TXT | `v=DMARC1; p=quarantine; rua=mailto:dmarc-reports@customer.com` |
+| Autoconfig | `autoconfig.customer.com` CNAME | `mail.yourdomain-provider.com.` |
+| Autodiscover | `autodiscover.customer.com` CNAME | `mail.yourdomain-provider.com.` |
+
+The SPF `include:` host publishes the server's IPs once, so customer records never need updating when IPs change. `MAIL_SPF_HOST` must stay in step with that published record.
 
 ## MX Record
 
-The MX record tells other mail servers where to deliver email for your domain.
-
 ```
-yourdomain.com.    IN    MX    10    mail.yourdomain.com.
+customer.com.    IN    MX    10    mail.yourdomain-provider.com.
 ```
 
-- **Priority 10** — Lower numbers mean higher priority. If you have a backup server, give it a higher number (e.g., 20).
-- The target (`mail.yourdomain.com`) must have an A record pointing to your server's IP.
+- **Priority 10** — lower numbers mean higher priority.
+- MX must point to a hostname (never an IP), and that hostname must have an A record to this server.
 
-You also need an A record for the mail server itself:
-
-```
-mail.yourdomain.com.    IN    A    203.0.113.1
-```
-
-Replace `203.0.113.1` with your actual server IP.
-
-> [!NOTE]
-> MX records must point to a hostname, not an IP address. The hostname then resolves to an IP through the A record. This is a hard requirement in the email standards.
+> [!WARNING]
+> A domain provisioned in Mailyte whose MX still points at the old mail system needs an entry in Postfix's `transport_cutover` map until cutover, or its mail either loop-bounces or lands in an unread local copy. See [Postfix Configuration](postfix-configuration.md#transport-cutover-map).
 
 ## SPF Record
 
-SPF (Sender Policy Framework) tells receiving servers which IP addresses are allowed to send email on behalf of your domain.
-
 ```
-yourdomain.com.    IN    TXT    "v=spf1 mx a:mail.yourdomain.com -all"
+customer.com.    IN    TXT    "v=spf1 include:spf.mail.yourdomain-provider.com ~all"
 ```
 
-Breaking this down:
-- **`v=spf1`** — This is an SPF record (version 1).
-- **`mx`** — Any server listed in MX records is allowed to send.
-- **`a:mail.yourdomain.com`** — The IP that `mail.yourdomain.com` resolves to is also allowed.
-- **`-all`** — Reject mail from any other source.
-
-If you also send through a third-party service (like a transactional email provider), include their SPF:
-
-```
-yourdomain.com.    IN    TXT    "v=spf1 mx a:mail.yourdomain.com include:_spf.google.com -all"
-```
-
-> [!WARNING]
-> Use `-all` (hard fail) once you're confident your SPF record is complete. During initial testing, use `~all` (soft fail) so legitimate mail doesn't get rejected if you missed a sending source.
+- **One SPF record only.** RFC 7208 allows exactly one `v=spf1` TXT per name; receivers treat more as a permanent error. Mailyte's verifier fails a domain with duplicates.
+- If the domain also sends through another service, merge into one record: `"v=spf1 include:spf.mail.yourdomain-provider.com include:_spf.google.com ~all"`.
+- Use `~all` (softfail) until you're certain every sending source is listed, then optionally tighten to `-all`.
 
 ## DKIM Record
 
-DKIM (DomainKeys Identified Mail) lets receiving servers verify that an email was actually sent by your server and hasn't been tampered with.
-
-When you generate a DKIM key in Rspamd (see [Rspamd Configuration](rspamd-configuration.md)), it outputs a DNS record. It looks like this:
+Every domain gets an RSA-2048 key pair, generated when the domain is added (or with `scripts/generate_dkim.py`). The selector is `default` unless you change `dkim_selector` on the domain:
 
 ```
-mail._domainkey.yourdomain.com.    IN    TXT    "v=DKIM1; k=rsa; p=MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA..."
+default._domainkey.customer.com.    IN    TXT    "v=DKIM1; k=rsa; p=MIIBIjANBgkqhkiG9w0BAQ..."
 ```
 
-- **`mail`** is the selector — it matches the selector in your Rspamd DKIM config.
-- **`_domainkey`** is the standard DKIM namespace.
-- **`p=`** is your public key (the long base64 string).
-
-To verify the record is set up correctly:
+The domain-detail API response includes `dkim_record`, `dkim_selector`, and `dkim_dns_name` ready to paste. To verify:
 
 ```bash
-dig TXT mail._domainkey.yourdomain.com +short
+dig TXT default._domainkey.customer.com +short
 ```
 
 > [!TIP]
-> Some DNS providers have a character limit on TXT records. If your DKIM key is too long for a single string, split it into multiple quoted strings:
-> ```
-> "v=DKIM1; k=rsa; p=MIIBIjANBgkqhkiG9w0BAQE..."
-> "...FAAOCAQ8AMIIBCgKCAQEA..."
-> ```
-> Most DNS providers handle this automatically.
+> A 2048-bit key is ~392 base64 characters (~412 with the prefix). Many DNS providers split TXT values over 255 bytes into multiple quoted strings — that's fine, resolvers rejoin them. If you see a much shorter value (<300 chars), it's probably a legacy 1024-bit key worth rotating (`python3 scripts/generate_dkim.py --rotate customer.com`).
 
 ## DMARC Record
 
-DMARC (Domain-based Message Authentication, Reporting, and Conformance) ties SPF and DKIM together. It tells receiving servers what to do when a message fails authentication.
-
 ```
-_dmarc.yourdomain.com.    IN    TXT    "v=DMARC1; p=quarantine; rua=mailto:dmarc-reports@yourdomain.com; ruf=mailto:dmarc-forensics@yourdomain.com; sp=quarantine; adkim=s; aspf=s"
+_dmarc.customer.com.    IN    TXT    "v=DMARC1; p=quarantine; rua=mailto:dmarc-reports@customer.com"
 ```
 
-The key parts:
-- **`p=quarantine`** — Messages that fail DMARC should be sent to spam. Other options: `none` (monitor only) or `reject` (hard reject).
-- **`rua=`** — Aggregate reports get sent here (daily summaries of authentication results).
-- **`ruf=`** — Forensic reports get sent here (details of individual failures).
-- **`adkim=s`** — Strict DKIM alignment (the signing domain must exactly match the From domain).
-- **`aspf=s`** — Strict SPF alignment.
+- **`p=quarantine`** — failing mail goes to spam. `none` = monitor only; `reject` = block outright.
+- **`rua=`** — aggregate reports destination.
 
 ### Recommended Rollout
 
-Start cautious and tighten over time:
-
-1. **Week 1-2:** `p=none` — Just collect reports, don't take action.
-2. **Week 3-4:** `p=quarantine; pct=25` — Quarantine 25% of failing mail.
-3. **Week 5-6:** `p=quarantine; pct=100` — Quarantine all failing mail.
-4. **Week 7+:** `p=reject` — Reject all failing mail.
+1. Start with `p=none` and read the reports for a couple of weeks.
+2. Move to `p=quarantine` (optionally with `pct=25` → `pct=100`).
+3. Finish at `p=reject` once reports are clean.
 
 ## PTR Record (Reverse DNS)
 
-A PTR record maps your server's IP address back to its hostname. Many mail servers check this and reject mail if it's missing or wrong.
-
-You don't set this in your domain's DNS. You set it through your hosting provider or ISP — they control the reverse DNS zone for your IP address.
-
-The PTR record should resolve to your `HOSTNAME`:
-
-```
-1.113.0.203.in-addr.arpa.    IN    PTR    mail.yourdomain.com.
-```
-
-To verify:
+Your server's IP must resolve back to `HOSTNAME`. Set this with your hosting provider — it is not in your domain's zone.
 
 ```bash
-dig -x 203.0.113.1 +short
-# Should return: mail.yourdomain.com.
+dig -x YOUR_SERVER_IP +short
+# must return the value of HOSTNAME, e.g. mail.yourdomain-provider.com.
 ```
 
 > [!WARNING]
-> A missing or mismatched PTR record is one of the most common reasons email gets rejected. Many large providers (Gmail, Outlook) will reject or spam-folder your mail without it.
+> A missing or mismatched PTR is one of the most common reasons Gmail/Outlook reject or spam-folder mail.
 
-## MTA-STS
+## MTA-STS and TLSRPT
 
-MTA-STS (Mail Transfer Agent Strict Transport Security) tells sending servers that they must use TLS when delivering mail to your domain. It prevents downgrade attacks.
-
-### Step 1: Create the Policy File
-
-Host this file at `https://mta-sts.yourdomain.com/.well-known/mta-sts.txt`:
+The autoconfig service serves the MTA-STS policy automatically at `https://mta-sts.<domain>/.well-known/mta-sts.txt` for every hosted domain — you only add DNS:
 
 ```
-version: STSv1
-mode: enforce
-mx: mail.yourdomain.com
-max_age: 604800
+mta-sts.customer.com.      IN    CNAME    mail.yourdomain-provider.com.
+_mta-sts.customer.com.     IN    TXT      "v=STSv1; id=20260827000000"
+_smtp._tls.customer.com.   IN    TXT      "v=TLSRPTv1; rua=mailto:tls-reports@customer.com"
 ```
 
-- **`mode: enforce`** — Require TLS. Use `testing` first to avoid breaking mail delivery while you validate.
-- **`mx:`** — List each MX hostname, one per line.
-- **`max_age: 604800`** — Policy is valid for 7 days (in seconds).
+The served policy mode comes from `MTA_STS_MODE` — `testing` in development, `enforce` in the production compose file. Change the `id` whenever the policy changes.
 
-### Step 2: Add the DNS Record
+## Client Auto-Setup (Autoconfig / Autodiscover / SRV)
 
-```
-_mta-sts.yourdomain.com.    IN    TXT    "v=STSv1; id=20260325001"
-```
+The `autoconfig` worker answers Thunderbird's `config-v1.1.xml`, Microsoft's `autodiscover.xml` (POX and V2 JSON), for **every hosted domain** — Traefik routes `autoconfig.*`, `autodiscover.*`, and `mta-sts.*` hostnames to it, and cert_manager includes `autoconfig.`/`autodiscover.` names in each domain's certificate. It hands clients: IMAP 993 (SSL), POP3 995 (SSL), SMTP 587 (STARTTLS), username = full email address.
 
-The `id` is a version identifier. Change it every time you update the policy so caching servers pick up the new version.
-
-### Step 3: Add the Reporting Record (Optional)
+DNS needed per domain — two CNAMEs (in the generated set above) and optionally SRV records for clients that use them:
 
 ```
-_smtp._tls.yourdomain.com.    IN    TXT    "v=TLSRPTv1; rua=mailto:tls-reports@yourdomain.com"
+_autodiscover._tcp.customer.com.  IN  SRV  0 1 443 mail.yourdomain-provider.com.
+_imaps._tcp.customer.com.         IN  SRV  0 1 993 mail.yourdomain-provider.com.
+_submission._tcp.customer.com.    IN  SRV  0 1 587 mail.yourdomain-provider.com.
+_pop3s._tcp.customer.com.         IN  SRV  0 1 995 mail.yourdomain-provider.com.
 ```
 
-This tells sending servers where to report TLS delivery failures.
+## Verifying a Domain
 
-## SRV Records
-
-SRV records help email clients auto-discover your server settings. When a user types their email address into Thunderbird, Outlook, or a mobile client, the app looks up these records.
-
-```
-_submission._tcp.yourdomain.com.    IN    SRV    0 1 587 mail.yourdomain.com.
-_imaps._tcp.yourdomain.com.         IN    SRV    0 1 993 mail.yourdomain.com.
-_pop3s._tcp.yourdomain.com.         IN    SRV    0 1 995 mail.yourdomain.com.
-```
-
-The format is: `priority weight port target`.
-
-- **`_submission`** — SMTP submission (sending mail).
-- **`_imaps`** — IMAP over TLS (reading mail).
-- **`_pop3s`** — POP3 over TLS (reading mail).
-
-> [!TIP]
-> Not all email clients support SRV records, but the ones that do give users a much smoother setup experience. It takes two minutes to add them and saves your users from manually entering server settings.
-
-## Autoconfig / Autodiscover
-
-In addition to SRV records, you can set up autoconfig for Mozilla clients and autodiscover for Outlook.
-
-### Mozilla Autoconfig
-
-Create a CNAME record:
-
-```
-autoconfig.yourdomain.com.    IN    CNAME    mail.yourdomain.com.
-```
-
-Then serve an XML config at `https://autoconfig.yourdomain.com/mail/config-v1.1.xml`. The Mailyte API handles this automatically.
-
-### Outlook Autodiscover
-
-```
-_autodiscover._tcp.yourdomain.com.    IN    SRV    0 1 443 mail.yourdomain.com.
-```
-
-## Verifying Your DNS Setup
-
-After adding all records, verify them:
+Mailyte's DNS verification is one engine (in the API's domains routes, consolidated 2026-08-21) using in-process DNS resolution:
 
 ```bash
-# Check MX
-dig MX yourdomain.com +short
-
-# Check SPF
-dig TXT yourdomain.com +short
-
-# Check DKIM
-dig TXT mail._domainkey.yourdomain.com +short
-
-# Check DMARC
-dig TXT _dmarc.yourdomain.com +short
-
-# Check PTR
-dig -x YOUR_SERVER_IP +short
-
-# Check MTA-STS
-dig TXT _mta-sts.yourdomain.com +short
-
-# Check SRV
-dig SRV _submission._tcp.yourdomain.com +short
-dig SRV _imaps._tcp.yourdomain.com +short
+curl -X POST https://api.yourdomain-provider.com/api/v1/domains/{domain_id}/verify-dns \
+  -H "X-API-Key: $API_KEY"
 ```
 
-You can also use online tools like [MXToolbox](https://mxtoolbox.com/) or [Mail-Tester](https://www.mail-tester.com/) to get a comprehensive report.
+It checks exactly four records:
+
+| Check | Pass condition |
+|-------|----------------|
+| MX | The server hostname appears among the domain's MX targets |
+| SPF | Real mechanism evaluation — the record must actually authorize this server's IPs (`ip4:`/`ip6:`/`a`/`mx`/`include:`/`redirect=` are followed, within RFC 7208's 10-lookup budget); more than one SPF record fails |
+| DKIM | `{selector}._domainkey.{domain}` TXT contains `v=DKIM1` |
+| DMARC | `_dmarc.{domain}` TXT contains `v=DMARC1` (policy reported back) |
+
+Manual spot checks:
+
+```bash
+dig MX customer.com +short
+dig TXT customer.com +short
+dig TXT default._domainkey.customer.com +short
+dig TXT _dmarc.customer.com +short
+dig -x YOUR_SERVER_IP +short
+```
+
+Online tools like [MXToolbox](https://mxtoolbox.com/) and [Mail-Tester](https://www.mail-tester.com/) give a good second opinion.
+
+## Bulk Tooling
+
+For estates managed in Cloudflare, `scripts/dns/cloudflare_apply.sh` applies MX/SPF/DKIM/DMARC across all configured zones — dry-run by default, `--apply` to write, `--prune-mx` to remove stale MX records. It merges SPF instead of replacing it and never rewrites an existing DMARC record. `scripts/dns/export_dkim_records.sh` exports every domain's DKIM key in TSV or zone-file form.
 
 > [!NOTE]
-> DNS changes can take up to 48 hours to propagate, though most updates are visible within minutes. If you just made changes and they're not showing up, wait a bit and try again.
+> DNS changes can take up to 48 hours to propagate, though most are visible within minutes at TTL 300.

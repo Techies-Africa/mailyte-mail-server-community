@@ -42,6 +42,9 @@ from services.alert_service import RateLimitAlertService
 from services.cache_service import RateLimitCacheService
 from services.config_service import RateLimitConfigService
 from services.database_service import RateLimitDatabaseService
+from services.send_credit_service import SendCreditService
+from services.suppression_check_service import SuppressionCheckService
+from services.tripwire_service import TripwireService
 from services.usage_service import RateLimitUsageService
 from services.webhook_service import RateLimitWebhookService
 
@@ -100,6 +103,22 @@ class EnterpriseRateLimiter:
         self.config_service = RateLimitConfigService()
         self.cache_service = RateLimitCacheService()
         self.database_service = RateLimitDatabaseService()
+        self.suppression_check_service = SuppressionCheckService(
+            database_service=self.database_service
+        )
+        # App-sending pool and prepaid credits. Off unless
+        # SEND_CREDIT_ENFORCEMENT is set -- see the service docstring.
+        self.send_credit_service = SendCreditService(
+            redis_client=self.cache_service.redis_client,
+            config_service=self.config_service,
+        )
+        # Bounce-rate tripwire. Scanning is off unless TRIPWIRE_ENABLED, but
+        # an existing pause key is always enforced -- see the service
+        # docstring for why those are two separate decisions.
+        self.tripwire_service = TripwireService(
+            redis_client=self.cache_service.redis_client,
+            config_service=self.config_service,
+        )
         self.usage_service = RateLimitUsageService(
             cache_service=self.cache_service, database_service=self.database_service
         )
@@ -132,6 +151,15 @@ class EnterpriseRateLimiter:
             cleanup_thread.start()
             logger.info("Cleanup service started")
 
+            # Start the tripwire evaluator only when scanning is switched
+            # on; enforcement of already-set pause keys needs no thread.
+            if self.tripwire_service.enabled:
+                tripwire_thread = threading.Thread(
+                    target=self._run_tripwire_service, name="rate_limit_tripwire", daemon=True
+                )
+                tripwire_thread.start()
+                logger.info("Tripwire evaluation service started")
+
         except Exception as e:
             logger.error(f"Failed to start background services: {e}")
 
@@ -157,6 +185,19 @@ class EnterpriseRateLimiter:
                 logger.error(f"Cleanup service error: {e}")
                 time.sleep(60)  # Wait 1 minute on error
 
+    def _run_tripwire_service(self):
+        """Background service that evaluates the bounce-rate tripwire"""
+        while True:
+            try:
+                time.sleep(60)
+                self.tripwire_service.evaluate()
+
+            except Exception as e:
+                # evaluate() swallows its own errors; this catch only exists
+                # so the thread can never die and silently stop scanning.
+                logger.error(f"Tripwire service error: {e}")
+                time.sleep(60)  # Wait 1 minute on error
+
     def check_rate_limit(self, email: str, direction: str) -> tuple[bool, str, dict[str, Any]]:
         """
         Check if email can be sent/received within rate limits.
@@ -176,8 +217,8 @@ class EnterpriseRateLimiter:
         try:
             with LogTimer(log_performance, f"rate_limit_check_{direction}"):
                 # An identity with no '@' is an SMTP API key's SASL username
-                # (00-PRD-smtp-api-keys K2/K6) -- these used to fall through
-                # the '@' guard in the policy bridge and bypass rate limiting
+                # (00-PRD-smtp-api-keys K2) -- these used to fall through the
+                # '@' guard in the policy bridge and bypass rate limiting
                 # entirely. Resolve it to its org/domain so the same
                 # hierarchical checks apply, plus a per-key rule on top.
                 credential = None
@@ -204,6 +245,63 @@ class EnterpriseRateLimiter:
                     # Extract organization and domain from email
                     organization_id, domain = self._extract_organization_and_domain(email)
 
+                # Tripwire pause: enforced on key presence alone (so it holds
+                # even with TRIPWIRE_ENABLED off), outbound only -- pausing a
+                # sender must never refuse mail ADDRESSED to them, the exact
+                # mistake that broke all inbound on 2026-08-22. A broken
+                # Redis fails open inside is_paused.
+                if direction == "outbound":
+                    pause_reason = self.tripwire_service.is_paused(organization_id)
+                    if pause_reason:
+                        return (
+                            False,
+                            f"sending paused: {pause_reason}",
+                            {
+                                "email": email,
+                                "organization_id": organization_id,
+                                "domain": domain,
+                                "direction": direction,
+                                "checks": {"tripwire": {"paused": True, "reason": pause_reason}},
+                                "timestamp": datetime.now().isoformat(),
+                            },
+                        )
+
+                    # App-sending pool and prepaid credits. /policy carries its
+                    # own copy of this gate, but the live SMTP path consults
+                    # /check_rate_limit (USE_POLICY_ENDPOINT defaults false),
+                    # which lands here -- without this, SEND_CREDIT_ENFORCEMENT
+                    # could never bite. Key-authenticated senders only (a
+                    # resolved credential, i.e. an application): a person
+                    # sending from their own mailbox is governed by their
+                    # per-mailbox daily limit and must never be stopped because
+                    # the company's API allowance ran out. check() allows when
+                    # enforcement is off and on every error path, so this adds
+                    # no new failure mode to the mail path.
+                    if credential is not None:
+                        credit_ok, credit_reason = self.send_credit_service.check(organization_id)
+                        if not credit_ok:
+                            logger.warning(
+                                f"Send credits exhausted for org {organization_id} ({email}): "
+                                f"{credit_reason}"
+                            )
+                            return (
+                                False,
+                                f"Sending credits exhausted: {credit_reason}",
+                                {
+                                    "email": email,
+                                    "organization_id": organization_id,
+                                    "domain": domain,
+                                    "direction": direction,
+                                    "checks": {
+                                        "send_credits": {
+                                            "allowed": False,
+                                            "reason": credit_reason,
+                                        }
+                                    },
+                                    "timestamp": datetime.now().isoformat(),
+                                },
+                            )
+
                 # Prepare response details
                 details = {
                     "email": email,
@@ -225,8 +323,24 @@ class EnterpriseRateLimiter:
                     checks = [
                         ("organization", organization_id),
                         ("domain", domain),
-                        ("mailbox", email),
                     ]
+                    # The per-sender mailbox rule (mailbox_inbound_second
+                    # defaults to 1/sec) exists to stop a compromised mailbox
+                    # WE host from spewing. An inbound message's sender is
+                    # usually external, and get_organization_for_domain falls
+                    # back to the bare domain string when we don't host it --
+                    # so applying our tenant-mailbox burst limit to that
+                    # sender 450'd legitimate mail: Microsoft delivering the
+                    # SNDS confirmation and a status update in the same
+                    # second tripped "Per-second limit (1) exceeded"
+                    # (2026-09-06). Any big sender (Google, Microsoft, DMARC
+                    # report aggregators) bursts like that. Rate-limit a
+                    # sender as a mailbox only when it is actually one of
+                    # ours: outbound (it authenticated to send), or a sender
+                    # whose domain resolved to a real hosted organization.
+                    hosted_sender = organization_id != domain
+                    if direction == "outbound" or hosted_sender:
+                        checks.append(("mailbox", email))
 
                 for entity_type, identifier in checks:
                     rule_override = None
@@ -281,6 +395,53 @@ class EnterpriseRateLimiter:
         organization_id = self.config_service.get_organization_for_domain(domain)
 
         return organization_id, domain
+
+    def check_recipient_suppression(self, sender_identity: str, recipient: str) -> tuple[bool, str]:
+        """Is `recipient` on the sending org's suppression list?
+
+        sender_identity is the same value check_rate_limit keys on: the SASL
+        username (mailbox address, or an SMTP API key's '@'-less username)
+        for authenticated submissions. The org is resolved exactly the way
+        the rate-limit path resolves it, so both features always agree on
+        who is sending.
+
+        Returns (suppressed, reject_message). FAIL OPEN on every error and
+        every unresolvable identity -- unlike the rate-limit path's
+        fail-closed rule for unknown credentials, an outage or gap in
+        suppression data must never stop mail (it only re-opens the
+        pre-enforcement gap for its duration, which is the acceptable
+        failure mode).
+        """
+        try:
+            if "@" not in sender_identity:
+                credential = self.config_service.get_smtp_credential(sender_identity)
+                if not credential:
+                    return False, ""
+                organization_id = credential["organization_id"]
+            else:
+                organization_id, _ = self._extract_organization_and_domain(sender_identity)
+
+            # 'unknown' is _extract_organization_and_domain's can't-parse
+            # sentinel; a domain-name fallback org simply has no suppression
+            # rows, so it needs no special case.
+            if not organization_id or organization_id == "unknown":
+                return False, ""
+
+            suppressed, suppression_type = self.suppression_check_service.is_suppressed(
+                organization_id, recipient
+            )
+            if suppressed:
+                label = f" ({suppression_type})" if suppression_type else ""
+                return True, (
+                    f"5.7.1 Recipient address <{recipient}> is on your organization's "
+                    f"suppression list{label}. Remove the suppression via the API "
+                    f"before sending to this address again."
+                )
+            return False, ""
+
+        except Exception as e:
+            logger.error(f"Suppression check error for {sender_identity} -> {recipient}: {e}")
+            return False, ""  # fail open
 
     def _credential_rule(self, credential: dict, direction: str):
         """Per-key rule built from the smtp_credentials row itself rather
@@ -724,6 +885,47 @@ async def check_rate_limit(request: Request):
                 status_code=400,
             )
 
+        # Outbound recipient suppression -- the enforcement point for the
+        # suppression list (docs/features/deliverability.md). Checked before
+        # the rate limit so a suppressed recipient gets the permanent 5.7.1
+        # immediately (not a 4.x defer first) and never consumes quota.
+        # Outbound only: suppressions mean "our tenant must not mail this
+        # address", never "block inbound mail". The Postfix policy protocol
+        # carries `recipient` at the DATA stage only when the message has
+        # exactly one recipient, so the bridge sends it when it exists;
+        # multi-recipient messages are logged and pass unchecked -- an
+        # honest, visible gap rather than a silent half-enforcement.
+        recipient = str(data.get("recipient") or "").strip()
+        if direction == "outbound":
+            if recipient:
+                suppressed, sup_message = rate_limiter.check_recipient_suppression(email, recipient)
+                if suppressed:
+                    logger.warning(
+                        f"Suppressed recipient rejected: {recipient} (sender identity {email})"
+                    )
+                    return JSONResponse(
+                        {
+                            "allowed": False,
+                            "suppressed": True,
+                            "message": sup_message,
+                            "email": email,
+                            "recipient": recipient,
+                            "direction": direction,
+                        },
+                        status_code=403,
+                    )
+            else:
+                try:
+                    recipient_count = int(data.get("recipient_count") or 0)
+                except (TypeError, ValueError):
+                    recipient_count = 0
+                if recipient_count > 1:
+                    logger.info(
+                        f"Suppression check skipped: multi-recipient message from {email} "
+                        f"({recipient_count} recipients; DATA-stage policy carries no "
+                        f"per-recipient addresses)"
+                    )
+
         # Perform rate limit check
         allowed, message, details = rate_limiter.check_rate_limit(email, direction)
 
@@ -733,6 +935,15 @@ async def check_rate_limit(request: Request):
         # against zero (found during 00-PRD-smtp-api-keys K2). Other callers
         # (dashboards, pre-flight checks) omit it and stay read-only.
         if allowed and data.get("record"):
+            # Count the allowed message against the app-sending pool and, past
+            # the allowance, the credit balance -- mirroring /policy's
+            # post-allow record. Outbound key-authenticated senders only (an
+            # identity without '@' is an SMTP credential); the org id comes
+            # from the check's details, and record() is fail-open, so a
+            # missing id or a Redis blip never blocks a message already
+            # judged allowed.
+            if direction == "outbound" and "@" not in email:
+                rate_limiter.send_credit_service.record(details.get("organization_id"))
             rate_limiter.increment_usage(email, direction)
 
         response = {
@@ -910,6 +1121,65 @@ async def set_limits(request: Request):
         return JSONResponse({"error": "Failed to set rate limits"}, status_code=500)
 
 
+@app.post("/reset_counters")
+async def reset_counters(request: Request):
+    """
+    Reset usage counters for organization/domain/mailbox.
+
+    Request body:
+    {
+        "type": "domain",
+        "identifier": "example.com",
+        "direction": "outbound"
+    }
+    """
+    try:
+        data = await request.json()
+
+        entity_type = data.get("type")
+        identifier = data.get("identifier")
+        direction = data.get("direction", "outbound")
+
+        if entity_type not in ["organization", "domain", "mailbox"]:
+            return JSONResponse(
+                {"success": False, "message": "Invalid entity type"}, status_code=400
+            )
+
+        if not identifier:
+            return JSONResponse(
+                {"success": False, "message": "Missing identifier"}, status_code=400
+            )
+
+        if direction not in ["inbound", "outbound"]:
+            return JSONResponse({"success": False, "message": "Invalid direction"}, status_code=400)
+
+        success = rate_limiter.cache_service.reset_counters(entity_type, identifier, direction)
+
+        if success:
+            dispatch_event(
+                Events.RATE_LIMIT_RESET,
+                data={"entity_type": entity_type, "identifier": identifier, "direction": direction},
+                source_service="rate_limiter",
+            )
+            return {
+                "success": True,
+                "message": "Counters reset successfully",
+                "entity_type": entity_type,
+                "identifier": identifier,
+                "direction": direction,
+            }
+
+        return JSONResponse(
+            {"success": False, "message": "Failed to reset counters"}, status_code=500
+        )
+
+    except Exception as e:
+        logger.error(f"Reset counters API error: {e}")
+        return JSONResponse(
+            {"success": False, "message": "Failed to reset counters"}, status_code=500
+        )
+
+
 @app.post("/policy")
 async def postfix_policy(request: Request):
     """
@@ -956,10 +1226,50 @@ async def postfix_policy(request: Request):
         # Otherwise treat as inbound.
         direction = "outbound" if sasl_username else "inbound"
 
+        # Outbound recipient suppression -- same check, ordering and
+        # reasoning as /check_rate_limit above (this endpoint is the
+        # alternative wire format of the same policy consultation). REJECT
+        # is a permanent 554 5.7.1 delivered to the sender in-session:
+        # refused loudly, never dropped.
+        if direction == "outbound" and recipient:
+            suppressed, sup_message = rate_limiter.check_recipient_suppression(email, recipient)
+            if suppressed:
+                logger.warning(
+                    f"Policy: suppressed recipient rejected: {recipient} (sender identity {email})"
+                )
+                return PlainTextResponse(f"action=REJECT {sup_message}\n\n")
+
         # Check the rate limiter using the existing internal method
         allowed, message, details = rate_limiter.check_rate_limit(email, direction)
 
         if allowed:
+            # App-sending pool and prepaid credits, consulted HERE and nowhere
+            # else -- this is the single consultation point, and adding a
+            # second one double-counts every message (2026-08-27 outage).
+            #
+            # Key-authenticated senders only: a SASL username without '@' is
+            # an SMTP credential, i.e. an application. A person sending from
+            # their own mailbox is governed by their per-mailbox daily limit
+            # and must never be stopped because the company's API allowance
+            # ran out.
+            if direction == "outbound" and sasl_username and "@" not in sasl_username:
+                organization_id = details.get("organization_id")
+                credit_ok, credit_reason = rate_limiter.send_credit_service.check(organization_id)
+
+                if not credit_ok:
+                    logger.warning(
+                        f"Policy: out of sending credits for org {organization_id} ({email}): "
+                        f"{credit_reason}"
+                    )
+                    # DEFER, not REJECT: the customer topping up should let the
+                    # queued mail through rather than having bounced it.
+                    return PlainTextResponse(
+                        "action=DEFER_IF_PERMIT 4.7.1 Sending credits exhausted. "
+                        "Top up to resume sending.\n\n"
+                    )
+
+                rate_limiter.send_credit_service.record(organization_id)
+
             # This endpoint IS the mail path (one query per RCPT), so an
             # allowed message must count against the window here -- usage
             # had no other producer.
@@ -978,6 +1288,86 @@ async def postfix_policy(request: Request):
         logger.error(f"Policy endpoint error: {e}")
         # Fail open — do not block mail on internal errors
         return PlainTextResponse("action=DUNNO\n\n")
+
+
+@app.post("/send_credits/{organization_id}")
+async def set_send_credits(organization_id: str, request: Request):
+    """Push an organization's credit balance and app-sending allowance down.
+
+    Laravel owns both numbers -- it is the ledger of record -- and this is the
+    enforced copy the send path can read fast enough to consult per message.
+    On any disagreement Laravel wins; this is a cache with teeth, not a
+    second source of truth.
+    """
+    try:
+        data = await request.json()
+
+        if "credit_balance" in data:
+            rate_limiter.send_credit_service.set_balance(
+                organization_id, int(data["credit_balance"])
+            )
+        if "app_send_monthly" in data:
+            rate_limiter.send_credit_service.set_pool_allowance(
+                organization_id, int(data["app_send_monthly"])
+            )
+        if "dedicated_ip" in data:
+            rate_limiter.send_credit_service.set_dedicated_ip(
+                organization_id, bool(data["dedicated_ip"])
+            )
+
+        return {
+            "success": True,
+            "message": "Send credit state updated",
+            "data": rate_limiter.send_credit_service.snapshot(organization_id),
+        }
+    except Exception as e:
+        logger.error(f"Failed to set send credits for {organization_id}: {e}")
+        return JSONResponse({"success": False, "message": str(e)}, status_code=500)
+
+
+@app.get("/send_credits/{organization_id}")
+async def get_send_credits(organization_id: str):
+    """What enforcement currently believes, for reconciliation against the
+    Laravel ledger."""
+    return {
+        "success": True,
+        "message": "Send credit state retrieved",
+        "data": rate_limiter.send_credit_service.snapshot(organization_id),
+    }
+
+
+@app.get("/tripwire/{organization_id}")
+async def get_tripwire(organization_id: str):
+    """Pause state and current window numbers for one organization --
+    what an operator needs to judge a pause before deciding to lift it."""
+    return {
+        "success": True,
+        "message": "Tripwire state retrieved",
+        "data": rate_limiter.tripwire_service.snapshot(organization_id),
+    }
+
+
+@app.delete("/tripwire/{organization_id}")
+async def release_tripwire(organization_id: str):
+    """Manually lift a tripwire pause.
+
+    An override of the pause TTL, not of the thresholds: if the window is
+    still bad the next evaluation pass trips again within a minute, so
+    releasing without fixing the underlying list buys exactly that long.
+    """
+    try:
+        released = rate_limiter.tripwire_service.release(organization_id)
+
+        return {
+            "success": True,
+            "message": "Tripwire pause released"
+            if released
+            else "Organization was not paused",
+            "data": rate_limiter.tripwire_service.snapshot(organization_id),
+        }
+    except Exception as e:
+        logger.error(f"Failed to release tripwire for {organization_id}: {e}")
+        return JSONResponse({"success": False, "message": str(e)}, status_code=500)
 
 
 @app.get("/health")
