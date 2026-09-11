@@ -1,11 +1,11 @@
 
-site_name: !ENV [SITE_NAME, 'Mailyte Email Server Handbook']
+site_name: !ENV [SITE_NAME, 'Mailyte Community Edition Handbook']
 site_description: !ENV [SITE_DESCRIPTION, 'The complete developer handbook for the Mailyte Email Server — everything you need to understand, build, and run the system.']
 site_author: Mailyte Engineering Team
 site_url: !ENV [SITE_URL, 'https://docs.mailyte.com']
 
-repo_name: mailyte-email-server
-repo_url: https://github.com/TechiesAfrica/mailyte-email-server
+repo_name: mailyte-mail-server-community
+repo_url: https://github.com/Techies-Africa/mailyte-mail-server-community
 edit_uri: edit/main/docs/
 
 # Copyright
@@ -136,7 +136,7 @@ markdown_extensions:
   - pymdownx.keys
   - pymdownx.magiclink:
       repo_url_shorthand: true
-      user: TechiesAfrica
+      user: Techies-Africa
       repo: mailyte-email-server
   - pymdownx.mark
   - pymdownx.smartsymbols
@@ -200,8 +200,6 @@ nav:
     - DNS Records: configuration/dns-setup.md
     - Performance Tuning: configuration/performance-tuning.md
     - Multi-Tenant Setup: configuration/multi-tenant.md
-    - Monitoring Config: configuration/monitoring-configuration.md
-    - Prometheus Setup: configuration/prometheus-setup.md
 
   - API & Features:
     - API Reference:
@@ -214,13 +212,8 @@ nav:
       - Webhooks: api/webhooks.md
       - Statistics: api/statistics.md
       - Rate Limiting: api/rate-limiting.md
-      - Storage Management: api/storage-management.md
-      - RAG & AI Search: api/rag-system.md
       - Monitoring: api/monitoring.md
       - SMTP Credentials: api/smtp-credentials.md
-      - Transport Rules: api/transport-rules.md
-      - Message Trace: api/message-trace.md
-      - Shared Mailboxes: api/shared-mailboxes.md
       - Filters (Sieve): api/filters.md
       - Tracking: api/tracking.md
       - Analytics: api/analytics.md
@@ -243,14 +236,12 @@ nav:
       - Email Tracking: features/email-tracking.md
       - Anti-Spam Protection: features/anti-spam.md
       - Rate Limiting: features/rate-limiting.md
-      - Storage & Quotas: features/storage-quotas.md
       - Webhooks: features/webhooks.md
       - Templates: features/templates.md
       - Analytics: features/analytics.md
       - Archiving: features/archiving.md
       - Backup & Restore: features/backup-restore.md
       - Deliverability: features/deliverability.md
-      - AI-Powered Search: features/rag-integration.md
       - Auto-Healing: features/auto-healing.md
       - Multi-Tenant Support: features/multi-tenant.md
       - SMTP API Keys: features/smtp-credentials.md
@@ -273,13 +264,9 @@ nav:
       - Webhooks: worker/webhooks.md
       - Analytics: worker/analytics.md
       - Rate Limiter: worker/rate-limiter.md
-      - Storage Usage: worker/storage-usage.md
-      - Queue Manager: worker/queue-manager.md
       - Templates: worker/templates.md
       - Autoconfig: worker/autoconfig.md
-      - URL Protection: worker/url-protection.md
       - Backups: worker/backup.md
-      - Delivery Optimizer: worker/delivery-optimizer.md
 
   - Operations:
     - Deployment:
@@ -289,7 +276,6 @@ nav:
       - Production Checklist: deployment/production-checklist.md
       - Docker Deployment: deployment/docker-deployment.md
       - Kubernetes: deployment/kubernetes.md
-      - Monitoring Stack: deployment/monitoring-stack.md
       - Maintenance: deployment/maintenance.md
       - Backup Strategies: deployment/backup-strategies.md
       - Disaster Recovery: deployment/disaster-recovery.md
@@ -333,9 +319,6 @@ nav:
       - Connect WordPress: guides/connect-wordpress.md
       - Scaling to Millions: guides/scaling-to-millions.md
       - Custom Integrations: guides/custom-integrations.md
-      - Monitoring Setup: guides/monitoring-setup.md
-      - Prometheus Config: guides/prometheus-configuration.md
-      - Grafana Dashboards: guides/grafana-setup.md
       - Backup Automation: guides/backup-automation.md
       - Managing Organizations: guides/organization-management.md
       - Domain Configuration: guides/domain-configuration.md
@@ -345,7 +328,6 @@ nav:
         - guides/troubleshooting/ssl-certificate-issues.md
         - guides/troubleshooting/database-performance.md
         - guides/troubleshooting/network-connectivity.md
-        - guides/troubleshooting/monitoring-issues.md
         - guides/troubleshooting/service-failures.md
     - Reference:
       - reference/index.md
@@ -356,7 +338,6 @@ nav:
       - Webhook Events: reference/webhook-events.md
       - Error Codes: reference/error-codes.md
       - Performance Metrics: reference/performance-metrics.md
-      - Prometheus Metrics: reference/prometheus-metrics.md
       - API Endpoints: reference/api-endpoints.md
       - Environment Variables: reference/environment-variables.md
       - Glossary: reference/glossary.md
@@ -369,7 +350,6 @@ nav:
       - Testing: development/testing.md
       - Custom Workers: development/custom-workers.md
       - Plugin Development: development/plugin-development.md
-      - Monitoring Integration: development/monitoring-integration.md
       - Metrics Implementation: development/metrics-implementation.md
       - Release Process: development/release-process.md
 
