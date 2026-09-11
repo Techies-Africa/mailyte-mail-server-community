@@ -15,6 +15,23 @@ KEK_PATH="$SECRETS_DIR/encryption_kek"
 mkdir -p "$SECRETS_DIR"
 chmod 700 "$SECRETS_DIR"
 
+# Docker creates a DIRECTORY at any bind-mount source that does not exist yet.
+# So `docker compose up` before this script has run leaves secrets/encryption_kek
+# as an empty directory, and the `-f` guard below does not catch it -- a
+# directory is not a regular file. The script then died on the redirect with
+# "Is a directory", which says nothing about what happened or how to fix it.
+if [ -d "$KEK_PATH" ]; then
+  if [ -n "$(ls -A "$KEK_PATH" 2>/dev/null)" ]; then
+    echo "FATAL: $KEK_PATH is a non-empty directory." >&2
+    echo "Expected a file. Inspect it and move it aside before re-running." >&2
+    exit 1
+  fi
+  echo "Note: $KEK_PATH was an empty directory -- Docker creates one at a bind-mount"
+  echo "      source that does not exist yet, which happens when \`docker compose up\`"
+  echo "      runs before this script. Removing it and continuing."
+  rmdir "$KEK_PATH"
+fi
+
 if [ -f "$KEK_PATH" ]; then
   echo "FATAL: $KEK_PATH already exists -- refusing to overwrite a live KEK." >&2
   echo "Overwriting it makes every private key currently encrypted under it permanently undecryptable." >&2

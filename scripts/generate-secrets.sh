@@ -99,6 +99,19 @@ SECRETS_DIR="$REPO_ROOT/secrets"
 mkdir -p "$SECRETS_DIR"
 db_root_password="$(grep -E '^DB_ROOT_PASSWORD=' "$ENV_FILE" | tail -1 | cut -d= -f2-)"
 db_root_password="${db_root_password%\"}"; db_root_password="${db_root_password#\"}"
+# Same trap as the KEK: `docker compose up` before this script leaves an empty
+# DIRECTORY here, because Docker creates one at any bind-mount source that does
+# not exist. touch succeeds on a directory, chmod succeeds, and only the write
+# below fails -- with "Is a directory" and no clue why.
+if [ -d "$SECRETS_DIR/db_root_password" ]; then
+  if [ -n "$(ls -A "$SECRETS_DIR/db_root_password" 2>/dev/null)" ]; then
+    echo "FATAL: $SECRETS_DIR/db_root_password is a non-empty directory; expected a file." >&2
+    exit 1
+  fi
+  echo "Note: secrets/db_root_password was an empty directory left by Docker. Removing it."
+  rmdir "$SECRETS_DIR/db_root_password"
+fi
+
 touch "$SECRETS_DIR/db_root_password"
 chmod 600 "$SECRETS_DIR/db_root_password"
 printf '%s' "$db_root_password" > "$SECRETS_DIR/db_root_password"
