@@ -171,6 +171,7 @@ nav:
 
   - Getting Started:
     - getting-started/index.md
+    - Before You Install: getting-started/server-requirements.md
     - Installation: getting-started/installation.md
     - Configuration: getting-started/configuration.md
     - Your First Steps: getting-started/first-steps.md

@@ -200,8 +200,70 @@ def capabilities(mailbox: dict = Depends(require_mailbox)):
             # whether Maya actually runs is also gated by capabilities.ai,
             # maya_org_policy and individual consent (utils/ai_consent).
             "entitlements": entitlements_for_mailbox(mailbox),
+            # Shared mailboxes this person is a member of. The webmail needs
+            # this to offer a From selector: the shared FOLDERS it can already
+            # see say what may be read, which is not the same question --
+            # read_only can open the mailbox and must not be offered as a
+            # sending identity. Fails closed to [] (see below).
+            "shared_mailboxes": shared_mailboxes_for(mailbox["email"]),
         },
     )
+
+
+SENDING_PERMISSIONS = ("full_access", "send_as", "send_on_behalf")
+
+
+def shared_mailboxes_for(member_email: str) -> list[dict]:
+    """Shared mailboxes this member belongs to, with what they may do.
+
+    `can_send` is pre-computed rather than left to the client to derive from
+    `permission`: the authoritative copy of that rule lives here and in
+    Postfix's sender-login map, and a third copy in TypeScript would be a
+    third place for it to drift.
+
+    Returns [] on any database error. The webmail then offers no shared
+    identity, which is the safe direction -- the send itself is checked
+    again server-side regardless (see _shared_mailbox_permission), so this
+    list is a convenience, never the security boundary.
+    """
+    connection = get_db_connection()
+    if not connection:
+        return []
+
+    try:
+        cursor = connection.cursor(dictionary=True)
+        cursor.execute(
+            """
+            SELECT shared.email AS address, shared.name AS name, smm.permission
+            FROM shared_mailbox_members smm
+            JOIN email_accounts shared
+              ON shared.id = smm.shared_mailbox_id
+             AND shared.mailbox_type = 'shared'
+             AND shared.status = 'active'
+            JOIN email_accounts member
+              ON member.id = smm.email_account_id
+             AND member.status = 'active'
+            WHERE member.email = %s
+            ORDER BY shared.email
+            """,
+            (member_email,),
+        )
+        rows = cursor.fetchall()
+        cursor.close()
+        return [
+            {
+                "address": row["address"],
+                "name": row["name"] or "",
+                "permission": row["permission"],
+                "can_send": row["permission"] in SENDING_PERMISSIONS,
+            }
+            for row in rows
+        ]
+    except Exception as exc:  # noqa: BLE001 -- a capabilities call must not 500
+        logger.error("Shared-mailbox list failed for %s: %s", member_email, exc)
+        return []
+    finally:
+        connection.close()
 
 
 # ---------------------------------------------------------------------------
@@ -1002,6 +1064,52 @@ def _mailbox_send_tracking_enabled() -> bool:
     return os.getenv("MAILBOX_SEND_TRACKING", "false").strip().lower() == "true"
 
 
+def _shared_mailbox_permission(member_email: str, shared_email: str) -> str | None:
+    """This member's permission on that shared mailbox, or None.
+
+    The authority for sending as a shared address from the webmail. Postfix's
+    smtpd_sender_login_maps answers the same question for SASL submission, and
+    the two are kept deliberately in step: same table, same permission set,
+    same requirement that BOTH mailboxes are active -- so suspending either
+    one withdraws the right on every path at once.
+
+    Returns None on any database error rather than raising. The caller treats
+    that as "not permitted", which fails CLOSED: a send that should have been
+    allowed is refused and retried, where the opposite would let one mailbox
+    send as another.
+    """
+    connection = get_db_connection()
+    if not connection:
+        logger.error("Shared-mailbox permission check: no database connection")
+        return None
+
+    try:
+        cursor = connection.cursor(dictionary=True)
+        cursor.execute(
+            """
+            SELECT smm.permission
+            FROM shared_mailbox_members smm
+            JOIN email_accounts shared
+              ON shared.id = smm.shared_mailbox_id
+             AND shared.mailbox_type = 'shared'
+             AND shared.status = 'active'
+            JOIN email_accounts member
+              ON member.id = smm.email_account_id
+             AND member.status = 'active'
+            WHERE shared.email = %s AND member.email = %s
+            """,
+            (shared_email, member_email),
+        )
+        row = cursor.fetchone()
+        cursor.close()
+        return row["permission"] if row else None
+    except Exception as exc:  # noqa: BLE001 -- must not leak into a 500
+        logger.error("Shared-mailbox permission check failed: %s", exc)
+        return None
+    finally:
+        connection.close()
+
+
 def _parse_indexes(values: list) -> list[int]:
     """attachment_indexes as ints -- repeated fields, a JSON array, or "1,3"."""
     indexes: list[int] = []
@@ -1207,11 +1315,43 @@ async def send_message(
     # Message-ID before it is trusted.
     in_reply_to_id = (field("in_reply_to_id") or "").strip() or None
 
+    # Sending AS a shared mailbox. The address is never taken on trust: it is
+    # checked against shared_mailbox_members here because THIS endpoint is the
+    # only gate. Postfix's smtpd_sender_login_maps (which does know about
+    # shared mailboxes) governs SASL submission from Outlook and the like, and
+    # is bypassed entirely by this path -- submit_message goes out over the
+    # trusted network, so anything not verified here is not verified at all.
+    send_as = (field("from") or "").strip().lower() or None
+    on_behalf_of = None
+
+    if send_as and send_as != mailbox["email"].lower():
+        permission = _shared_mailbox_permission(mailbox["email"], send_as)
+
+        if permission not in ("full_access", "send_as", "send_on_behalf"):
+            raise HTTPException(
+                status_code=403,
+                detail=create_api_response(
+                    "error", "You do not have permission to send from that address"
+                ),
+            )
+
+        # Exchange's convention, which every major client renders as
+        # "person on behalf of shared": the shared address owns From, the
+        # person who actually pressed send is named in Sender.
+        if permission == "send_on_behalf":
+            on_behalf_of = mailbox["email"]
+    else:
+        send_as = None
+
+    envelope_from = send_as or mailbox["email"]
+
     def deliver() -> dict:
-        # From is the session's mailbox, never anything the client sent. See
-        # submit_message: Postfix trusts this service and will not check.
+        # From is the session's mailbox unless the caller asked to send as a
+        # shared address AND was authorised above -- never straight from the
+        # client. See submit_message: Postfix trusts this service and will not
+        # check.
         message = build_message(
-            from_address=mailbox["email"],
+            from_address=envelope_from,
             to=to,
             cc=cc,
             bcc=bcc,
@@ -1229,12 +1369,18 @@ async def send_message(
             inline_images=True,
             inline_parts=inline_parts,
         )
+        if on_behalf_of:
+            message["Sender"] = on_behalf_of
+
         # Person-to-person mail is not tracked unless the deployment opts in.
         # The filter strips this header before delivery.
         if not _mailbox_send_tracking_enabled():
             message[TRACKING_OPT_OUT_HEADER] = "off"
         raw = message_bytes(message)
-        submit_message(mailbox["email"], to + cc + bcc, raw)
+        # Envelope sender matches From so SPF and DMARC align on the shared
+        # domain; a bounce then comes back to the shared mailbox, which is
+        # where the team will look for it.
+        submit_message(envelope_from, to + cc + bcc, raw)
 
         # Filed only after submission succeeded, so Sent never shows a message
         # that was never sent. The reverse -- sent but unfiled -- is the

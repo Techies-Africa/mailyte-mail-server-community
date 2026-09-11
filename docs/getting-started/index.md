@@ -29,6 +29,14 @@ flowchart LR
 
 <div class="grid cards" markdown>
 
+-   :material-server-network:{ .lg .middle } **Before You Install**
+
+    ---
+
+    What your server and IP must be capable of: outbound port 25, reverse DNS, and a clean reputation. The two things that silently stop mail, checked in five minutes.
+
+    [:octicons-arrow-right-24: Server requirements](server-requirements.md)
+
 -   :material-download-circle:{ .lg .middle } **Installation**
 
     ---
@@ -146,7 +154,14 @@ Mailyte is made up of three layers:
 ## Where to go next
 
 !!! tip "Start here"
-    Head to the **[Installation guide](installation.md)**. It takes about ten minutes if you already have Docker installed.
+    If you already have a server, spend five minutes on
+    **[Before You Install](server-requirements.md)** first. Outbound port 25 is
+    blocked by default on most providers and reverse DNS is almost never set
+    correctly out of the box — both are provider tickets, not software, and
+    neither is visible from a stack that otherwise looks perfectly healthy.
+
+    Then: **[Installation](installation.md)**, about ten minutes with Docker
+    already present.
 
 **Related sections:**
 
