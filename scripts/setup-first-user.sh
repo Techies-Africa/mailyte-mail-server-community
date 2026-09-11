@@ -32,7 +32,11 @@ API_BASE="${API_BASE:-http://localhost:8083}"
 
 # Check the API service is up -- this script now talks only to the API,
 # never to the database directly.
-if ! docker compose ps --format "{{.Name}}" 2>/dev/null | grep -q "^api$"; then
+# Matched on the SERVICE name, not the container name. Container names carry
+# CONTAINER_PREFIX (set when running two editions on one host), so a
+# `grep "^api$"` against {{.Name}} reported "services are not running" while the
+# whole stack was healthy.
+if ! docker compose ps --services --filter status=running 2>/dev/null | grep -q "^api$"; then
     echo -e "  ${RED}[!!]${NC} Services are not running. Start them first:"
     echo "       ./start.sh"
     exit 1
