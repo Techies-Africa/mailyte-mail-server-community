@@ -197,6 +197,12 @@ services:
      environment:
        - HOSTNAME=${HOSTNAME:-mail.example.com}
        - DOMAIN=${DOMAIN:-example.com}
+       # Follows MAILSERVER_SUBNET so the two cannot drift. The entrypoint has
+       # always read POSTFIX_MYNETWORKS, but nothing ever passed it, so it fell
+       # back to a hardcoded 172.25.0.0/16 -- meaning anyone moving the network
+       # off that range got a postfix whose permit_mynetworks matched nothing,
+       # and internal submission broke with no error at startup to explain it.
+       - POSTFIX_MYNETWORKS=${POSTFIX_MYNETWORKS:-${MAILSERVER_SUBNET:-172.25.0.0/16}}
        - DB_HOST=mysql
        - DB_PORT=3306
        - DB_NAME=${DB_NAME:-mailserver}
@@ -1308,11 +1314,24 @@ volumes:
     driver: local
 
 networks:
+  # Both subnets are configurable, and must be, because they were hardcoded and
+  # the Community Edition inherits this file: CE and this stack pinned the very
+  # same two ranges, so bringing one up on a host already running the other
+  # failed outright with
+  #
+  #   invalid pool request: Pool overlaps with other one on this address space
+  #
+  # Any other Docker workload holding 172.25/172.26 collides identically.
+  #
+  # MAILSERVER_SUBNET also drives postfix's mynetworks (see the postfix service),
+  # because changing one without the other is worse than changing neither --
+  # permit_mynetworks stops matching internal containers and internal relay
+  # breaks quietly rather than failing at startup.
   mailserver_network:
     driver: bridge
     ipam:
       config:
-        - subnet: 172.25.0.0/16
+        - subnet: ${MAILSERVER_SUBNET:-172.25.0.0/16}
   # docker-proxy only (phase-07 C1) -- deliberately not attached to
   # mailserver_network, so nothing else in the stack can reach it even if
   # a service on that network were compromised.
@@ -1321,4 +1340,4 @@ networks:
     internal: true
     ipam:
       config:
-        - subnet: 172.26.0.0/16
+        - subnet: ${INTERNAL_SUBNET:-172.26.0.0/16}
