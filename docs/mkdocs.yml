@@ -228,6 +228,7 @@ nav:
       - Security: api/security.md
       - Platform (Console): api/platform.md
       - Capabilities: api/capabilities.md
+      - Bootstrap: api/bootstrap.md
       - Mailbox (Holder API): api/mailbox.md
       - Mailbox Auth & Sessions: api/mailbox-auth.md
       - Mailbox Rules & Filters: api/mailbox-rules.md

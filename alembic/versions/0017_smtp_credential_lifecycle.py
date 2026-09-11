@@ -1,8 +1,8 @@
 """SMTP credential lifecycle -- expiry, per-key limits, metadata, audit events
 
-Revision ID: 0010_smtp_credential_lifecycle
-Revises: 0009_domain_policy
-Create Date: 2026-08-27 (CE parity port of EE 0017 -- 00-PRD-smtp-api-keys K6)
+Revision ID: 0017_smtp_credential_lifecycle
+Revises: 0016_mailbox_preferences
+Create Date: 2026-08-27
 
 Part of 03-mailyte-api/00-PRD-smtp-api-keys Phase K1. The email server
 becomes the authoritative store for the whole key lifecycle (the console
@@ -30,15 +30,15 @@ the organization -- they describe, so the ids are plain CHAR(26) columns
 and `username` is denormalized for display after the credential is gone.
 
 String/char columns pin utf8mb4_unicode_ci explicitly -- this schema does
-not use the database default collation, and 0003 documents the two distinct
-errors (3780 on FKs, illegal-mix on UNIONs) that omitting it produces (see EE 0008).
+not use the database default collation, and 0008 documents the two distinct
+errors (3780 on FKs, illegal-mix on UNIONs) that omitting it produces.
 """
 
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0010_smtp_credential_lifecycle"
-down_revision = "0009_domain_policy"
+revision = "0017_smtp_credential_lifecycle"
+down_revision = "0016_mailbox_preferences"
 branch_labels = None
 depends_on = None
 
@@ -77,10 +77,8 @@ def upgrade() -> None:
             index=True,
         ),
         sa.Column(
-            # String(100), not CHAR(26): CE organization ids are VARCHAR(100)
-            # values (no ULID conversion here, unlike EE).
             "organization_id",
-            sa.String(100, collation="utf8mb4_unicode_ci"),
+            sa.CHAR(26, collation="utf8mb4_unicode_ci"),
             nullable=False,
             index=True,
         ),

@@ -7,10 +7,19 @@ services:
   # fall back to publicly-known-weak defaults if `.env` was missing or
   # incomplete -- a fully functional, internet-facing mail server with
   # `rootpassword` as its DB root password (security-model.md C3). No
-  # custom image: worker/api/startup_checks.py is deliberately
-  # stdlib-only so a stock python:3.9-slim can run it directly, bind-mounted.
+  # custom image: worker/api/startup_checks.py is deliberately stdlib-only so a
+  # stock python image can run it directly, bind-mounted.
+  #
+  # 3.11, not 3.9. The file is stdlib-only but it is not syntax-frozen: PEP 604
+  # annotations (`Mapping[str, str] | None`) are a TypeError at import time on
+  # 3.9, and this service gates the whole stack through
+  # `condition: service_completed_successfully` -- so one modern annotation here
+  # stops every container from starting, with a traceback that names a type hint
+  # rather than anything about secrets. The Community Edition already carries
+  # exactly such an annotation and had bumped this pin to 3.11 for exactly this
+  # reason; that divergence is removed by matching it here.
   secrets-check:
-    image: python:3.9-slim
+    image: python:3.11-slim
     container_name: secrets-check
     environment:
       # DB_ROOT_PASSWORD_FILE, not DB_ROOT_PASSWORD (phase-07 H6): validates
