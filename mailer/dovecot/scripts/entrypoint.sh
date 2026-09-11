@@ -41,6 +41,21 @@ if [ -f /etc/dovecot/dovecot-sql-smtp.conf.ext ]; then
     chown root:dovecot /etc/dovecot/dovecot-sql-smtp.conf.ext
 fi
 
+# And for the shared-mailbox discovery dict (acl_shared_dict). Read by the
+# dict process, which runs as root and drops to the mail user, so the
+# ownership matches the other two.
+if [ -f /etc/dovecot/dovecot-dict-acl.conf.ext ]; then
+    sed -i \
+        -e "s|\${DB_HOST}|${DB_HOST:-mysql}|g" \
+        -e "s|\${DB_PORT}|${DB_PORT:-3306}|g" \
+        -e "s|\${DB_NAME}|${DB_NAME:-mailserver}|g" \
+        -e "s|\${DB_USER}|${DB_USER:-mailuser}|g" \
+        -e "s|\${DB_PASSWORD}|${DB_PASSWORD:-mailpassword}|g" \
+        /etc/dovecot/dovecot-dict-acl.conf.ext
+    chmod 640 /etc/dovecot/dovecot-dict-acl.conf.ext
+    chown root:dovecot /etc/dovecot/dovecot-dict-acl.conf.ext
+fi
+
 # -------------------------------------------------------
 # 1. SSL Certificate Setup
 # -------------------------------------------------------

@@ -1100,13 +1100,10 @@ services:
     image: ghcr.io/techies-africa/mailyte-webmail:${WEBMAIL_VERSION:-latest}
     container_name: ${CONTAINER_PREFIX:-}webmail
     restart: unless-stopped
-    # REMOVE THIS LINE once ghcr.io/techies-africa/mailyte-webmail is published
-    # (the release workflow in that repo publishes it on a v* tag). Until then
-    # an un-gated service makes `docker compose up` fail for the ENTIRE stack
-    # on a pull error -- a mail server that stops booting is far worse than a
-    # webmail that has to be asked for. Start it meanwhile with:
-    #     docker compose --profile webmail up -d webmail
-    profiles: ["webmail"]
+    # Was behind `profiles: ["webmail"]` until the image was published, so that a
+    # pull error could not stop the whole mail server from booting. It is
+    # published now, and the gate's own comment said to remove it then --
+    # `docker compose up -d` is meant to bring the platform up, not most of it.
     ports:
       # 3100 is the console, 3000 is grafana. Bound to loopback: in production
       # traefik is the only way in (see docker-compose.prod.yml, which drops
@@ -1157,14 +1154,10 @@ services:
   console:
     image: ghcr.io/techies-africa/mailyte-console:${CONSOLE_VERSION:-latest}
     container_name: ${CONTAINER_PREFIX:-}console
-    # REMOVE THIS LINE once ghcr.io/techies-africa/mailyte-console is published (the release workflow
-    # in the console repo publishes it on a v* tag). Until then an un-gated
-    # service makes `docker compose up` fail for the entire stack on a pull
-    # error — a mail server that stops booting is far worse than a console
-    # that has to be asked for. Start it meanwhile with:
-    #     docker compose --profile console up -d console
-    # Dev mode is unaffected: docker-compose.dev.yml builds from source.
-    profiles: ["console"]
+    # Was behind `profiles: ["console"]` until the image was published, so that a
+    # pull error could not stop the whole mail server from booting. It is
+    # published now, and the gate's own comment said to remove it then --
+    # `docker compose up -d` is meant to bring the platform up, not most of it.
     ports:
       # Hosted deployments must put this behind VPN or an IP allowlist and
       # never on public DNS (ADR-002 §7). Bound to all interfaces here rather
