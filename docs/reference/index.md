@@ -58,7 +58,7 @@ This section is not meant to be read front to back. It's a reference — look up
 | [Webhook Events](webhook-events.md) | The event catalogue, payloads, signing, retries | Building webhook consumers |
 | [Error Codes](error-codes.md) | API error envelope + codes, SMTP/DSN, Rspamd actions | Troubleshooting failures |
 | [Performance Metrics](performance-metrics.md) | Key metrics and their healthy ranges | Capacity planning and alerting |
-| [Prometheus Metrics](prometheus-metrics.md) | Every exposed metric, with the service-prefix rule | Writing PromQL queries and dashboards |
+| Prometheus Metrics (Enterprise Edition) | Every exposed metric, with the service-prefix rule | Writing PromQL queries and dashboards |
 | [API Endpoints](api-endpoints.md) | All REST endpoints in one table | Quick API lookup |
 | [Environment Variables](environment-variables.md) | The variables code actually reads, with defaults | Initial setup and reconfiguration |
 | [Glossary](glossary.md) | Email jargon explained in plain English | Understanding the docs |

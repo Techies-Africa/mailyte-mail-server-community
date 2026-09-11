@@ -106,7 +106,7 @@ In production (`docker-compose.prod.yml`), only the mail ports and Traefik's 80/
 
     Deploying Prometheus, Grafana, and Alertmanager alongside your mail server.
 
-    [:octicons-arrow-right-24: Monitoring Stack](monitoring-stack.md)
+    :octicons-arrow-right-24: Monitoring Stack (Enterprise Edition)
 
 </div>
 

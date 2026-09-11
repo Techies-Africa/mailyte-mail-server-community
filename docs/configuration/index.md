@@ -123,7 +123,7 @@ Virus scanning (ClamAV) is **not deployed by default** — the Rspamd antivirus 
 
     Metric endpoints, shipped alert rules, and Alertmanager routing.
 
-    [:octicons-arrow-right-24: Monitoring Configuration](monitoring-configuration.md)
+    :octicons-arrow-right-24: Monitoring Configuration (Enterprise Edition)
 
 -   :material-database-search:{ .lg .middle } **Prometheus Setup**
 
@@ -131,7 +131,7 @@ Virus scanning (ClamAV) is **not deployed by default** — the Rspamd antivirus 
 
     The shipped prometheus.yml, retention, exporters, and target corrections.
 
-    [:octicons-arrow-right-24: Prometheus Setup](prometheus-setup.md)
+    :octicons-arrow-right-24: Prometheus Setup (Enterprise Edition)
 
 </div>
 

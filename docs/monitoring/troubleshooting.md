@@ -8,7 +8,7 @@ When the monitoring stack itself breaks, here's how to fix it.
 
 ### Check 0: Is it a target that exists?
 
-Before debugging, remember there is no Postfix, Dovecot, or node exporter in the stack (the `postfix`/`dovecot` scrape jobs that pointed at the nonexistent `postfix-exporter:9154` / `dovecot-exporter:9166` are commented out in `prometheus.yml` as of 2026-08-30). Panels on `postfix_*` / `dovecot_*` / `node_*` series are empty by design until those exporters are added — see [Prometheus](prometheus.md).
+Before debugging, remember there is no Postfix, Dovecot, or node exporter in the stack (the `postfix`/`dovecot` scrape jobs that pointed at the nonexistent `postfix-exporter:9154` / `dovecot-exporter:9166` are commented out in `prometheus.yml` as of 2026-08-30). Panels on `postfix_*` / `dovecot_*` / `node_*` series are empty by design until those exporters are added — see Prometheus (Enterprise Edition).
 
 ### Check 1: Is Prometheus Running?
 

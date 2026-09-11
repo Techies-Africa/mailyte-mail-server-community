@@ -193,7 +193,7 @@ graph TB
     - **Better monitoring** with comprehensive metrics
 
 ??? warning "⚠️ Breaking Changes"
-    - API endpoints have been updated (see [Migration Guide](guides/migrating-from-mailgun.md))
+    - API endpoints have been updated (see Migration Guide (Enterprise Edition))
     - Configuration format has changed (auto-migration available)
     - Minimum PHP version is now 8.1+
 
@@ -204,7 +204,7 @@ Ready to get started? Here are some recommended paths:
 1. **New Users**: Start with the [Installation Guide](getting-started/installation.md)
 2. **Developers**: Check out the [API Documentation](api/index.md)
 3. **System Administrators**: Review the [Configuration Guide](configuration/index.md)
-4. **Migration**: See our [Migration Guides](guides/index.md)
+4. **Migration**: See our Migration Guides (Enterprise Edition)
 
 ---
 

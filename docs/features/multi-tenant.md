@@ -37,10 +37,10 @@ An **organization** is the top-level entity:
 - **Mailboxes and aliases** belong to a domain (and therefore an org).
 - **SMTP API keys** are domain-scoped credentials under the org.
 - **Rate limits** apply at org, domain, and mailbox level ([Rate Limiting](rate-limiting.md)).
-- **Storage quotas** roll up mailbox → domain → org ([Storage & Quotas](storage-quotas.md)).
+- **Storage quotas** roll up mailbox → domain → org (Storage & Quotas (Enterprise Edition)).
 - **Spam policy** can be overridden per org via the Rspamd settings sync ([Anti-Spam](anti-spam.md)).
 - **Templates, tracking data, archives, suppression lists** are all org-scoped rows.
-- **RAG search** uses a separate Qdrant collection per org ([AI-Powered Search](rag-integration.md)).
+- **RAG search** uses a separate Qdrant collection per org (AI-Powered Search (Enterprise Edition)).
 
 ### How isolation is enforced
 

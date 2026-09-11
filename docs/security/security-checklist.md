@@ -80,7 +80,7 @@ Go through this checklist before deploying to production. Every unchecked item i
 - [ ] `mail_crypt` keys present and mail readable through Dovecot but ciphertext on disk
 - [ ] Backups encrypted with age before upload; `DR_AGE_RECIPIENT` set — the `UnencryptedBackupsPresent` alert watches for violations
 - [ ] Backup restore has been drilled (see the [DR runbook](../operations/disaster-recovery.md); last drills 2026-08-22 and 2026-08-23 both passed)
-- [ ] Retention cleanup for operational tables scheduled ([Compliance](compliance.md#operational-table-retention) — not automated by the stack)
+- [ ] Retention cleanup for operational tables scheduled (Compliance (Enterprise Edition) — not automated by the stack)
 - [ ] Log rotation configured (shipped: rotating file handlers + Docker `max-size` in prod)
 
 ## Brute-Force Protection

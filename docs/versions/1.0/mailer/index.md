@@ -67,7 +67,7 @@ Automated SSL certificate management with Let's Encrypt integration and multi-do
 - Certificate monitoring and alerts
 - Secure key management
 
-### [Intrusion Detection](intrusion-detection.md)
+### Intrusion Detection (Enterprise Edition)
 Security monitoring system using Fail2ban with custom filters and webhook notifications.
 
 **Key Features:**
@@ -77,7 +77,7 @@ Security monitoring system using Fail2ban with custom filters and webhook notifi
 - Webhook security alerts
 - Comprehensive logging
 
-### [Log Analyzer](log-analyzer.md)
+### Log Analyzer (Enterprise Edition)
 Intelligent log analysis system providing insights into mail server performance and security.
 
 **Key Features:**
