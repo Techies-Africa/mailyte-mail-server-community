@@ -107,7 +107,7 @@ uptime
 
 ### Via Prometheus (if monitoring is set up):
 
-Metric names are prefixed with the emitting service (`api_`, `monitoring_`, `archiver_`, …) — see Prometheus Metrics (Enterprise Edition) for the full list. There is no Postfix exporter deployed, so queue depth and bounce rate come from `postqueue` and the `mail_logs` table rather than Prometheus.
+Metric names are prefixed with the emitting service (`api_`, `monitoring_`, `archiver_`, …) — see [Prometheus Metrics](prometheus-metrics.md) for the full list. There is no Postfix exporter deployed, so queue depth and bounce rate come from `postqueue` and the `mail_logs` table rather than Prometheus.
 
 ```promql
 # API latency p95 (summary quantile — durations are summaries, not histograms)

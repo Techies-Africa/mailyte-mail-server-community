@@ -409,7 +409,7 @@ All emitted by the API on the corresponding admin operation.
 These whole categories exist in the catalogue only:
 
 - **Sieve & vacation:** `sieve.script.updated`, `sieve.script.activated`, `vacation.enabled`, `vacation.disabled`, `vacation.response.sent`
-- **Backup & restore:** `backup.started`, `backup.completed`, `backup.failed`, `restore.started`, `restore.completed`, `restore.failed` — backup state is surfaced through Prometheus gauges instead (see Prometheus Metrics (Enterprise Edition))
+- **Backup & restore:** `backup.started`, `backup.completed`, `backup.failed`, `restore.started`, `restore.completed`, `restore.failed` — backup state is surfaced through Prometheus gauges instead (see [Prometheus Metrics](prometheus-metrics.md))
 - **URL protection:** `url.rewritten`, `url.blocked`, `url.sandbox.result`
 - **Webhook meta:** `webhook.delivery.failed` (final failures land in the `webhook_dead_letters` table instead)
 

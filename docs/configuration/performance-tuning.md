@@ -153,4 +153,4 @@ docker compose up -d --scale webhooks=2 --scale tracking=2
 | 10,000+ | 100,000+ | 16+ | 32+ GB | Split services across hosts; managed DB/Redis (`docker-compose.cloud.yml`) |
 
 > [!TIP]
-> Monitor first, tune second. Use the Prometheus metrics (reference (Enterprise Edition)) and `mail_logs` to identify actual bottlenecks before changing defaults. Random tuning often makes things worse.
+> Monitor first, tune second. Use the Prometheus metrics ([reference](../reference/prometheus-metrics.md)) and `mail_logs` to identify actual bottlenecks before changing defaults. Random tuning often makes things worse.

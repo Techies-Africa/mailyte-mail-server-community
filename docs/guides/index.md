@@ -101,9 +101,9 @@ Relay marketing and bulk campaigns through Mailyte using the campaign tool you a
 | Guide | What It Covers | Difficulty |
 |-------|---------------|------------|
 | [Scaling to Millions](scaling-to-millions.md) | Postfix/MySQL/Redis tuning, worker replicas, and what's architecture work | Advanced |
-| Monitoring Setup (Enterprise Edition) | The built-in Prometheus/Grafana/Alertmanager stack and how to reach it | Intermediate |
-| Prometheus Configuration (Enterprise Edition) | The shipped scrape jobs and alert rules, and how to extend them | Intermediate |
-| Grafana Dashboards (Enterprise Edition) | Provisioned dashboards, custom panels, and Grafana alerting | Intermediate |
+| [Monitoring Setup](monitoring-setup.md) | The built-in Prometheus/Grafana/Alertmanager stack and how to reach it | Intermediate |
+| [Prometheus Configuration](prometheus-configuration.md) | The shipped scrape jobs and alert rules, and how to extend them | Intermediate |
+| [Grafana Dashboards](grafana-setup.md) | Provisioned dashboards, custom panels, and Grafana alerting | Intermediate |
 | [Backup Automation](backup-automation.md) | backup.sh, systemd timers, age encryption, S3 offsite, restore drills | Intermediate |
 | [Custom Integrations](custom-integrations.md) | Webhooks for CRM/ticketing systems, API automation patterns | Intermediate |
 
@@ -151,7 +151,7 @@ Something broken? Find your symptom below and follow the guide.
 
     Prometheus not scraping, Grafana dashboard errors, missing metrics.
 
-    :octicons-arrow-right-24: Fix monitoring issues (Enterprise Edition)
+    [:octicons-arrow-right-24: Fix monitoring issues](troubleshooting/monitoring-issues.md)
 
 -   :material-server-off:{ .lg .middle } **Service Failures**
 

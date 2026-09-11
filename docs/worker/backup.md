@@ -1,7 +1,7 @@
 # Backups
 
 !!! note "Not a worker container"
-    There is no `backup` service in any compose file. Backups are performed by the host-side script `scripts/backup.sh`, scheduled by systemd timers (`deployment/systemd/`). It runs on the host rather than in a container because it needs the Docker socket and the project's storage directories directly. This page stays in the worker section for discoverability; the API surface that exposes backup history lives on the archiver (Enterprise Edition) worker.
+    There is no `backup` service in any compose file. Backups are performed by the host-side script `scripts/backup.sh`, scheduled by systemd timers (`deployment/systemd/`). It runs on the host rather than in a container because it needs the Docker socket and the project's storage directories directly. This page stays in the worker section for discoverability; the API surface that exposes backup history lives on the [archiver](archiver.md) worker.
 
 `scripts/backup.sh` covers MySQL (full + incremental), Redis, mail storage, secrets, DKIM keys, SSL certificates, and configuration files. Backups are written to local disk and optionally uploaded to S3, client-side encrypted with `age`.
 

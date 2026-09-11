@@ -59,7 +59,7 @@ Mailyte packs a lot into one box. This page gives you a bird's-eye view of every
 
     Qdrant vector DB, semantic search over indexed email content.
 
-    :octicons-arrow-right-24: AI search (Enterprise Edition)
+    [:octicons-arrow-right-24: AI search](rag-integration.md)
 
 </div>
 
@@ -82,18 +82,18 @@ Mailyte packs a lot into one box. This page gives you a bird's-eye view of every
 | [Email Tracking](email-tracking.md) | :material-check-circle: **Stable** | Tracking / `8086` + Postfix filter | Open/click tracking injected at submission; functional since 2026-08-22 |
 | [Anti-Spam Protection](anti-spam.md) | :material-check-circle: **Stable** | Rspamd / `11332` milter, `11334` UI | Scoring, Bayes, neural, greylisting, phishing feeds. ClamAV **not** deployed by default |
 | [Rate Limiting](rate-limiting.md) | :material-check-circle: **Stable** | Rate Limiter / `8082` | Org/domain/mailbox/credential limits across six windows, enforced at Postfix DATA |
-| Storage & Quotas (Enterprise Edition) | :material-check-circle: **Stable** | Storage Usage / `8092` + Dovecot | Usage roll-ups and alerts; hard enforcement by Dovecot quota |
+| [Storage & Quotas](storage-quotas.md) | :material-check-circle: **Stable** | Storage Usage / `8092` + Dovecot | Usage roll-ups and alerts; hard enforcement by Dovecot quota |
 | [Webhooks](webhooks.md) | :material-flask: **Beta** | Shared dispatcher + Webhooks / `8081` | Delivers all events to one global URL; per-endpoint fan-out not yet implemented |
 | [SMTP API Keys](smtp-credentials.md) | :material-check-circle: **Stable** | API + Dovecot passdb | Shipped 2026-08-27; rotation, revocation, IP allowlists, per-key limits |
 | [Client Auto-Setup](autoconfig.md) | :material-check-circle: **Stable** | Autoconfig / `8100` | Autoconfig/autodiscover/MTA-STS, publicly routed since 2026-08-27 |
 | [Templates](templates.md) | :material-flask: **Beta** | Templates / `8095` | Jinja2 templates with versioning and a starter library. No A/B testing |
 | [Analytics](analytics.md) | :material-check-circle: **Stable** | Analytics / `8087` + API | Volume/engagement/deliverability from `mail_logs` + tracking events (producer live since 2026-08-22) |
 | [Archiving](archiving.md) | :material-check-circle: **Stable** | Archiver / `8089` | Every accepted message age-encrypted to S3 within seconds; retention + legal holds |
-| Encryption (Enterprise Edition) | :material-flask: **Beta** | Encryption / `8093` | PGP/S/MIME key management API + WKD; not wired into the mail flow. Mail at rest is already encrypted (Dovecot mail_crypt) |
-| ActiveSync (Enterprise Edition) | :material-hammer-wrench: **Deployed, not enabled** | Z-Push / `8084` | Real Z-Push 2.7.4 (mail-only IMAP backend), but no public Traefik route yet |
+| [Encryption](encryption.md) | :material-flask: **Beta** | Encryption / `8093` | PGP/S/MIME key management API + WKD; not wired into the mail flow. Mail at rest is already encrypted (Dovecot mail_crypt) |
+| [ActiveSync](activesync.md) | :material-hammer-wrench: **Deployed, not enabled** | Z-Push / `8084` | Real Z-Push 2.7.4 (mail-only IMAP backend), but no public Traefik route yet |
 | [Backup & Restore](backup-restore.md) | :material-check-circle: **Stable** | Host systemd timers | Full daily + hourly incremental, age-encrypted, S3 offsite via `secrets/dr.env` |
 | [Deliverability](deliverability.md) | :material-check-circle: **Stable** | Delivery Optimizer / `8094` + Rspamd | DKIM signing, DNS verification, ISP throttling on the live send path, reputation, IP warming |
-| AI-Powered Search (Enterprise Edition) | :material-flask: **Beta** | RAG / `8091` + Qdrant | Semantic search; indexing is API-driven, not automatic |
+| [AI-Powered Search](rag-integration.md) | :material-flask: **Beta** | RAG / `8091` + Qdrant | Semantic search; indexing is API-driven, not automatic |
 | [Auto-Healing](auto-healing.md) | :material-check-circle: **Stable** | Monitoring / `8085` | 5-minute health sweeps; container restarts via a scoped docker-proxy |
 | [Multi-Tenant Support](multi-tenant.md) | :material-check-circle: **Stable** | All services | Organization-scoped isolation for data, config, and quotas |
 
@@ -155,7 +155,7 @@ graph LR
 
     1. **[Multi-Tenant Support](multi-tenant.md)** — isolate each customer's data
     2. **[Client Auto-Setup](autoconfig.md)** — let their mail clients configure themselves
-    3. **Storage & Quotas (Enterprise Edition)** — set and enforce per-customer limits
+    3. **[Storage & Quotas](storage-quotas.md)** — set and enforce per-customer limits
     4. **[Anti-Spam Protection](anti-spam.md)** — keep inboxes clean
     5. **[Backup & Restore](backup-restore.md)** + **[Archiving](archiving.md)** — protect customer data
 
@@ -164,7 +164,7 @@ graph LR
     Focus on these features first:
 
     1. **[Webhooks](webhooks.md)** — integrate email events into your product
-    2. **AI-Powered Search (Enterprise Edition)** — add smart email search
+    2. **[AI-Powered Search](rag-integration.md)** — add smart email search
     3. **[Templates](templates.md)** — manage email templates via API
     4. **[Analytics](analytics.md)** — surface email insights to your users
 

@@ -117,7 +117,7 @@ See [SSL Certificates](../configuration/ssl-certificates.md) for the issuance fl
 - `monitoring/alertmanager/alertmanager.yml` — routes everything to `http://webhooks:8081/alertmanager`.
 - `monitoring/grafana/` — provisioning + the `mail_overview` and `security_dashboard` dashboards.
 
-See Monitoring Configuration (Enterprise Edition) and Prometheus Setup (Enterprise Edition).
+See [Monitoring Configuration](../configuration/monitoring-configuration.md) and [Prometheus Setup](../configuration/prometheus-setup.md).
 
 !!! note "Legacy configs to ignore"
     `worker/monitoring/prometheus.yml`, `worker/monitoring/alertmanager.yml`, `worker/monitoring/alert_rules.yml`, and everything under `worker/monitoring/config/` are unreferenced legacy files that contradict the active `monitoring/` tree — nothing mounts them.

@@ -75,7 +75,7 @@ Everything you need to build features, fix bugs, or extend Mailyte. Whether you'
 
     Add Prometheus metrics, Grafana dashboards, and health check endpoints.
 
-    :octicons-arrow-right-24: Monitoring integration (Enterprise Edition)
+    [:octicons-arrow-right-24: Monitoring integration](monitoring-integration.md)
 
 -   :material-tag:{ .lg .middle } **Release Process**
 
@@ -245,7 +245,7 @@ flowchart LR
 | [Testing](testing.md) | Running and writing tests |
 | [Custom Workers](custom-workers.md) | Building a new worker module |
 | [Plugin Development](plugin-development.md) | Extension points — webhooks, workers, pipeline hooks |
-| Monitoring Integration (Enterprise Edition) | Health checks and the shared metrics helper |
+| [Monitoring Integration](monitoring-integration.md) | Health checks and the shared metrics helper |
 | [Metrics Implementation](metrics-implementation.md) | Counters, gauges, histograms |
 | [Release Process](release-process.md) | Versioning, changelog, deployment |
 
