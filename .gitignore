@@ -152,6 +152,13 @@ venv.bak/
 .dmypy.json
 dmypy.json
 
+# ruff -- CI runs it and so does anyone checking the lint ratchet locally, so
+# its cache appears in every working tree. Carried up from the Community
+# Edition's own .gitignore, which had this and this repo did not: CE is
+# generated from here now, so a rule that lives only downstream is a rule that
+# gets overwritten at the next release.
+.ruff_cache/
+
 # Pyre type checker
 .pyre/
 
