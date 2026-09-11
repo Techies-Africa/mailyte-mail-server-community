@@ -39,7 +39,6 @@ COMMUNITY_CAPABILITIES = [
     "aliases",
     "dkim",
     "queue",
-    "logs",
     "health",
     "overview",
     "directory",
