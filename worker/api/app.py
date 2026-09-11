@@ -465,6 +465,7 @@ route_modules = [
     # collide with the lifecycle router's.
     ("smtp_credential_reports", "/api/v1/smtp-credentials", "SMTP Credential Reports"),
     ("capabilities", "/api/v1/capabilities", "Capabilities"),
+    ("bootstrap", "/api/v1/bootstrap", "Bootstrap"),
     ("platform_auth", "/api/v1/platform/auth", "Platform Auth"),
     # Registered AFTER platform_auth deliberately: routers are matched in
     # include order, so the more specific /api/v1/platform/auth/* prefix must

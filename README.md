@@ -37,30 +37,35 @@ AGPL-3.0. Free to self-host, no seat limits, no feature keys.
 git clone https://github.com/Techies-Africa/mailyte-mail-server-community.git
 cd mailyte-mail-server-community
 
-cp .env.example .env
+./scripts/generate-secrets.sh      # writes .env with strong random secrets
+./scripts/generate_dkim_kek.sh     # the key your DKIM private keys are encrypted with
 ```
 
-Edit `.env`. At minimum:
+**Do not write `.env` by hand.** The first script also writes
+`secrets/db_root_password`, which MySQL boots from and the startup gate checks.
+Copying `.env.example` on its own leaves that file missing and the stack will not
+start.
+
+Now set your domain in `.env`:
 
 ```bash
 HOSTNAME=mail.yourdomain.com     # this server's name
 DOMAIN=yourdomain.com            # your mail domain
-DB_ROOT_PASSWORD=<strong-password>
-DB_PASSWORD=<strong-password>
-ADMIN_PASSWORD=<strong-password>
-ADMIN_TOKEN_SECRET=<random 32+ chars>
-WEBHOOK_SECRET=<random 32+ chars>
 ```
 
-The server refuses to start on placeholder or weak secrets — that is deliberate,
-not a bug. Generate them with `openssl rand -base64 32`.
+Everything else already has a strong value. The server refuses to boot on
+placeholder or weak secrets — deliberate, not a bug.
 
 Then:
 
 ```bash
 ./start.sh              # or: docker compose up -d
-docker compose ps       # everything healthy after ~30s
+docker compose ps       # ~14 images build on first run, so allow a few minutes
 ```
+
+> Back up `secrets/encryption_kek` somewhere separate from your database backups.
+> A database dump plus that file together are as good as plaintext DKIM keys;
+> either one alone is not.
 
 ## Create your first mailbox
 
@@ -75,29 +80,38 @@ it back.
 <details>
 <summary>Prefer to do it by hand?</summary>
 
+The script wraps one call. A fresh install has no API key yet, so the server
+writes a single-use bootstrap token on first start and that call exchanges it
+for your first organization, domain, mailbox and key together.
+
 ```bash
-# 1. Organization
-curl -X POST http://localhost:8083/api/v1/organizations/ \
-  -H "X-Admin-Token: $ADMIN_TOKEN_SECRET" \
+# The token the API wrote on first start
+TOKEN=$(docker compose exec -T api cat /app/data/bootstrap-token | tr -d '\r\n')
+
+curl -X POST http://localhost:8083/api/v1/bootstrap/ \
+  -H "X-Bootstrap-Token: ${TOKEN}" \
   -H "Content-Type: application/json" \
-  -d '{"name": "my-org"}'
-
-# 2. API key — save what comes back
-curl -X POST http://localhost:8083/api/v1/organizations/my-org/api-keys \
-  -H "X-Admin-Token: $ADMIN_TOKEN_SECRET" \
-  -H "Content-Type: application/json" \
-  -d '{"name": "my-key"}'
-
-# 3. Domain
-curl -X POST http://localhost:8083/api/v1/domains/ \
-  -H "X-API-Key: $API_KEY" -H "Content-Type: application/json" \
-  -d '{"domain": "yourdomain.com", "organization_id": "my-org"}'
-
-# 4. Mailbox
-curl -X POST http://localhost:8083/api/v1/mailboxes/ \
-  -H "X-API-Key: $API_KEY" -H "Content-Type: application/json" \
-  -d '{"email": "you@yourdomain.com", "password": "...", "name": "Your Name"}'
+  -d '{
+        "organization_name": "my-org",
+        "admin_email":       "you@yourdomain.com",
+        "admin_password":    "a-strong-password"
+      }'
 ```
+
+The response carries `api_key` — save it. The token works once and stops being
+issued as soon as an organization exists.
+
+After that, use the key. Note the endpoints are action-shaped, not REST-shaped:
+
+```bash
+curl -H "X-API-Key: $API_KEY" http://localhost:8083/api/v1/domains/
+
+curl -X POST http://localhost:8083/api/v1/mailboxes/add \
+  -H "X-API-Key: $API_KEY" -H "Content-Type: application/json" \
+  -d '{"email": "someone@yourdomain.com", "password": "...", "name": "Someone"}'
+```
+
+`/api/v1/api-docs` is authoritative if anything here drifts.
 
 </details>
 

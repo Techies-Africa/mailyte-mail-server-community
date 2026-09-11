@@ -1,11 +1,8 @@
 """Create domain_policy
 
-Revision ID: 0009_domain_policy
-Revises: 0008_api_key_rate_limit_service
+Revision ID: 0011_domain_policy
+Revises: 0010_alert_rules_channels_events
 Create Date: 2026-08-20
-
-Ported from mailyte-email-server's 0011_domain_policy; 0009 here because
-CE's migration chain is its own.
 
 routes/domains.py has always read and written a `domain_policy` table that no
 migration has ever created. GET /api/v1/domains/get/domain/policy/{domain}
@@ -37,20 +34,15 @@ domains.
 created_at/updated_at convention used elsewhere; renaming them would mean
 editing working SQL to match a new table, which is the wrong way round.
 """
-from collections.abc import Sequence
-
-import sqlalchemy as sa
+from typing import Sequence, Union
 
 from alembic import op
+import sqlalchemy as sa
 
-# Plain assignments, no PEP 604 annotations: the migrate image runs Python
-# 3.9, where `str | None` at module level raises TypeError -- this file's
-# original annotations meant NO CE migration after 0008 could ever run
-# (found while applying 0010, 00-PRD-smtp-api-keys K6).
-revision = '0009_domain_policy'
-down_revision = '0008_api_key_rate_limit_service'
-branch_labels = None
-depends_on = None
+revision: str = '0011_domain_policy'
+down_revision: Union[str, None] = '0010_alert_rules_channels_events'
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:

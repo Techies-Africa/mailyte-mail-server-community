@@ -1,29 +1,27 @@
-"""Baseline -- schema produced by the frozen SQL chain (001-011)
+"""Baseline -- schema produced by the frozen SQL chain (001-013)
 
 Revision ID: 0001_baseline
 Revises:
 Create Date: 2026-07-30 00:00:00.000000
 
-Phase-08 (schema-migrations), ported from mailyte-email-server: this revision
-replaces the old 001_initial_schema.py stub, which represented far fewer
-tables than the live schema and had drifted from reality -- the schema
-actually produced by database/migrations/sql/001..011 has 66 tables
-(verified via `mysqldump --no-data` against a database built fresh from
-that exact SQL chain).
+Phase-08 (schema-migrations): this revision replaces the old
+001_initial_schema.py stub, which represented 24 tables from an early ORM
+pass and had drifted hard from reality -- the live schema already produced
+by database/migrations/sql/001..013 has 70 tables (verified via
+`mysqldump --no-data` against a database built fresh from that exact SQL
+chain, diffed against a live instance -- see phase-08 build notes).
 
-Unlike the EE repo, CE keeps database/migrations/sql/*.sql mounted at
-docker-entrypoint-initdb.d as its first-boot path (it is simpler and
-CE ships no service with the ad-hoc-table-creation drift that made EE
-remove the mount entirely -- see EE's phase-08 build notes). This revision
-exists so that:
+This is *the* baseline going forward. database/migrations/sql/*.sql is now
+frozen (conventions.md SS4): no new file is ever added there again. Every
+schema change from this point on is a new Alembic revision, applied by the
+`migrate` service (docker-compose.yml) before `api` is allowed to start.
 
-  1. A database initialized via initdb.d can be *stamped* to this revision
-     (scripts/run_migrations.py) rather than never being tracked by Alembic
-     at all.
-  2. Every schema change from here on -- including ones CE doesn't yet
-     share with EE -- is a new Alembic revision, applied by the `migrate`
-     compose service, instead of a 12th file being added to the frozen
-     chain.
+Existing databases that already have this exact schema (every EE/CE
+instance up to and including this phase, since it is the only schema chain
+that has ever existed) are stamped to this revision rather than replayed --
+see scripts/run_migrations.py, which detects "schema present, revision
+untracked" and stamps instead of executing CREATE TABLE against tables
+that already exist.
 """
 from typing import Sequence, Union
 
@@ -38,10 +36,13 @@ depends_on: Union[str, Sequence[str], None] = None
 
 # Verbatim `mysqldump --no-data` output (statements only, mysqldump's
 # session-variable boilerplate stripped) against a database initialized
-# from database/migrations/sql/001..011 in order. Do not hand-edit -- if
-# the frozen SQL chain is ever wrong, fix it there (it's still this repo's
-# first-boot path) and regenerate this file the same way EE's
-# 0001_baseline.py documents in its own header.
+# from database/migrations/sql/001..013 in order. Do not hand-edit -- if
+# the frozen SQL chain is ever wrong, fix it there for CE's benefit (it's
+# still CE's first-boot path) and regenerate this file the same way:
+#
+#   docker exec mysql mysql -u root -e "DROP DATABASE IF EXISTS mig_baseline; CREATE DATABASE mig_baseline;"
+#   for f in database/migrations/sql/*.sql; do docker exec -i mysql mysql -u root -D mig_baseline < "$f"; done
+#   docker exec mysql mysqldump -u root --no-data --skip-comments --skip-add-locks --skip-set-charset --routines --triggers mig_baseline
 _TABLES_SQL = r"""
 CREATE TABLE `ai_transactions` (
   `id` char(26) COLLATE utf8mb4_unicode_ci NOT NULL,
@@ -687,6 +688,24 @@ CREATE TABLE `health_checks` (
   KEY `idx_health_service_time` (`service_name`,`timestamp`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE `idempotency_keys` (
+  `id` char(26) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `organization_id` char(26) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `idempotency_key` varchar(255) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `request_method` varchar(10) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `request_path` varchar(500) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `request_hash` char(64) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `response_status` int DEFAULT NULL,
+  `response_body` mediumtext COLLATE utf8mb4_unicode_ci,
+  `state` varchar(20) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'in_progress',
+  `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `expires_at` datetime NOT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_idem` (`organization_id`,`idempotency_key`),
+  KEY `idx_idem_expiry` (`expires_at`),
+  CONSTRAINT `fk_idem_org` FOREIGN KEY (`organization_id`) REFERENCES `organizations` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE `ip_access_rules` (
   `id` char(26) COLLATE utf8mb4_unicode_ci NOT NULL,
   `organization_id` char(26) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
@@ -825,7 +844,7 @@ CREATE TABLE `mail_queue` (
 
 CREATE TABLE `migration_errors` (
   `id` bigint NOT NULL AUTO_INCREMENT,
-  `job_id` varchar(100) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `job_id` varchar(36) COLLATE utf8mb4_unicode_ci NOT NULL,
   `folder` varchar(255) COLLATE utf8mb4_unicode_ci NOT NULL,
   `message_uid` varchar(100) COLLATE utf8mb4_unicode_ci DEFAULT '',
   `message_id` varchar(500) COLLATE utf8mb4_unicode_ci DEFAULT '',
@@ -840,38 +859,40 @@ CREATE TABLE `migration_errors` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE `migration_jobs` (
-  `id` char(26) COLLATE utf8mb4_unicode_ci NOT NULL,
-  `job_id` varchar(100) COLLATE utf8mb4_unicode_ci NOT NULL,
-  `org_id` varchar(100) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
-  `source_host` varchar(255) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
-  `source_port` int DEFAULT NULL,
-  `source_user` varchar(255) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
-  `source_email` varchar(255) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `job_id` varchar(36) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `status` varchar(20) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'pending',
+  `direction` varchar(10) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'import',
+  `source_host` varchar(255) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `source_port` int NOT NULL DEFAULT '993',
+  `source_ssl` tinyint(1) NOT NULL DEFAULT '1',
+  `source_username` varchar(255) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `source_password` text COLLATE utf8mb4_unicode_ci NOT NULL,
+  `target_host` varchar(255) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `target_port` int DEFAULT '993',
+  `target_ssl` tinyint(1) DEFAULT '1',
   `target_email` varchar(255) COLLATE utf8mb4_unicode_ci NOT NULL,
-  `status` enum('pending','running','paused','completed','failed','cancelled') COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'pending',
+  `target_password` text COLLATE utf8mb4_unicode_ci NOT NULL,
+  `org_id` varchar(100) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `folder_mapping` json DEFAULT NULL,
+  `exclude_folders` json DEFAULT NULL,
   `total_messages` int NOT NULL DEFAULT '0',
   `migrated_messages` int NOT NULL DEFAULT '0',
   `failed_messages` int NOT NULL DEFAULT '0',
   `current_folder` varchar(255) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
-  `speed` float DEFAULT '0' COMMENT 'Messages per second',
-  `folder_mapping` json DEFAULT NULL COMMENT 'Source->target folder name mapping',
-  `exclude_folders` json DEFAULT NULL COMMENT 'List of folders to skip',
-  `last_uid` json DEFAULT NULL COMMENT 'Per-folder last-synced UID for resume',
-  `error_log` text COLLATE utf8mb4_unicode_ci,
-  `started_at` timestamp NULL DEFAULT NULL,
-  `completed_at` timestamp NULL DEFAULT NULL,
-  `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
-  `direction` varchar(10) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'import',
-  `target_host` varchar(255) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
-  `target_port` int DEFAULT '993',
-  `target_ssl` tinyint(1) DEFAULT '1',
+  `speed` double NOT NULL DEFAULT '0',
+  `error_log` longtext COLLATE utf8mb4_unicode_ci,
+  `is_delta` tinyint(1) NOT NULL DEFAULT '0',
   `is_retry` tinyint(1) NOT NULL DEFAULT '0',
   `parent_job_id` varchar(36) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `last_uid` json DEFAULT NULL,
   `webhook_url` varchar(500) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
-  PRIMARY KEY (`id`),
-  UNIQUE KEY `job_id` (`job_id`),
-  KEY `idx_migration_status` (`status`),
-  KEY `idx_migration_org` (`org_id`),
+  `started_at` datetime DEFAULT NULL,
+  `completed_at` datetime DEFAULT NULL,
+  `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`job_id`),
+  KEY `idx_status` (`status`),
+  KEY `idx_org_id` (`org_id`),
   KEY `idx_direction` (`direction`),
   KEY `idx_parent` (`parent_job_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -1318,6 +1339,40 @@ CREATE TABLE `user_sessions` (
   KEY `fk_sessions_email_account` (`email_account_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
+CREATE TABLE `users` (
+  `id` char(26) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `organization_id` char(26) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `email` varchar(255) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `password_hash` varchar(255) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `role` varchar(50) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'admin',
+  `is_active` tinyint(1) NOT NULL DEFAULT '1',
+  `last_login_at` datetime DEFAULT NULL,
+  `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `updated_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_users_org_email` (`organization_id`,`email`),
+  KEY `idx_users_org` (`organization_id`),
+  CONSTRAINT `fk_users_org` FOREIGN KEY (`organization_id`) REFERENCES `organizations` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE `web_sessions` (
+  `id` char(26) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `user_id` char(26) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `organization_id` char(26) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `token_hash` char(64) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `ip_address` varchar(45) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `user_agent` varchar(500) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `expires_at` datetime NOT NULL,
+  `absolute_expiry` datetime NOT NULL,
+  `revoked_at` datetime DEFAULT NULL,
+  `created_at` datetime NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_web_sessions_token` (`token_hash`),
+  KEY `idx_web_sessions_user` (`user_id`),
+  KEY `idx_web_sessions_expiry` (`expires_at`),
+  CONSTRAINT `fk_web_sessions_user` FOREIGN KEY (`user_id`) REFERENCES `users` (`id`) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
 CREATE TABLE `webhook_dead_letters` (
   `id` bigint NOT NULL AUTO_INCREMENT,
   `organization_id` varchar(100) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
@@ -1446,9 +1501,15 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Irreversible by replay -- see EE's 0001_baseline.py for the rationale.
-    Drops every table except alembic_version, which Alembic needs to still
-    exist so it can record the downgrade itself."""
+    """Irreversible by replay -- this is the beginning of the migration
+    chain, so "downgrading" it means destroying the schema entirely rather
+    than reconstructing a prior state (there is none). Drops every table
+    in the target database regardless of what created it, which is the
+    only meaningful interpretation of "undo the baseline" -- except
+    alembic_version itself, which Alembic owns: it writes to that table
+    immediately after this function returns (to record the new current
+    revision, or clear it entirely when downgrading past the first
+    revision), and needs it to still exist to do so."""
     conn = op.get_bind()
     conn.execute(sa.text("SET FOREIGN_KEY_CHECKS=0"))
     tables = [row[0] for row in conn.execute(sa.text(

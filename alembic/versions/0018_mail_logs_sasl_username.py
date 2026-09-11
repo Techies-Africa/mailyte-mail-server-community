@@ -1,7 +1,7 @@
 """mail_logs.sasl_username -- attribute delivered mail to the SMTP API key that sent it
 
-Revision ID: 0011_mail_logs_sasl_username
-Revises: 0010_smtp_credential_lifecycle
+Revision ID: 0018_mail_logs_sasl_username
+Revises: 0017_smtp_credential_lifecycle
 Create Date: 2026-08-27
 
 Part of 03-mailyte-api/00-PRD-smtp-api-keys Phase K2. Postfix logs the
@@ -12,14 +12,14 @@ per-credential usage endpoint) answerable at all -- before this column no
 mail_logs row could be tied to a credential.
 
 Indexed because the usage endpoint filters on (sasl_username, timestamp).
-Collation pinned for the same reason as 0003/0010.
+Collation pinned for the same reason as 0008/0017.
 """
 
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0011_mail_logs_sasl_username"
-down_revision = "0010_smtp_credential_lifecycle"
+revision = "0018_mail_logs_sasl_username"
+down_revision = "0017_smtp_credential_lifecycle"
 branch_labels = None
 depends_on = None
 
