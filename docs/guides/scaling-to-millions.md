@@ -135,7 +135,7 @@ Before any architecture work:
 
 At higher volume, monitoring is not optional. The built-in stack covers it:
 
-- **Prometheus + Grafana** run in the base compose file — see Monitoring Setup (Enterprise Edition)
+- **Prometheus + Grafana** run in the base compose file — see [Monitoring Setup](monitoring-setup.md)
 - **Alerting** on queue depth (`MailQueueBackup`/`MailQueueCritical`), bounce rate, disk, and DB connection pressure ships in `monitoring/prometheus/rules/mail_alerts.yml`
 - **Queue visibility** via `GET /api/v1/queue/queue/status`, `GET /api/v1/queue/queue/domain/{domain}`, and `POST /api/v1/queue/mail-queue/flush` for retrying deferred mail
 

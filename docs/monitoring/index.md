@@ -77,7 +77,7 @@ graph LR
 
     Metrics collection, scrape configuration, and retention settings.
 
-    :octicons-arrow-right-24: Prometheus (Enterprise Edition)
+    [:octicons-arrow-right-24: Prometheus](prometheus.md)
 
 -   :material-view-dashboard:{ .lg .middle } **Grafana**
 
@@ -85,7 +85,7 @@ graph LR
 
     The provisioned dashboards, custom panels, and visualization setup.
 
-    :octicons-arrow-right-24: Grafana (Enterprise Edition)
+    [:octicons-arrow-right-24: Grafana](grafana.md)
 
 -   :material-bell-alert:{ .lg .middle } **Alerting**
 
@@ -168,8 +168,8 @@ Already have Mailyte running? Verify the monitoring stack is healthy:
 
 ## Related Sections
 
-- **Configuration > Monitoring Configuration (Enterprise Edition)** — Configure scrape targets and alert rules
-- **Configuration > Prometheus Setup (Enterprise Edition)** — Full `prometheus.yml` reference
-- **Deployment > Monitoring Stack (Enterprise Edition)** — Deploying the monitoring infrastructure
-- **Reference > Prometheus Metrics (Enterprise Edition)** — Every exposed metric with labels and types
+- **[Configuration > Monitoring Configuration](../configuration/monitoring-configuration.md)** — Configure scrape targets and alert rules
+- **[Configuration > Prometheus Setup](../configuration/prometheus-setup.md)** — Full `prometheus.yml` reference
+- **[Deployment > Monitoring Stack](../deployment/monitoring-stack.md)** — Deploying the monitoring infrastructure
+- **[Reference > Prometheus Metrics](../reference/prometheus-metrics.md)** — Every exposed metric with labels and types
 - **[Reference > Performance Metrics](../reference/performance-metrics.md)** — Key metrics and their healthy ranges

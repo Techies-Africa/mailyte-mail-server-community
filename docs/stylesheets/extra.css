@@ -424,3 +424,47 @@ html {
 ::selection {
   background: rgba(79, 70, 229, 0.2);
 }
+
+/* ---------------------------------------------------------------------------
+   Edition badge
+   ---------------------------------------------------------------------------
+   One handbook documents both editions, so Enterprise-only pages carry a badge
+   above the title (see overrides/main.html). Deliberately not a Material
+   admonition: those are for asides within a page, and this is a statement about
+   the whole page, so it needs to read before the heading rather than beside the
+   prose. Colours come from the palette variables so it follows dark mode.
+   --------------------------------------------------------------------------- */
+.mailyte-edition {
+  display: flex;
+  align-items: center;
+  gap: .55rem;
+  margin: 0 0 1.2rem;
+  padding: .5rem .8rem;
+  border-radius: .3rem;
+  font-size: .72rem;
+  font-weight: 600;
+  letter-spacing: .02em;
+  line-height: 1.5;
+}
+
+.mailyte-edition--enterprise {
+  background: rgba(124, 77, 255, .09);
+  border-left: 3px solid #7c4dff;
+  color: var(--md-default-fg-color--light);
+}
+
+[data-md-color-scheme="slate"] .mailyte-edition--enterprise {
+  background: rgba(124, 77, 255, .18);
+}
+
+.mailyte-edition__icon {
+  color: #7c4dff;
+  font-size: .9rem;
+  line-height: 1;
+}
+
+.mailyte-edition a {
+  margin-left: auto;
+  font-weight: 500;
+  white-space: nowrap;
+}

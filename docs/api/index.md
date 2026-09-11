@@ -75,7 +75,7 @@ The Mailyte REST API is your control plane for managing organizations, domains, 
 
     Check storage usage and quota configuration per domain and mailbox.
 
-    :octicons-arrow-right-24: Storage management (Enterprise Edition)
+    [:octicons-arrow-right-24: Storage management](storage-management.md)
 
 -   :material-brain:{ .lg .middle } **RAG System**
 
@@ -83,7 +83,7 @@ The Mailyte REST API is your control plane for managing organizations, domains, 
 
     AI-powered semantic search over email content using vector embeddings.
 
-    :octicons-arrow-right-24: RAG system (Enterprise Edition)
+    [:octicons-arrow-right-24: RAG system](rag-system.md)
 
 -   :material-heart-pulse:{ .lg .middle } **Monitoring**
 
@@ -280,24 +280,24 @@ See the [Errors](errors.md) page for the full error reference.
 | [Webhooks](webhooks.md) | `/api/v1/webhooks` | GET, POST, PUT, DELETE | Webhook endpoints, delivery log, dead letters |
 | [Statistics](statistics.md) | `/api/v1/analytics`, `/api/v1/tracking` | GET, POST, DELETE | Delivery/engagement stats, reports, suppressions |
 | [Rate Limiting](rate-limiting.md) | `/api/v1/rate-limiter` | GET, POST | View and update sending limits |
-| Storage (Enterprise Edition) | `/api/v1/storage` | GET, POST | Storage usage and quota configuration |
-| RAG System (Enterprise Edition) | `/api/v1/rag` | GET, POST, PUT | AI-powered email search |
+| [Storage](storage-management.md) | `/api/v1/storage` | GET, POST | Storage usage and quota configuration |
+| [RAG System](rag-system.md) | `/api/v1/rag` | GET, POST, PUT | AI-powered email search |
 | [Monitoring](monitoring.md) | `/api/v1/monitoring` | GET, POST | Health checks, metrics, admin operations |
 | [SMTP Credentials](smtp-credentials.md) | `/api/v1/smtp-credentials` | GET, POST, DELETE | Domain-scoped SMTP API keys: create, rotate, revoke, per-key rate limits, delivery reports (live since 2026-08-27) |
-| Transport Rules (Enterprise Edition) | `/api/v1/transport-rules` | GET, POST, PUT, DELETE | Priority-ordered mail-flow rules with conditions and actions |
-| Message Trace (Enterprise Edition) | `/api/v1/message-trace` | GET, POST | Delivery-log search, message lifecycle, quarantine (console) |
-| Shared Mailboxes (Enterprise Edition) | `/api/v1/shared-mailboxes` | GET, POST, PUT, DELETE | Team addresses with per-member permission levels |
+| [Transport Rules](transport-rules.md) | `/api/v1/transport-rules` | GET, POST, PUT, DELETE | Priority-ordered mail-flow rules with conditions and actions |
+| [Message Trace](message-trace.md) | `/api/v1/message-trace` | GET, POST | Delivery-log search, message lifecycle, quarantine (console) |
+| [Shared Mailboxes](shared-mailboxes.md) | `/api/v1/shared-mailboxes` | GET, POST, PUT, DELETE | Team addresses with per-member permission levels |
 | [Filters](filters.md) | `/api/v1/filters` | GET, POST, PUT, DELETE | Per-user Dovecot Sieve scripts, templates, vacation responder |
 | [Tracking](tracking.md) | `/api/v1/tracking` | GET, POST, DELETE | Open/click/unsubscribe tracking and suppression lists |
 | [Analytics](analytics.md) | `/api/v1/analytics` | GET | Domain analytics gateway (mostly unimplemented upstream — see page) |
 | [Queue](queue.md) | `/api/v1/queue` | GET, POST | Postfix queue status, deferred listing, flush (console) |
-| Migration (Enterprise Edition) | `/api/v1/migration` | GET, POST, DELETE | IMAP import/export jobs with progress, retry, delta sync |
+| [Migration](migration.md) | `/api/v1/migration` | GET, POST, DELETE | IMAP import/export jobs with progress, retry, delta sync |
 | [SSL Certificates](ssl.md) | `/api/v1/ssl` | GET, POST | Certificate expiry, ACME accounts (console) |
 | [Security](security.md) | `/api/v1/security` | GET, POST, DELETE | Failed-auth blocking, IP rules, geo policies, DLP (console) |
-| Reputation (Enterprise Edition) | `/api/v1/reputation` | GET | Domain/IP reputation and FBL complaints (console) |
-| Compliance (Enterprise Edition) | `/api/v1/compliance` | GET, POST, DELETE | GDPR export/erasure, consent, legal holds, retention |
-| White Label (Enterprise Edition) | `/api/v1/whitelabel` | GET, PUT | Per-organization branding |
-| Reseller (Enterprise Edition) | `/api/v1/reseller` | GET, POST | Sub-organizations and billing rollups |
+| [Reputation](reputation.md) | `/api/v1/reputation` | GET | Domain/IP reputation and FBL complaints (console) |
+| [Compliance](compliance.md) | `/api/v1/compliance` | GET, POST, DELETE | GDPR export/erasure, consent, legal holds, retention |
+| [White Label](whitelabel.md) | `/api/v1/whitelabel` | GET, PUT | Per-organization branding |
+| [Reseller](reseller.md) | `/api/v1/reseller` | GET, POST | Sub-organizations and billing rollups |
 | [Platform](platform.md) | `/api/v1/platform` | GET, POST, PUT, DELETE | Console: operators, audit, alerts, backups, platform analytics |
 | [Capabilities](capabilities.md) | `/api/v1/capabilities` | GET | Unauthenticated edition manifest |
 | [Bootstrap](bootstrap.md) | `/api/v1/bootstrap` | POST | One-time first-install setup via `X-Bootstrap-Token` |
@@ -372,7 +372,7 @@ The fastest way to verify your API is working and start exploring:
 | Provision mailboxes in bulk | [Email Accounts](email-accounts.md) |
 | Get notified on mail events | [Webhooks](webhooks.md) |
 | Track email opens and clicks | [Statistics](statistics.md) |
-| Search emails by meaning | RAG System (Enterprise Edition) |
+| Search emails by meaning | [RAG System](rag-system.md) |
 | Check if the server is healthy | [Monitoring](monitoring.md) |
 
 ---

@@ -276,9 +276,9 @@ Monitor these metrics to ensure production success:
 ## 🔗 **Related Documentation**
 
 - [Installation Guide](../getting-started/installation.md)
-- Security Configuration (Enterprise Edition)
-- Monitoring Setup (Enterprise Edition)
-- Disaster Recovery (Enterprise Edition)
+- [Security Configuration](../security/index.md)
+- [Monitoring Setup](../deployment/monitoring.md)
+- [Disaster Recovery](../deployment/disaster-recovery.md)
 - [API Documentation](../api/index.md)
 
 ---

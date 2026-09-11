@@ -11,3 +11,28 @@
   </style>
   Mailyte Email Server Handbook &mdash; Developer documentation for the complete email infrastructure.
 {% endblock %}
+
+{#
+  Per-page edition badge.
+
+  One handbook covers both editions, so every page has to say which one it
+  applies to -- otherwise a Community self-hoster follows a guide for a service
+  their install does not contain and concludes the product is broken.
+
+  Driven by `edition:` in a page's front matter:
+      edition: enterprise   -> Enterprise only
+      (absent)              -> available in every edition
+
+  Only the Enterprise case is marked. Badging the free pages too would put a
+  label on almost every page in the handbook, which trains people to ignore it.
+#}
+{% block content %}
+  {% if page.meta and page.meta.edition == "enterprise" %}
+    <p class="mailyte-edition mailyte-edition--enterprise">
+      <span class="mailyte-edition__icon">&#9733;</span>
+      Enterprise Edition &mdash; not included in the Community Edition.
+      <a href="{{ '/reference/editions/' | url }}">Compare editions</a>
+    </p>
+  {% endif %}
+  {{ super() }}
+{% endblock %}

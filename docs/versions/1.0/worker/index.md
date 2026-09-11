@@ -27,10 +27,10 @@ graph TB
 ### [API Gateway](api.md)
 Central API endpoint that orchestrates all services with enterprise-level security and rate limiting.
 
-### Queue Manager (Enterprise Edition)
+### [Queue Manager](queue-manager.md)
 Reliable message queuing system for email processing with error handling and retry logic.
 
-### RAG System (Enterprise Edition)
+### [RAG System](rag.md)
 AI-powered email intelligence with vector database integration and semantic search capabilities.
 
 ## Processing Services
@@ -52,21 +52,21 @@ Dynamic rate limiting and abuse prevention with configurable policies.
 ### [Storage Monitor](storage.md)
 Storage usage monitoring and quota management with cloud integration.
 
-### Dashboard (Enterprise Edition)
+### [Dashboard](dashboard.md)
 Web-based management interface for system monitoring and configuration.
 
 ## Advanced Features
 
-### Email Encryption (Enterprise Edition)
+### [Email Encryption](encryption.md)
 PGP/GPG and S/MIME encryption with automatic key management *(In Development)*
 
-### Email Archiver & Backup (Enterprise Edition)
+### [Email Archiver & Backup](archiver.md)
 Long-term email storage, compliance archiving, and automated backup system *(In Development)*
 
-### ActiveSync (Enterprise Edition)
+### [ActiveSync](activesync.md)
 Mobile device synchronization with Exchange ActiveSync protocol *(In Development)*
 
-### Delivery Optimizer (Enterprise Edition)
+### [Delivery Optimizer](delivery-optimizer.md)
 AI-powered delivery optimization for maximum deliverability *(In Development)*
 
 ## Service Communication

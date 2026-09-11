@@ -369,7 +369,7 @@ sudo netstat -tulpn | grep :5000
 
 If you encounter issues during installation:
 
-1. Check the Troubleshooting Guide (Enterprise Edition)
+1. Check the [Troubleshooting Guide](../troubleshooting.md)
 2. Review the logs for error messages
 3. Visit our [GitHub Issues](https://github.com/your-org/enterprise-mail-server/issues)
 4. Contact support at [support@mailserver.example.com](mailto:support@mailserver.example.com)

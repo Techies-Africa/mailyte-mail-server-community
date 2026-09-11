@@ -62,4 +62,4 @@ In production the host port is bound to `127.0.0.1`; all public traffic arrives 
     Auto-setup only works when `autoconfig.<domain>` / `autodiscover.<domain>` (and `mta-sts.<domain>` for MTA-STS) resolve to this server -- `GET /dns-records/{domain}` generates the full set a customer needs.
 
 !!! note "Not the same as Z-Push autodiscover"
-    The ActiveSync worker (Enterprise Edition) bundles Z-Push's own autodiscover for EAS clients on its container. Platform-wide autodiscover routing points here.
+    The [ActiveSync worker](activesync.md) bundles Z-Push's own autodiscover for EAS clients on its container. Platform-wide autodiscover routing points here.

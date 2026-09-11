@@ -79,6 +79,6 @@ Use `GET /dns-records/customer.com` for the exact values.
 
 - **MTA-STS starts in `testing` mode.** Receivers report but don't enforce; switch `MTA_STS_MODE` to `enforce` after confirming TLS works from major senders, and bump the `id` in the `_mta-sts` TXT record when the policy changes.
 
-- **Autodiscover here covers IMAP/SMTP settings, not Exchange ActiveSync.** EAS clients asking for an Exchange account type are not pointed at the ActiveSync (Enterprise Edition) container (which is itself not publicly routed yet).
+- **Autodiscover here covers IMAP/SMTP settings, not Exchange ActiveSync.** EAS clients asking for an Exchange account type are not pointed at the [ActiveSync](activesync.md) container (which is itself not publicly routed yet).
 
 - **History:** before 2026-08-27 the Traefik rule was a single literal host, so `autoconfig.<customer-domain>` 404'd for every customer domain, the advertised hostname was the server's internal identity, and no certificates were provisioned — client auto-setup effectively never worked. All four issues were fixed together.
