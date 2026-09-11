@@ -1,29 +1,51 @@
 # Contributing to Mailyte Email Server
 
-Thanks for your interest in contributing to Mailyte. This guide covers the basics; the full contributor handbook lives in [docs/development/](docs/development/index.md).
+Thanks for your interest in contributing to Mailyte. This guide covers the process for contributing to the Community Edition.
+
+## Read this first — how changes reach this repository
+
+Application code here is **generated** from the Mailyte Email Server source and
+replaced wholesale on each release. A change committed directly to an
+application file in this repository is overwritten the next time it is
+regenerated.
+
+That does **not** mean your pull request is unwelcome — it means we apply it
+upstream and it comes back down here on the next release, with your commit
+credited. Open the PR as normal; a maintainer will tell you where it landed.
+
+Maintained directly in this repository, and safe to change here:
+
+- `README.md`, `CONTRIBUTING.md`, `SECURITY.md`
+- `docs/api/examples/`, `docs/operations/backups.md`, `docs/worker/cloud-sync.md`
+- `alembic/versions/` — this edition's own migration chain
+- `.github/workflows/ci.yml`
+
+Everything else — `worker/`, `shared/`, `database/`, `mailer/`, `config/`,
+`scripts/`, `docker-compose*.yml` — is generated.
+
+Bug reports, reproductions and documentation fixes are always the fastest way to
+help, and none of them are affected by any of the above.
 
 ## Getting Started
 
 1. Fork the repository
-2. Clone your fork: `git clone https://github.com/YOUR_USERNAME/mailyte-email-server.git`
-3. Create a branch off `develop`: `git checkout -b feature/your-feature`
+2. Clone your fork: `git clone https://github.com/YOUR_USERNAME/mailyte-mail-server.git`
+3. Create a branch: `git checkout -b feature/your-feature`
 4. Make your changes
-5. Run tests and linters (see below)
+5. Run tests (see below)
 6. Push and open a pull request
 
 ## Development Setup
 
 ```bash
-# Generate .env with strong random secrets (required — the stack
-# refuses to start with missing or known-weak secrets)
-bash scripts/generate-secrets.sh
-# Then edit .env (HOSTNAME, DOMAIN, ...)
+cp .env.example .env
+# Edit .env with your settings
 
 # Start in development mode (hot-reload)
-./start.sh dev
-# Or interactively: ./start.sh → option 4 (Development mode)
+./start.sh
+# Choose option 4 (development mode)
 
-# Which is equivalent to:
+# Or directly:
 docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
 ```
 
@@ -31,45 +53,38 @@ The API will be at `http://localhost:8083/api-docs`.
 
 ## Running Tests
 
-Python 3.11+ is required.
-
 ```bash
 # Unit tests (no Docker required)
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements-test.txt -r worker/api/requirements.txt
-pytest tests/unit/
+docker run --rm -v "$(pwd):/app" -w /app python:3.11-slim \
+  bash -c "pip install -q pytest bcrypt fastapi && python -m pytest tests/unit/ -v"
 
-# Integration tests (requires the running dev stack)
+# Integration tests (requires running services)
 ./start.sh test
 ```
 
 ## Code Style
 
-- Python: [Ruff](https://docs.astral.sh/ruff/) for linting and formatting, [mypy](https://mypy-lang.org/) for type checking — both configured in `pyproject.toml`
+- Python: We use [Ruff](https://docs.astral.sh/ruff/) for linting and formatting
 - Shell scripts: Validated with [ShellCheck](https://www.shellcheck.net/)
 - SQL: Standard MySQL 8.0 syntax
 
-Run before submitting:
+Run the linter before submitting:
 
 ```bash
-pip install ruff mypy mypy-baseline
-ruff format --check .
+pip install ruff
 ruff check .
-bash scripts/run_mypy.sh | mypy-baseline filter
+ruff format --check .
 ```
-
-CI gates lint, type errors, coverage, and the OpenAPI contract against baseline files at the repo root (`ruff-baseline.txt`, `mypy-baseline.txt`, `coverage-baseline.txt`, `openapi-untyped-baseline.txt`). The counts may only shrink: new violations fail the build, and when your PR removes some, update the baseline in the same PR. See [docs/development/coding-standards.md](docs/development/coding-standards.md).
 
 ## Project Structure
 
 ```
-mailer/          # Core mail services (Postfix, Dovecot, Rspamd, cert_manager)
+mailer/          # Core mail services (Postfix, Dovecot, Rspamd)
 worker/          # Python microservices (API, tracking, webhooks, etc.)
-database/        # SQLAlchemy models and frozen SQL bootstrap files
-alembic/         # Alembic migrations (run via manage.py or the migrate service)
-shared/          # Shared utilities (config, metrics, webhook dispatcher)
+database/        # SQLAlchemy models and Alembic migrations
+shared/          # Shared utilities (config, logging, webhook dispatcher)
 scripts/         # CLI tools and management scripts
-tests/           # Unit, integration, e2e, and load tests
+tests/           # Unit and integration tests
 ```
 
 ## Pull Request Guidelines
@@ -92,7 +107,7 @@ tests/           # Unit, integration, e2e, and load tests
 
 ## What Belongs in Enterprise Edition
 
-The following features are maintained in the Enterprise Edition and should not be added to the Community Edition (`mailyte-mail-server-community`):
+The following features are maintained in the private Enterprise Edition and should not be added to the Community Edition:
 
 - Analytics and reporting dashboards
 - AI/ML features (RAG, semantic search)
@@ -107,7 +122,7 @@ If you're unsure whether a feature belongs in CE or EE, open an issue to discuss
 
 ## Reporting Bugs
 
-Open a [GitHub issue](https://github.com/Techies-Africa/mailyte-email-server/issues) with:
+Open a [GitHub issue](https://github.com/Techies-Africa/mailyte-mail-server-community/issues) with:
 
 1. Steps to reproduce
 2. Expected behavior
