@@ -20,7 +20,7 @@ services:
   # reason; that divergence is removed by matching it here.
   secrets-check:
     image: python:3.11-slim
-    container_name: secrets-check
+    container_name: ${CONTAINER_PREFIX:-}secrets-check
     environment:
       # DB_ROOT_PASSWORD_FILE, not DB_ROOT_PASSWORD (phase-07 H6): validates
       # the same secrets/db_root_password file mysql itself now boots from
@@ -44,7 +44,7 @@ services:
   # Redis Service - Caching, rate limiting, queues, Rspamd backend
   redis:
     image: redis:7-alpine
-    container_name: redis
+    container_name: ${CONTAINER_PREFIX:-}redis
     command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru ${REDIS_PASSWORD:+--requirepass ${REDIS_PASSWORD}}
     volumes:
       - redis_data:/data
@@ -73,7 +73,7 @@ services:
     # (host passthrough, or any modern Intel/AMD baseline) this pin can be
     # dropped -- that's a hypervisor-level fix, not an application one.
     image: mysql:8.0.35
-    container_name: mysql
+    container_name: ${CONTAINER_PREFIX:-}mysql
     depends_on:
       secrets-check:
         condition: service_completed_successfully
@@ -140,7 +140,7 @@ services:
     build:
       context: .
       dockerfile: ./worker/api/Dockerfile.migrate
-    container_name: migrate
+    container_name: ${CONTAINER_PREFIX:-}migrate
     environment:
       - DB_HOST=mysql
       - DB_PORT=3306
@@ -167,7 +167,7 @@ services:
   # else in the stack can reach it even if it wanted to.
   docker-proxy:
     image: tecnativa/docker-socket-proxy:latest
-    container_name: docker-proxy
+    container_name: ${CONTAINER_PREFIX:-}docker-proxy
     # Upstream's own docs say --privileged is only needed under
     # SELinux/AppArmor enforcement that would otherwise lock a bind-mounted
     # socket. H1 (security-model.md) explicitly rules out `privileged: true`
@@ -192,7 +192,7 @@ services:
   # Mailer Services
   postfix:
      build: ./mailer/postfix
-     container_name: postfix
+     container_name: ${CONTAINER_PREFIX:-}postfix
      hostname: ${HOSTNAME:-mail.example.com}
      environment:
        - HOSTNAME=${HOSTNAME:-mail.example.com}
@@ -288,7 +288,7 @@ services:
   # # Manages mailbox storage and quota enforcement
   dovecot:
      build: ./mailer/dovecot
-     container_name: dovecot
+     container_name: ${CONTAINER_PREFIX:-}dovecot
      ports:
        - "143:143"
        - "993:993"
@@ -350,7 +350,7 @@ services:
   # # Virus scanning and content filtering
   rspamd:
      build: ./mailer/rspamd
-     container_name: rspamd
+     container_name: ${CONTAINER_PREFIX:-}rspamd
      ports:
        - "11332:11332"
        - "11334:11334"
@@ -421,7 +421,7 @@ services:
 
   cert_manager:
      build: ./mailer/cert_manager
-     container_name: cert_manager
+     container_name: ${CONTAINER_PREFIX:-}cert_manager
      # No port 80 binding -- Traefik (docker-compose.prod.yml) owns port 80
      # permanently as the reverse proxy, and only one process can bind it.
      # ACME challenges now go through --webroot (see cert_manager.py), with
@@ -516,7 +516,7 @@ services:
 
   api:
      build: ./worker/api
-     container_name: api
+     container_name: ${CONTAINER_PREFIX:-}api
      ports:
        - "8083:8080"
      environment:
@@ -674,7 +674,7 @@ services:
   # # Supports multiple webhook endpoints with authentication
   webhooks:
      build: ./worker/webhooks
-     container_name: webhooks
+     container_name: ${CONTAINER_PREFIX:-}webhooks
      ports:
        - "8081:8081"
      # Task 7.0: host.docker.internal did not resolve on this custom bridge
@@ -733,7 +733,7 @@ services:
     build:
       context: .
       dockerfile: ./worker/rate_limiter/Dockerfile
-    container_name: rate_limiter
+    container_name: ${CONTAINER_PREFIX:-}rate_limiter
     ports:
       - "8082:8082"
     environment:
@@ -796,7 +796,7 @@ services:
      build:
        context: .
        dockerfile: ./worker/tracking/Dockerfile
-     container_name: tracking
+     container_name: ${CONTAINER_PREFIX:-}tracking
      ports:
        - "8086:8086"
      # Task 7.0: see the identical extra_hosts note on the `webhooks` service.
@@ -854,7 +854,7 @@ services:
      build:
        context: .
        dockerfile: ./worker/analytics/Dockerfile
-     container_name: analytics
+     container_name: ${CONTAINER_PREFIX:-}analytics
      ports:
        - "8087:8085"
      environment:
@@ -908,7 +908,7 @@ services:
      build:
        context: .
        dockerfile: ./mailer/log_ingestor/Dockerfile
-     container_name: log_ingestor
+     container_name: ${CONTAINER_PREFIX:-}log_ingestor
      environment:
        - DB_HOST=mysql
        - DB_PORT=3306
@@ -950,7 +950,7 @@ services:
 
   templates:
      build: ./worker/templates
-     container_name: templates
+     container_name: ${CONTAINER_PREFIX:-}templates
      ports:
        - "8095:8089"
      environment:
@@ -983,7 +983,7 @@ services:
      build:
        context: .
        dockerfile: ./worker/autoconfig/Dockerfile
-     container_name: autoconfig
+     container_name: ${CONTAINER_PREFIX:-}autoconfig
      ports:
        - "8100:8100"
      environment:
@@ -1013,7 +1013,7 @@ services:
 
   docs:
     build: ./docs
-    container_name: docs
+    container_name: ${CONTAINER_PREFIX:-}docs
     ports:
       - "${DOCS_PORT:-8000}:80"
     environment:
@@ -1098,7 +1098,7 @@ services:
   # ==========================================================================
   webmail:
     image: ghcr.io/techies-africa/mailyte-webmail:${WEBMAIL_VERSION:-latest}
-    container_name: webmail
+    container_name: ${CONTAINER_PREFIX:-}webmail
     restart: unless-stopped
     # REMOVE THIS LINE once ghcr.io/techies-africa/mailyte-webmail is published
     # (the release workflow in that repo publishes it on a v* tag). Until then
@@ -1156,7 +1156,7 @@ services:
 
   console:
     image: ghcr.io/techies-africa/mailyte-console:${CONSOLE_VERSION:-latest}
-    container_name: console
+    container_name: ${CONTAINER_PREFIX:-}console
     # REMOVE THIS LINE once ghcr.io/techies-africa/mailyte-console is published (the release workflow
     # in the console repo publishes it on a v* tag). Until then an un-gated
     # service makes `docker compose up` fail for the entire stack on a pull
@@ -1217,7 +1217,7 @@ services:
   # Roundcube — lightweight PHP webmail
   roundcube:
      image: roundcube/roundcubemail:latest
-     container_name: roundcube
+     container_name: ${CONTAINER_PREFIX:-}roundcube
      profiles: ["roundcube"]
      ports:
        - "${ROUNDCUBE_PORT:-8880}:80"
@@ -1259,7 +1259,7 @@ services:
   # SOGo — full groupware (webmail + calendar + contacts + ActiveSync)
   sogo:
      image: ghcr.io/inverse-inc/sogo:latest
-     container_name: sogo
+     container_name: ${CONTAINER_PREFIX:-}sogo
      profiles: ["sogo"]
      ports:
        - "${SOGO_PORT:-8881}:80"

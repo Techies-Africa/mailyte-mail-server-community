@@ -70,7 +70,7 @@ MYSQL_DATABASE="${DB_NAME:-mailyte_mail}"
 # Matches backup.sh's default -- this script runs on the host, where
 # neither the "mysql" client binary nor the "mysql" service hostname is
 # reachable; the container name IS resolvable via the Docker socket.
-MYSQL_CONTAINER="${MYSQL_CONTAINER:-mysql}"
+MYSQL_CONTAINER="${MYSQL_CONTAINER:-${CONTAINER_PREFIX:-}mysql}"
 REDIS_HOST="${REDIS_HOST:-redis}"
 REDIS_PORT="${REDIS_PORT:-6379}"
 MAIL_DATA_DIR="${MAIL_DATA_DIR:-/var/mail/vhosts}"

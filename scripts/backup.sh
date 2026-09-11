@@ -59,7 +59,7 @@ MYSQL_PASSWORD="${DB_PASSWORD:-}"
 MYSQL_DATABASE="${DB_NAME:-mailyte_mail}"
 # Container name (docker-compose.yml: container_name: mysql), used to exec
 # mysqldump/mysqlbinlog inside the container -- see backup_mysql_full.
-MYSQL_CONTAINER="${MYSQL_CONTAINER:-mysql}"
+MYSQL_CONTAINER="${MYSQL_CONTAINER:-${CONTAINER_PREFIX:-}mysql}"
 REDIS_HOST="${REDIS_HOST:-redis}"
 REDIS_PORT="${REDIS_PORT:-6379}"
 MAIL_DATA_DIR="${MAIL_DATA_DIR:-/var/mail/vhosts}"
