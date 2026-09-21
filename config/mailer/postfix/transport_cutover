@@ -3,7 +3,7 @@
 # Every domain here exists in this server's virtual_mailbox_domains (it was
 # created during the mailcow migration), which normally means "deliver
 # locally". But their public MX still points at the old server -- or, for
-# peekride.com and customer-12.example, at Microsoft 365 and Zoho. Delivering locally
+# customer-12.example, at Zoho. Delivering locally
 # would drop the mail into this server's copy of the mailbox, which nobody
 # reads, while the real mailbox never receives it. That is exactly what
 # happened to mail sent from the webmail to techies.africa.
@@ -48,5 +48,19 @@
 # customer-07.example, mailyte.com, customer-09.example, customer-10.example, customer-11.example,
 # techies.africa, customer-13.example
 
-peekride.com	smtp:
-customer-12.example	smtp:
+# 2026-09-21: customer-12.example removed, and this file now carries no entries.
+#
+# TWO reasons, and the first is a live bug rather than tidying. customer-12.example's MX
+# is now mail.mailyte.com -- it has been cut over -- so the line meant "relay
+# this domain's mail to its MX", which is THIS server. That is a loop, and it
+# is the exact shape of the 2026-08 incident recorded above: thirteen domains,
+# 167 messages, five days, everything reporting healthy throughout.
+#
+# Second: this is the community repository. A paying customer's domain has no
+# business in open-source configuration, whatever it says. The documentation
+# above is worth keeping for any operator doing a migration; the customer names
+# are not.
+#
+# The file stays, empty. main.cf points transport_maps here, and a missing
+# transport_maps file makes Postfix reject EVERY sender with
+# "451 4.3.0 Temporary lookup failure".

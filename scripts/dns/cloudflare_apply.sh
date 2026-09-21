@@ -29,7 +29,7 @@
 # --- Scope is deliberate, not "every zone on the token" ---------------------
 #
 #   * Only domains that actually have mailboxes on the new mail server.
-#     peekride.com (Outlook) and customer-12.example (Zoho) have ZERO mailboxes; their
+#     customer-12.example (Zoho) has ZERO mailboxes; its
 #     mail is not ours and changing their MX would break it.
 #   * Only domains that currently resolve. customer-15.example and customer-16.example
 #     return SERVFAIL; a record written into a broken zone changes nothing.
